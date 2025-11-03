@@ -1,8 +1,6 @@
-
 from dbt.adapters.sql import SQLAdapter as adapter_cls
 
 from dbt.adapters.confluentcloud import ConfluentCloudConnectionManager
-
 
 
 class ConfluentCloudAdapter(adapter_cls):
@@ -19,4 +17,5 @@ class ConfluentCloudAdapter(adapter_cls):
         """
         return "datenow()"
 
- # may require more build out to make more user friendly to confer with team and community.
+
+# may require more build out to make more user friendly to confer with team and community.

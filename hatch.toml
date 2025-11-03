@@ -1,0 +1,20 @@
+[version]
+path = "src/dbt/adapters/confluentcloud/__version__.py"
+
+[build.targets.wheel]
+packages = ["src/dbt/adapters", "src/dbt/include"]
+sources = ["src"]
+
+[envs.default]
+pre-install-commands = [
+  "pip inspall -e ../dbt-adapters",
+  "pip install -e ../dbt-tests-adapter"
+]
+dependencies = [
+  "dbt-common @ git+https://github.com/dbt-labs/dbt-common.git",
+  "dbt-core @ git+https://github.com/dbt-labs/dbt-core.git#subdirectory=core",
+  "pytest~=7.0",
+]
+[envs.default.scripts]
+unit-tests = "python -m pytest {args:tests/unit}"
+integration-tests = "python -m pytest {args:tests/functional}"

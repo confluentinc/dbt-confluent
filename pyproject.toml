@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+dynamic = ["version"]
+name = "dbt-confluentcloud"
+description = "The Confluent Cloud adapter plugin for DBT"
+reasme="README.md"
+keywords = ["dbt", "adapter", "confluent", "cloud"]
+requires-python = ">=3.10.0"
+authors = [
+  { name = "Confluent", email = "dev@confluent.io" },
+]
+maintainers = [
+  { name = "Confluent", email = "dev@confluent.io" },
+]
+classifiers = [
+  "Development Status :: 1 - Planning",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS :: MacOS X",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+  "confluent-sql",
+  "dbt-core~=1.7.0",
+  "dbt-common~=1.0.4",
+  "dbt-adapters~=1.7.0",
+  "agate~=1.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/confluentinc/dbt-confluent-cloud"
+Repository = "https://github.com/confluentinc/dbt-confluent-cloud"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/functional"]
+addopts = "-v --color=yes -n auto"
+env_files = ["test.env"]
