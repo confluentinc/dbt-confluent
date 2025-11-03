@@ -26,9 +26,10 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-  "confluent-sql",
+  # "confluent-sql",
+  "confluent-sql @ file://{root:parent}/confluent-sql/",
   "dbt-core~=1.7.0",
-  "dbt-common~=1.0.4",
+  "dbt-common~=1.12.0",
   "dbt-adapters~=1.7.0",
   "agate~=1.0"
 ]
@@ -41,3 +42,6 @@ Repository = "https://github.com/confluentinc/dbt-confluent-cloud"
 testpaths = ["tests/unit", "tests/functional"]
 addopts = "-v --color=yes -n auto"
 env_files = ["test.env"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
