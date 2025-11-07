@@ -1,11 +1,15 @@
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
-import dbt.common.exceptions  # noqa
+
+import confluent_sql
+from dbt.adapters.sql import SQLConnectionManager
 from dbt.adapters.base import Credentials
 
-from dbt.adapters.sql import SQLConnectionManager as connection_cls
+import dbt
 
-from dbt.logger import GLOBAL_LOGGER as logger
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -16,12 +20,16 @@ class ConfluentCloudCredentials(Credentials):
     """
 
     # Add credentials members here, like:
-    # host: str
-    # port: int
-    # username: str
-    # password: str
+    host: str
+    cloud_provider: str
+    cloud_region: str
+    compute_pool_id: str
+    organization_id: str
+    environment_id: str
+    flink_api_key: str
+    flink_api_secret: str
 
-    _ALIASES = {"dbname": "database", "pass": "password", "user": "username"}
+    _ALIASES = {}
 
     @property
     def type(self):
@@ -40,10 +48,17 @@ class ConfluentCloudCredentials(Credentials):
         """
         List of keys to display in the `dbt debug` output.
         """
-        return ("host", "port", "username", "user")
+        return (
+            "host",
+            "cloud_provider",
+            "cloud_region",
+            "computer_pool_id",
+            "organization_id",
+            "environment_id",
+        )
 
 
-class ConfluentCloudConnectionManager(connection_cls):
+class ConfluentCloudConnectionManager(SQLConnectionManager):
     TYPE = "confluentcloud"
 
     @contextmanager
@@ -52,20 +67,14 @@ class ConfluentCloudConnectionManager(connection_cls):
         Returns a context manager, that will handle exceptions raised
         from queries, catch, log, and raise dbt exceptions it knows how to handle.
         """
-        # ## Example ##
-        # try:
-        #     yield
-        # except myadapter_library.DatabaseError as exc:
-        #     self.release(connection_name)
-
-        #     logger.debug("myadapter error: {}".format(str(e)))
-        #     raise dbt.exceptions.DatabaseException(str(exc))
-        # except Exception as exc:
-        #     logger.debug("Error running SQL: {}".format(sql))
-        #     logger.debug("Rolling back transaction.")
-        #     self.release(connection_name)
-        #     raise dbt.exceptions.RuntimeException(str(exc))
-        pass
+        try:
+            yield
+        except confluent_sql.Error as e:
+            logger.debug(f"confluent_sql error: {e}")
+            raise dbt.exceptions.DbtDatabaseError(str(e))
+        except Exception as e:
+            logger.debug(f"Error running SQL: {sql}")
+            raise dbt.exceptions.DbtRuntimeError(str(e))
 
     @classmethod
     def open(cls, connection):
@@ -73,25 +82,30 @@ class ConfluentCloudConnectionManager(connection_cls):
         Receives a connection object and a Credentials object
         and moves it to the "open" state.
         """
-        # ## Example ##
-        # if connection.state == "open":
-        #     logger.debug("Connection is already open, skipping open.")
-        #     return connection
+        if connection.state == "open":
+            logger.debug("Connection is already open, skipping open.")
+            return connection
 
-        # credentials = connection.credentials
+        credentials = connection.credentials
 
-        # try:
-        #     handle = myadapter_library.connect(
-        #         host=credentials.host,
-        #         port=credentials.port,
-        #         username=credentials.username,
-        #         password=credentials.password,
-        #         catalog=credentials.database
-        #     )
-        #     connection.state = "open"
-        #     connection.handle = handle
-        # return connection
-        pass
+        try:
+            handle = confluent_sql.connect(
+                flink_api_key=credentials.flink_api_key,
+                flink_api_secret=credentials.flink_api_secret,
+                environment=credentials.environment_id,
+                compute_pool_id=credentials.compute_pool_id,
+                organization_id=credentials.organization_id,
+                cloud_provider=credentials.cloud_provider,
+                cloud_region=credentials.cloud_region,
+                dbname=credentials.database,
+            )
+            connection.state = "open"
+            connection.handle = handle
+            return connection
+        except Exception as e:
+            connection.state = "fail"
+            connection.handle = None
+            raise dbt.exceptions.FailedToConnectError(f"{e}")
 
     @classmethod
     def get_response(cls, cursor):
@@ -101,19 +115,19 @@ class ConfluentCloudConnectionManager(connection_cls):
         that has items such as code, rows_affected,etc. can also just be a string ex. "OK"
         if your cursor does not offer rich metadata.
         """
-        # ## Example ##
-        # return cursor.status_message
-        pass
+        assert cursor._statement is not None, "Cursor has no active statement"
+        return cursor._statement.phase
 
     def cancel(self, connection):
         """
         Gets a connection object and attempts to cancel any ongoing queries.
         """
-        # ## Example ##
-        # tid = connection.handle.transaction_id()
-        # sql = "select cancel_transaction({})".format(tid)
-        # logger.debug("Cancelling query "{}" ({})".format(connection_name, pid))
-        # _, cursor = self.add_query(sql, "master")
-        # res = cursor.fetchone()
-        # logger.debug("Canceled query "{}": {}".format(connection_name, res))
+        connection.close()
+
+    def commit(self):
+        # Confluent cloud SQL does not support transactions, so commit is a noop here.
+        pass
+
+    def begin(self):
+        # Confluent cloud SQL does not support transactions, so begin is a noop here.
         pass

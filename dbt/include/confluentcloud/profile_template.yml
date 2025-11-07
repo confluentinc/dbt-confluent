@@ -3,16 +3,23 @@ fixed:
 prompts:
   host:
     hint: "your host name"
-  port:
-    default: 5432
-    type: "int"
-  user:
-    hint: "dev username"
-  password:
-    hint: "dev password"
+  cloud_provider:
+    hint: "eg: 'AWS'"
+  cloud_region:
+    hint: "eg: us-west-1"
+  compute_pool_id:
+    hint: "eg: lfc-asdasd"
+  organization_id:
+    hint: "eg: org-asda"
+  environment_id:
+    hint: "eg: env-asda"
+  flink_api_key:
+    hint: "flink api key"
+  flink_api_secret:
+    hint: "flink api secret"
     hide_input: true
-  dbname:
-    hint: "default database"
+  database:
+    hint: "default database name"
   threads:
     hint: "1 or more"
     type: "int"

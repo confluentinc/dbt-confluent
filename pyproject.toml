@@ -31,7 +31,10 @@ dependencies = [
   "dbt-core~=1.7.0",
   "dbt-common~=1.12.0",
   "dbt-adapters~=1.7.0",
-  "agate~=1.0"
+  "agate~=1.0",
+  "pytest>=8.4.2",
+  "pytest-dotenv>=0.5.2",
+  "dbt-tests-adapter>=1.7.19",
 ]
 
 [project.urls]
