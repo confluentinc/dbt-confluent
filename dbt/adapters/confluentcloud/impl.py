@@ -17,6 +17,10 @@ class ConfluentCloudAdapter(SQLAdapter):
         """
         return "datenow()"
 
+    @classmethod
+    def quote(cls, identifier):
+        return f"'{identifier}'"
+
     def list_schemas(self, database: str) -> list[str]:
         return ["dbt_adapter"]
 
@@ -57,4 +61,5 @@ class ConfluentCloudAdapter(SQLAdapter):
                     type=_type,
                 )
             )
+        breakpoint()
         return relations

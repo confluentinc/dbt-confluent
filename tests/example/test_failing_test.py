@@ -68,7 +68,7 @@ class TestExample:
         An alternative pattern is to use pytest "xfail" (see below)
         """
 
-        caplog.set_level("DEBUG")
+        caplog.set_level("INFO")
         # seed seeds
         results = run_dbt(["seed"])
         assert len(results) == 1
