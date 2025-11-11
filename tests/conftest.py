@@ -12,7 +12,6 @@ pytest_plugins = ["dbt.tests.fixtures.project"]
 # The profile dictionary, used to write out profiles.yml
 @pytest.fixture(scope="class")
 def dbt_profile_target():
-
     flink_api_key = os.getenv("CONFLUENT_FLINK_API_KEY")
     flink_api_secret = os.getenv("CONFLUENT_FLINK_API_SECRET")
     environment = os.getenv("CONFLUENT_ENV_ID")
@@ -30,8 +29,9 @@ def dbt_profile_target():
         "cloud_region": cloud_region,
         "compute_pool_id": compute_pool_id,
         "organization_id": organization_id,
-        "environment_id": environment,
         "flink_api_key": flink_api_key,
         "flink_api_secret": flink_api_secret,
-        "database": dbname
+        "database": environment,
+        "schema": dbname,
+        "test_schema": dbname,
     }

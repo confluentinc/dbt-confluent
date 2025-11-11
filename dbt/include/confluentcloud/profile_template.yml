@@ -18,7 +18,7 @@ prompts:
   flink_api_secret:
     hint: "flink api secret"
     hide_input: true
-  database:
+  dbname:
     hint: "default database name"
   threads:
     hint: "1 or more"

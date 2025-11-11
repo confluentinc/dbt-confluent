@@ -1,3 +1,4 @@
+import os
 import pytest
 from dbt.tests.util import run_dbt
 
@@ -40,10 +41,24 @@ class TestExample:
        These define sequences of dbt commands and 'assert' statements.
     """
 
+
+    @pytest.fixture(scope="class")
+    def unique_schema(self, request, prefix):
+        """
+        Overrides the dbt-tests `schema` fixture.
+        We don't want a unique schema, we want to use
+        our pre-configured 'dbt_adapter' schema.
+        """
+        return "dbt_adapter"
+
     # configuration in dbt_project.yml
     @pytest.fixture(scope="class")
     def project_config_update(self):
-        return {"name": "example", "models": {"+materialized": "view"}}
+        return {
+            "name": "example",
+            "models": {"+materialized": "view"},
+            "seeds": {"full_refresh": True},
+        }
 
     # everything that goes in the "seeds" directory
     @pytest.fixture(scope="class")
@@ -67,10 +82,9 @@ class TestExample:
         Seed, then run, then test. We expect one of the tests to fail
         An alternative pattern is to use pytest "xfail" (see below)
         """
-
         caplog.set_level("INFO")
         # seed seeds
-        results = run_dbt(["seed"])
+        results = run_dbt(["seed", "--full-refresh"])
         assert len(results) == 1
         # run models
         results = run_dbt(["run"])

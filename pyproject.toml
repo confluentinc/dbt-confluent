@@ -28,13 +28,13 @@ classifiers = [
 dependencies = [
   # "confluent-sql",
   "confluent-sql @ file://{root:parent}/confluent-sql/",
-  "dbt-core~=1.7.0",
-  "dbt-common~=1.12.0",
-  "dbt-adapters~=1.7.0",
+  "dbt-core~=1.10",
+  "dbt-common~=1.12",
+  "dbt-adapters~=1.16",
   "agate~=1.0",
   "pytest>=8.4.2",
   "pytest-dotenv>=0.5.2",
-  "dbt-tests-adapter>=1.7.19",
+  "dbt-tests-adapter>=1.10",
 ]
 
 [project.urls]
