@@ -28,14 +28,15 @@
 {% endmacro %}
 
 {% macro confluentcloud__check_schema_exists(information_schema,schema) -%}
-  {{ exceptions.raise_compiler_error("CIAONE") }}
+  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__check_schema_exists: " ~ schema, info=True) }}
 {% endmacro %}
 
 {% macro confluentcloud__create_schema(relation) -%}
-  {{ log("!!! EXECUTING confluentcloud__create_schema: " ~ relation, info=True) }}
+  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__create_schema: " ~ relation.schema, info=True) }}
 {% endmacro %}
 
 {% macro confluentcloud__alter_column_type(relation,column_name,new_column_type) -%}
+  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__alter_column_type: " ~ relation, info=True) }}
 {% endmacro %}
 
 {% macro confluentcloud__drop_relation(relation) -%}
@@ -44,13 +45,15 @@
 {% endmacro %}
 
 {% macro confluentcloud__drop_schema(relation) -%}
-  {{ log("!!! EXECUTING confluentcloud__create_schema: " ~ relation, info=True) }}
+  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__drop_schema: " ~ relation, info=True) }}
 {% endmacro %}
 
 {% macro confluentcloud__get_columns_in_relation(relation) -%}
+  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__get_columns_is_relation: " ~ relation, info=True) }}
 {% endmacro %}
 
 {% macro confluentcloud__list_relations_without_caching(schema_relation) -%}
+  {{ log("!!! EXECUTING confluentcloud__list_relations_without_caching: " ~ schema_relation.schema, info=True) }}
   {% call statement('list_relations_without_caching', fetch_result=True) -%}
     SELECT
       TABLE_CATALOG_ID as database,
@@ -65,10 +68,12 @@
       AND TABLE_SCHEMA = '{{ schema_relation.schema }}'
   {% endcall %}
 
+  {{ log("!!! RESULT confluentcloud__list_relations_without_caching: " ~ schema_relation, info=True) }}
   {{ return(load_result('list_relations_without_caching').table) }}
 {% endmacro %}
 
 {% macro confluentcloud__list_schemas(database) -%}
+  {{ log("!!! EXECUTING confluentcloud__list_schemas: " ~ database, info=True) }}
   {% call statement('list_schemas', fetch_result=True) -%}
     SELECT
       TABLE_SCHEMA as schema
@@ -83,13 +88,15 @@
 {% endmacro %}
 
 {% macro confluentcloud__rename_relation(from_relation, to_relation) -%}
+  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__rename_relation", info=True) }}
 {% endmacro %}
 
 {% macro confluentcloud__truncate_relation(relation) -%}
+  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__truncate_relation", info=True) }}
 {% endmacro %}
 
 {% macro confluentcloud__current_timestamp() -%}
-{# docs show not to be implemented currently. #}
+  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__current_timestamp", info=True) }}
 {% endmacro %}
 
 {% macro default__load_csv_rows(model, agate_table) -%}

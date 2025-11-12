@@ -1,19 +1,19 @@
 import logging
 import time
-from typing import Optional, Any
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Optional, Any
 
 import confluent_sql
-from dbt.adapters.sql import SQLConnectionManager
+import dbt_common
 from dbt.adapters.contracts.connection import Credentials, Connection
-from dbt_common.events.functions import fire_event
 from dbt.adapters.events.types import ConnectionUsed, SQLQuery, SQLQueryStatus
+from dbt.adapters.sql import SQLConnectionManager
 from dbt_common.events.contextvars import get_node_info
+from dbt_common.events.functions import fire_event
 from dbt_common.utils import cast_to_str
 
 import dbt
-import dbt_common
 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class ConfluentCloudConnectionManager(SQLConnectionManager):
             raise dbt_common.exceptions.DbtDatabaseError(str(e))
         except Exception as e:
             logger.debug(f"Error running SQL: {sql}")
-            raise dbt.exceptions.DbtRuntimeError(str(e))
+            raise dbt_common.exceptions.DbtRuntimeError(str(e))
 
     @classmethod
     def open(cls, connection):
@@ -86,7 +86,6 @@ class ConfluentCloudConnectionManager(SQLConnectionManager):
             return connection
 
         credentials = connection.credentials
-        # print(credentials)
 
         try:
             handle = confluent_sql.connect(
@@ -105,7 +104,7 @@ class ConfluentCloudConnectionManager(SQLConnectionManager):
         except Exception as e:
             connection.state = "fail"
             connection.handle = None
-            raise dbt.exceptions.FailedToConnectError(f"{e}")
+            raise dbt_common.exceptions.ConnectionError(f"{e}")
 
     @classmethod
     def get_response(cls, cursor):
@@ -164,7 +163,6 @@ class ConfluentCloudConnectionManager(SQLConnectionManager):
             pre = time.time()
 
             cursor = connection.handle.cursor()
-            # breakpoint()
             cursor.execute(sql, bindings)
 
             fire_event(

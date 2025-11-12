@@ -1,5 +1,5 @@
 name: dbt_confluentcloud
-version: 1.7.0
+version: 1.10.0
 config-version: 2
 
 macro-paths: ["macros"]

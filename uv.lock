@@ -278,9 +278,9 @@ dependencies = [
 requires-dist = [
     { name = "agate", specifier = "~=1.0" },
     { name = "confluent-sql", directory = "../confluent-sql" },
-    { name = "dbt-adapters", specifier = "~=1.10" },
+    { name = "dbt-adapters", specifier = "~=1.16" },
     { name = "dbt-common", specifier = "~=1.12" },
-    { name = "dbt-core", specifier = "~=1.10.0" },
+    { name = "dbt-core", specifier = "~=1.10" },
     { name = "dbt-tests-adapter", specifier = ">=1.10" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-dotenv", specifier = ">=0.5.2" },

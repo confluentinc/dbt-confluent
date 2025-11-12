@@ -53,11 +53,22 @@ class TestExample:
 
     # configuration in dbt_project.yml
     @pytest.fixture(scope="class")
-    def project_config_update(self):
+    def project_config_update(self, unique_schema):
+        # return {
+        #     "name": "example",
+        #     "models": {"+materialized": "view"},
+        #     # "seeds": {"full_refresh": True},
+        # }
+
         return {
             "name": "example",
-            "models": {"+materialized": "view"},
-            "seeds": {"full_refresh": True},
+            "models": {
+                "+materialized": "view",
+                "+schema": unique_schema,  # <-- 2. Apply the schema to models
+            },
+            "seeds": {
+                "+schema": unique_schema,  # <-- 2. Apply the schema to seeds
+            },
         }
 
     # everything that goes in the "seeds" directory
@@ -84,9 +95,11 @@ class TestExample:
         """
         caplog.set_level("INFO")
         # seed seeds
-        results = run_dbt(["seed", "--full-refresh"])
+        print("RUNNING SEED")
+        results = run_dbt(["seed"])
         assert len(results) == 1
         # run models
+        print("RUNNING RUN")
         results = run_dbt(["run"])
         assert len(results) == 1
         # test tests

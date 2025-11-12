@@ -2,11 +2,11 @@ from dataclasses import dataclass, field
 
 import agate
 from dbt.adapters.base import BaseRelation
-from dbt.adapters.sql import SQLAdapter
 from dbt.adapters.contracts.relation import Policy
+from dbt.adapters.sql import SQLAdapter
 from dbt_common.events.contextvars import get_node_info
-import dbt
 
+import dbt
 from dbt.adapters.confluentcloud import ConfluentCloudConnectionManager
 
 
@@ -43,7 +43,6 @@ class ConfluentCloudAdapter(SQLAdapter):
 
     def check_schema_exists(self, database: str, schema: str) -> bool:
         results = self.execute_macro("list_schemas", kwargs={"database": database})
-
         exists = True if schema in [row[0] for row in results] else False
         return exists
 
@@ -84,26 +83,6 @@ class ConfluentCloudAdapter(SQLAdapter):
         # Remove duplicates here since we can't use a DISTINCT on INFORMATION_SCHEMA
         return list(set(res))
 
-    # def list_schemas(self, database: str) -> List[str]:
-    #     results = self.execute_macro(LIST_SCHEMAS_MACRO_NAME, kwargs={"database": database})
-
-    #     return [row[0] for row in results]
-
-    # def create_schema(self, relation: ConfluentCloudConnectionManager) -> None:
-    #     breakpoint()
-    #     # TODO: Should we create a schema, or just check that it exists?
-    #     pass
-    #     # Superclass implementation:
-    #     # relation = relation.without_identifier()
-    #     # fire_event(SchemaCreation(relation=_make_ref_key_dict(relation)))
-    #     # kwargs = {
-    #     #     "relation": relation,
-    #     # }
-    #     # self.execute_macro(CREATE_SCHEMA_MACRO_NAME, kwargs=kwargs)
-    #     # self.commit_if_has_connection()
-    #     # # we can't update the cache here, as if the schema already existed we
-    #     # # don't want to (incorrectly) say that it's empty
-
     def list_relations(self, database, schema):
         return super().list_relations(database, schema)
 
@@ -111,8 +90,11 @@ class ConfluentCloudAdapter(SQLAdapter):
         self,
         schema_relation: ConfluentCloudRelation,
     ) -> list[BaseRelation]:
+        # breakpoint()
         kwargs = {"schema_relation": schema_relation}
+        print(kwargs)
         results = self.execute_macro("list_relations_without_caching", kwargs=kwargs)
+        print("RELATIONS:", results)
 
         relations = []
         quote_policy = {"database": True, "schema": True, "identifier": True}
