@@ -41,7 +41,19 @@
 
 {% macro confluentcloud__drop_relation(relation) -%}
   {{ log("!!! EXECUTING confluentcloud__drop_relation: " ~ relation, info=True) }}
-  DROP TABLE IF EXISTS {{ relation }}
+  {% if relation.is_table -%}
+    {% call statement('drop_relation', fetch_result=False) -%}
+      {{ log("!!! EXECUTING DROP TABLE for" ~ relation, info=True) }}
+      DROP TABLE {{ relation }}
+    {% endcall %}
+  {%- elif relation.is_view -%}
+    {% call statement('drop_relation', fetch_result=False) -%}
+      {{ log("!!! EXECUTING DROP VIEW for" ~ relation, info=True) }}
+      DROP VIEW {{ relation }}
+    {% endcall %}
+  {%- else -%}
+    {{ log("confluentcloud__drop_relation: drop not implemented for realtion: " ~ relation, info=True) }}
+  {%- endif -%}
 {% endmacro %}
 
 {% macro confluentcloud__drop_schema(relation) -%}
@@ -57,14 +69,13 @@
   {% call statement('list_relations_without_caching', fetch_result=True) -%}
     SELECT
       TABLE_CATALOG_ID as database,
-      TABLE_SCHEMA as schema,
       TABLE_NAME as name,
+      TABLE_SCHEMA as schema,
       TABLE_TYPE as type
     FROM
       INFORMATION_SCHEMA.`TABLES`
     WHERE
       TABLE_CATALOG_ID = '{{ schema_relation.database }}'
-      AND TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
       AND TABLE_SCHEMA = '{{ schema_relation.schema }}'
   {% endcall %}
 
@@ -88,7 +99,19 @@
 {% endmacro %}
 
 {% macro confluentcloud__rename_relation(from_relation, to_relation) -%}
-  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__rename_relation", info=True) }}
+  {{ log("!!! EXECUTING confluentcloud__rename_relation", info=True) }}
+  {% if from_relation.is_table -%}
+    {% call statement('rename_relation', fetch_result=False) -%}
+      ALTER TABLE {{ from_relation }} RENAME TO {{ to_relation }}
+    {% endcall %}
+  {%- elif from_relation.is_view -%}
+      SHOW CREATE VIEW {{ from_relation }}
+    {% call statement('rename_relation', fetch_result=False) -%}
+      ALTER VIEW {{ from_relation }} RENAME TO {{ to_relation }}
+    {% endcall %}
+  {%- else -%}
+    {{ log("!!! ERROR: confluentcloud__rename_relation: rename not implemented for realtion: " ~ relation, info=True) }}
+  {%- endif -%}
 {% endmacro %}
 
 {% macro confluentcloud__truncate_relation(relation) -%}
@@ -99,73 +122,42 @@
   {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__current_timestamp", info=True) }}
 {% endmacro %}
 
-{% macro default__load_csv_rows(model, agate_table) -%}
-  {# HERE FOR REFERENCE, REMOVE LATER #}
-  {% set batch_size = get_batch_size() %}
-  {% set cols_sql = get_seed_column_quoted_csv(model, agate_table.column_names) %}
-  {% set bindings = [] %}
-  {% set statements = [] %}
-
-  {% for chunk in agate_table.rows | batch(batch_size) %}
-      {% set bindings = [] %}
-
-      {% for row in chunk %}
-          {% do bindings.extend(row) %}
-      {% endfor %}
-
-      {% set sql %}
-          insert into {{ this.render() }} ({{ cols_sql }}) values
-          {% for row in chunk -%}
-              ({%- for column in agate_table.column_names -%}
-                  {{ get_binding_char() }}
-                  {%- if not loop.last%},{%- endif %}
-              {%- endfor -%})
-              {%- if not loop.last%},{%- endif %}
-          {%- endfor %}
-      {% endset %}
-
-      {% do adapter.add_query(sql, bindings=bindings, abridge_sql_log=True) %}
-
-      {% if loop.index0 == 0 %}
-          {% do statements.append(sql) %}
-      {% endif %}
-  {% endfor %}
-
-  {# Return SQL so we can render it out into the compiled files #}
-  {{ return(statements[0]) }}
-{% endmacro %}
-
 {% macro confluentcloud__load_csv_rows(model, agate_table) -%}
   {% set batch_size = get_batch_size() %}
   {% set cols_sql = get_seed_column_quoted_csv(model, agate_table.column_names) %}
-  {% set bindings = [] %}
   {% set statements = [] %}
 
   {% for chunk in agate_table.rows | batch(batch_size) %}
-      {% set bindings = [] %}
+    {% set sql %}
+      insert into {{ this.render() }} values
+      {% for row in chunk -%}
+        ({%- for value in row -%}
+          {{ adapter.quote(value) }}
+          {%- if not loop.last%},{%- endif %}
+        {%- endfor -%})
+        {%- if not loop.last%},{%- endif %}
+      {%- endfor %}
+    {% endset %}
 
-      {% for row in chunk %}
-          {% do bindings.extend(row) %}
-      {% endfor %}
+    {% do adapter.add_query(sql, abridge_sql_log=True) %}
 
-      {% set sql %}
-          insert into {{ this.render() }} ({{ cols_sql }}) values
-          {% for row in chunk -%}
-              ({%- for column in agate_table.column_names -%}
-                  {% do adapter.string_literal(value) %}
-                  {%- if not loop.last%},{%- endif %}
-              {%- endfor -%})
-              {%- if not loop.last%},{%- endif %}
-          {%- endfor %}
-      {% endset %}
-
-      {% do adapter.add_query(sql, bindings=bindings, abridge_sql_log=True) %}
-
-      {% if loop.index0 == 0 %}
-          {% do statements.append(sql) %}
-      {% endif %}
+    {% if loop.index0 == 0 %}
+      {% do statements.append(sql) %}
+    {% endif %}
   {% endfor %}
 
   {# Return SQL so we can render it out into the compiled files #}
   {{ return(statements[0]) }}
 {% endmacro %}
+
+
+{% macro confluentcloud__get_test_sql(main_sql, fail_calc, warn_if, error_if, limit) -%}
+    select
+      {{ fail_calc }} as failures,
+      {{ fail_calc }} {{ warn_if | replace("!=", "<>") }} as should_warn,
+      {{ fail_calc }} {{ error_if | replace("!=", "<>") }} as should_error
+    from (
+      {{ main_sql }}
+      {{ "limit " ~ limit if limit != none }}
+    ) dbt_internal_test
+{%- endmacro %}

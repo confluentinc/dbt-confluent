@@ -10,13 +10,12 @@ id,name,some_date
 2,Lillian,1978-09-03T18:10:33
 3,Jeremiah,1982-03-11T03:59:51
 4,Nolan,1976-05-06T20:21:35
+4,Nolan2,1976-05-06T20:21:35
 """.lstrip()
 
 # models/my_model.sql
 my_model_sql = """
 select * from {{ ref('my_seed') }}
-union all
-select null as id, null as name, null as some_date
 """
 
 # models/my_model.yml
@@ -27,8 +26,8 @@ models:
     columns:
       - name: id
         data_tests:
-          - unique
-          - not_null  # this test will fail
+          - unique # this one will fail
+          - not_null
 """
 
 
@@ -46,28 +45,36 @@ class TestExample:
     def unique_schema(self, request, prefix):
         """
         Overrides the dbt-tests `schema` fixture.
-        We don't want a unique schema, we want to use
-        our pre-configured 'dbt_adapter' schema.
+
+        A `schema` in confluent cloud is an entire Kafka cluster.
+        Since we don't want to create a cluster ad hoc for each test run,
+        we expect it to be already present, and the name should be passed
+        as an env var. The same env var is used in the test profile fixture.
         """
-        return "dbt_adapter"
+        dbname = os.getenv("CONFLUENT_TEST_DBNAME")
+        if not dbname:
+            raise ValueError("CONFLUENT_TEST_DBNAME env var needs to be set")
+        return dbname
 
     # configuration in dbt_project.yml
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
-        # return {
-        #     "name": "example",
-        #     "models": {"+materialized": "view"},
-        #     # "seeds": {"full_refresh": True},
-        # }
-
         return {
             "name": "example",
             "models": {
                 "+materialized": "view",
-                "+schema": unique_schema,  # <-- 2. Apply the schema to models
+                # Here we need to specify the schema, or tests will
+                # receive a Relation with an empty string as default.
+                "+schema": unique_schema,
+                "+warn_if": "<>0",
+                "+error_if": "<>0"
             },
             "seeds": {
-                "+schema": unique_schema,  # <-- 2. Apply the schema to seeds
+                # Here we need to specify the schema, or tests will
+                # receive a Relation with an empty string as default.
+                "+schema": unique_schema,
+                "+warn_if": "<>0",
+                "+error_if": "<>0"
             },
         }
 
@@ -94,18 +101,12 @@ class TestExample:
         An alternative pattern is to use pytest "xfail" (see below)
         """
         caplog.set_level("INFO")
-        # seed seeds
-        print("RUNNING SEED")
         results = run_dbt(["seed"])
         assert len(results) == 1
-        # run models
-        print("RUNNING RUN")
         results = run_dbt(["run"])
         assert len(results) == 1
-        # test tests
         results = run_dbt(["test"], expect_pass=False)  # expect failing test
         assert len(results) == 2
-        # validate that the results include one pass and one failure
         result_statuses = sorted(r.status for r in results)
         assert result_statuses == ["fail", "pass"]
 
@@ -114,3 +115,4 @@ class TestExample:
     #     """Expect a failing test"""
     #     # do it all
     #     _results = run_dbt(["build"])
+    # 

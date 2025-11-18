@@ -6,7 +6,7 @@ from typing import Optional, Any
 
 import confluent_sql
 import dbt_common
-from dbt.adapters.contracts.connection import Credentials, Connection
+from dbt.adapters.contracts.connection import Credentials, Connection, AdapterResponse
 from dbt.adapters.events.types import ConnectionUsed, SQLQuery, SQLQueryStatus
 from dbt.adapters.sql import SQLConnectionManager
 from dbt_common.events.contextvars import get_node_info
@@ -115,7 +115,7 @@ class ConfluentCloudConnectionManager(SQLConnectionManager):
         if your cursor does not offer rich metadata.
         """
         assert cursor._statement is not None, "Cursor has no active statement"
-        return cursor._statement.phase
+        return AdapterResponse(f"{cursor._statement.phase}")
 
     def cancel(self, connection):
         """
