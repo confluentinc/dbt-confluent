@@ -1,19 +1,11 @@
 import logging
-import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Optional, Any
 
 import confluent_sql
-import dbt_common
-from dbt.adapters.contracts.connection import Credentials, Connection, AdapterResponse
-from dbt.adapters.events.types import ConnectionUsed, SQLQuery, SQLQueryStatus
+from dbt.adapters.contracts.connection import Credentials, AdapterResponse
 from dbt.adapters.sql import SQLConnectionManager
-from dbt_common.events.contextvars import get_node_info
-from dbt_common.events.functions import fire_event
-from dbt_common.utils import cast_to_str
-
-import dbt
+from dbt_common.exceptions import DbtDatabaseError, ConnectionError, DbtRuntimeError
 
 
 logger = logging.getLogger(__name__)
@@ -69,11 +61,12 @@ class ConfluentCloudConnectionManager(SQLConnectionManager):
         try:
             yield
         except confluent_sql.Error as e:
+            # TODO: Use logger, or fire a dbt event? Or both?
             logger.debug(f"confluent_sql error: {e}")
-            raise dbt_common.exceptions.DbtDatabaseError(str(e))
+            raise DbtDatabaseError(str(e))
         except Exception as e:
             logger.debug(f"Error running SQL: {sql}")
-            raise dbt_common.exceptions.DbtRuntimeError(str(e))
+            raise DbtRuntimeError(str(e))
 
     @classmethod
     def open(cls, connection):
@@ -82,6 +75,7 @@ class ConfluentCloudConnectionManager(SQLConnectionManager):
         and moves it to the "open" state.
         """
         if connection.state == "open":
+            # TODO: Use logger, or fire a dbt event? Or both?
             logger.debug("Connection is already open, skipping open.")
             return connection
 
@@ -104,7 +98,7 @@ class ConfluentCloudConnectionManager(SQLConnectionManager):
         except Exception as e:
             connection.state = "fail"
             connection.handle = None
-            raise dbt_common.exceptions.ConnectionError(f"{e}")
+            raise ConnectionError(f"{e}")
 
     @classmethod
     def get_response(cls, cursor):
@@ -125,52 +119,10 @@ class ConfluentCloudConnectionManager(SQLConnectionManager):
 
     def commit(self):
         # Confluent cloud SQL does not support transactions, so commit is a noop here.
+        # TODO: Should we raise an exception if a non supported feature is used instead?
         pass
 
     def begin(self):
         # Confluent cloud SQL does not support transactions, so begin is a noop here.
+        # TODO: Should we raise an exception if a non supported feature is used instead?
         pass
-
-    def add_query(
-        self,
-        sql: str,
-        auto_begin: bool = True,
-        bindings: Optional[Any] = None,
-        abridge_sql_log: bool = False,
-    ) -> tuple[Connection, Any]:
-        connection = self.get_thread_connection()
-        if auto_begin and connection.transaction_open is False:
-            self.begin()
-        fire_event(
-            ConnectionUsed(
-                conn_type=self.TYPE,
-                conn_name=cast_to_str(connection.name),
-                node_info=get_node_info(),
-            )
-        )
-
-        with self.exception_handler(sql):
-            if abridge_sql_log:
-                log_sql = "{}...".format(sql[:512])
-            else:
-                log_sql = sql
-
-            fire_event(
-                SQLQuery(
-                    conn_name=cast_to_str(connection.name), sql=log_sql, node_info=get_node_info()
-                )
-            )
-            pre = time.time()
-
-            cursor = connection.handle.cursor()
-            cursor.execute(sql, bindings)
-
-            fire_event(
-                SQLQueryStatus(
-                    status=str(self.get_response(cursor)),
-                    elapsed=round((time.time() - pre)),
-                    node_info=get_node_info(),
-                )
-            )
-
-            return connection, cursor

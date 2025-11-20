@@ -26,8 +26,8 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-  # "confluent-sql",
-  "confluent-sql @ file://{root:parent}/confluent-sql/",
+  "confluent-sql",
+  # "confluent-sql @ file://{root:parent}/confluent-sql/",
   "dbt-core~=1.10",
   "dbt-common~=1.12",
   "dbt-adapters~=1.16",
@@ -36,6 +36,9 @@ dependencies = [
   "pytest-dotenv>=0.5.2",
   "dbt-tests-adapter>=1.10",
 ]
+
+[tool.uv.sources]
+confluent-sql = { path = "../confluent-sql", editable = true }
 
 [project.urls]
 Homepage = "https://github.com/confluentinc/dbt-confluent-cloud"

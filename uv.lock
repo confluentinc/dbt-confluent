@@ -187,7 +187,7 @@ wheels = [
 [[package]]
 name = "confluent-sql"
 version = "0.1.0"
-source = { directory = "../confluent-sql" }
+source = { editable = "../confluent-sql" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -277,7 +277,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "agate", specifier = "~=1.0" },
-    { name = "confluent-sql", directory = "../confluent-sql" },
+    { name = "confluent-sql", editable = "../confluent-sql" },
     { name = "dbt-adapters", specifier = "~=1.16" },
     { name = "dbt-common", specifier = "~=1.12" },
     { name = "dbt-core", specifier = "~=1.10" },

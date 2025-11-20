@@ -1,23 +1,3 @@
-{% macro create_schema(relation) -%}
-  {{ return(adapter.dispatch('create_schema')(relation)) }}
-{%- endmacro %}
-
-{% macro check_schema_exists(relation) -%}
-  {{ return(adapter.dispatch('check_schema_exists')(relation)) }}
-{%- endmacro %}
-
-{% macro drop_schema(relation) -%}
-  {{ return(adapter.dispatch('drop_schema')(relation)) }}
-{%- endmacro %}
-
-{% macro drop_relation(relation) -%}
-  {{ return(adapter.dispatch('drop_relation')(relation)) }}
-{%- endmacro %}
-
-{% macro generate_schema_name(custom_schema_name, node) -%}
-  {{ return(adapter.dispatch('generate_schema_name')(custom_schema_name, node)) }}
-{%- endmacro %}
-
 {% macro confluentcloud__generate_schema_name(custom_schema_name, node) -%}
   {%- set default_schema = target.schema -%}
   {% if custom_schema_name is none -%}
@@ -28,44 +8,48 @@
 {% endmacro %}
 
 {% macro confluentcloud__check_schema_exists(information_schema,schema) -%}
-  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__check_schema_exists: " ~ schema, info=True) }}
+  {% call statement('check_schema_exists', fetch_result=True) -%}
+    SELECT count(*)
+    FROM {{ information_schema }}.`TABLES`
+    WHERE
+      TABLE_SCHEMA == '{{ schema }}'
+      AND TABLE_CATALOG_ID = '{{ information_schema.database }}'
+  {% endcall %}
+  {{ return(load_result('check_schema_exists').table) }}
 {% endmacro %}
 
 {% macro confluentcloud__create_schema(relation) -%}
-  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__create_schema: " ~ relation.schema, info=True) }}
-{% endmacro %}
-
-{% macro confluentcloud__alter_column_type(relation,column_name,new_column_type) -%}
-  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__alter_column_type: " ~ relation, info=True) }}
+  {% set msg %}
+    This adapter (confluentcloud) does not support CREATE for schemas.
+  {% endset %}
+  {% do exceptions.raise_compiler_error(msg) %}
 {% endmacro %}
 
 {% macro confluentcloud__drop_relation(relation) -%}
-  {{ log("!!! EXECUTING confluentcloud__drop_relation: " ~ relation, info=True) }}
   {% if relation.is_table -%}
     {% call statement('drop_relation', fetch_result=False) -%}
-      {{ log("!!! EXECUTING DROP TABLE for" ~ relation, info=True) }}
       DROP TABLE {{ relation }}
     {% endcall %}
   {%- elif relation.is_view -%}
     {% call statement('drop_relation', fetch_result=False) -%}
-      {{ log("!!! EXECUTING DROP VIEW for" ~ relation, info=True) }}
       DROP VIEW {{ relation }}
     {% endcall %}
   {%- else -%}
-    {{ log("confluentcloud__drop_relation: drop not implemented for realtion: " ~ relation, info=True) }}
+    {% set msg %}
+      This adapter (confluentcloud) does not support DROP for {{ relation }}.
+    {% endset %}
+    {% do exceptions.raise_compiler_error(msg) %}
   {%- endif -%}
 {% endmacro %}
 
 {% macro confluentcloud__drop_schema(relation) -%}
-  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__drop_schema: " ~ relation, info=True) }}
-{% endmacro %}
-
-{% macro confluentcloud__get_columns_in_relation(relation) -%}
-  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__get_columns_is_relation: " ~ relation, info=True) }}
+  {% set msg %}
+    This adapter (confluentcloud) does not support DROP for schemas.
+  {% endset %}
+  {% do exceptions.raise_compiler_error(msg) %}
 {% endmacro %}
 
 {% macro confluentcloud__list_relations_without_caching(schema_relation) -%}
-  {{ log("!!! EXECUTING confluentcloud__list_relations_without_caching: " ~ schema_relation.schema, info=True) }}
   {% call statement('list_relations_without_caching', fetch_result=True) -%}
     SELECT
       TABLE_CATALOG_ID as database,
@@ -78,78 +62,27 @@
       TABLE_CATALOG_ID = '{{ schema_relation.database }}'
       AND TABLE_SCHEMA = '{{ schema_relation.schema }}'
   {% endcall %}
-
-  {{ log("!!! RESULT confluentcloud__list_relations_without_caching: " ~ schema_relation, info=True) }}
   {{ return(load_result('list_relations_without_caching').table) }}
 {% endmacro %}
 
 {% macro confluentcloud__list_schemas(database) -%}
-  {{ log("!!! EXECUTING confluentcloud__list_schemas: " ~ database, info=True) }}
   {% call statement('list_schemas', fetch_result=True) -%}
     SELECT
       TABLE_SCHEMA as schema
     FROM
-      INFORMATION_SCHEMA.`TABLES`
+      {{ database }}.`INFORMATION_SCHEMA`.`TABLES`
     WHERE
       TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
-      AND TABLE_CATALOG_ID = '{{ database }}'
   {% endcall %}
-
   {{ return(load_result('list_schemas').table) }}
 {% endmacro %}
 
-{% macro confluentcloud__rename_relation(from_relation, to_relation) -%}
-  {{ log("!!! EXECUTING confluentcloud__rename_relation", info=True) }}
-  {% if from_relation.is_table -%}
-    {% call statement('rename_relation', fetch_result=False) -%}
-      ALTER TABLE {{ from_relation }} RENAME TO {{ to_relation }}
-    {% endcall %}
-  {%- elif from_relation.is_view -%}
-      SHOW CREATE VIEW {{ from_relation }}
-    {% call statement('rename_relation', fetch_result=False) -%}
-      ALTER VIEW {{ from_relation }} RENAME TO {{ to_relation }}
-    {% endcall %}
-  {%- else -%}
-    {{ log("!!! ERROR: confluentcloud__rename_relation: rename not implemented for realtion: " ~ relation, info=True) }}
-  {%- endif -%}
-{% endmacro %}
-
 {% macro confluentcloud__truncate_relation(relation) -%}
-  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__truncate_relation", info=True) }}
+  {% set msg %}
+    This adapter (confluentcloud) does not support TRUNCATE. Relation: {{ relation }}.
+  {% endset %}
+  {% do exceptions.raise_compiler_error(msg) %}
 {% endmacro %}
-
-{% macro confluentcloud__current_timestamp() -%}
-  {{ log("!!! EXECUTING NOT IMPLEMENTED confluentcloud__current_timestamp", info=True) }}
-{% endmacro %}
-
-{% macro confluentcloud__load_csv_rows(model, agate_table) -%}
-  {% set batch_size = get_batch_size() %}
-  {% set cols_sql = get_seed_column_quoted_csv(model, agate_table.column_names) %}
-  {% set statements = [] %}
-
-  {% for chunk in agate_table.rows | batch(batch_size) %}
-    {% set sql %}
-      insert into {{ this.render() }} values
-      {% for row in chunk -%}
-        ({%- for value in row -%}
-          {{ adapter.quote(value) }}
-          {%- if not loop.last%},{%- endif %}
-        {%- endfor -%})
-        {%- if not loop.last%},{%- endif %}
-      {%- endfor %}
-    {% endset %}
-
-    {% do adapter.add_query(sql, abridge_sql_log=True) %}
-
-    {% if loop.index0 == 0 %}
-      {% do statements.append(sql) %}
-    {% endif %}
-  {% endfor %}
-
-  {# Return SQL so we can render it out into the compiled files #}
-  {{ return(statements[0]) }}
-{% endmacro %}
-
 
 {% macro confluentcloud__get_test_sql(main_sql, fail_calc, warn_if, error_if, limit) -%}
     select

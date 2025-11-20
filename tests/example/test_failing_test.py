@@ -1,9 +1,15 @@
 import os
+from argparse import Namespace
 import pytest
 from dbt.tests.util import run_dbt
+from dbt.events.logging import setup_event_logger
+from dbt.tests.fixtures.project import TestProjInfo
+from dbt_common.events.event_manager_client import cleanup_event_logger
+from dbt.deprecations import reset_deprecations
 
 
 # seeds/my_seed.csv
+# Add a duplicate row so we can check it fails uniqueness test.
 my_seed_csv = """
 id,name,some_date
 1,Easton,1981-05-20T06:46:51
@@ -66,15 +72,11 @@ class TestExample:
                 # Here we need to specify the schema, or tests will
                 # receive a Relation with an empty string as default.
                 "+schema": unique_schema,
-                "+warn_if": "<>0",
-                "+error_if": "<>0"
             },
             "seeds": {
                 # Here we need to specify the schema, or tests will
                 # receive a Relation with an empty string as default.
                 "+schema": unique_schema,
-                "+warn_if": "<>0",
-                "+error_if": "<>0"
             },
         }
 
@@ -93,6 +95,60 @@ class TestExample:
             "my_model.yml": my_model_yml,
         }
 
+    @pytest.fixture(scope="class")
+    def project_setup(
+        initialization,
+        clean_up_logging,
+        project_root,
+        profiles_root,
+        request,
+        unique_schema,
+        profiles_yml,
+        adapter,
+        shared_data_dir,
+        test_data_dir,
+        logs_dir,
+        test_config,
+    ):
+        # breakpoint()
+        log_flags = Namespace(
+            LOG_PATH=logs_dir,
+            LOG_FORMAT="json",
+            LOG_FORMAT_FILE="json",
+            USE_COLORS=False,
+            USE_COLORS_FILE=False,
+            LOG_LEVEL="info",
+            LOG_LEVEL_FILE="debug",
+            DEBUG=False,
+            LOG_CACHE_EVENTS=False,
+            QUIET=False,
+            LOG_FILE_MAX_BYTES=1000000,
+        )
+        setup_event_logger(log_flags)
+        orig_cwd = os.getcwd()
+        os.chdir(project_root)
+        # Return whatever is needed later in tests but can only come from fixtures, so we can keep
+        # the signatures in the test signature to a minimum.
+        project = TestProjInfo(
+            project_root=project_root,
+            profiles_dir=profiles_root,
+            adapter_type=adapter.type(),
+            test_dir=request.fspath.dirname,
+            shared_data_dir=shared_data_dir,
+            test_data_dir=test_data_dir,
+            test_schema=unique_schema,
+            database=adapter.config.credentials.database,
+            test_config=test_config,
+        )
+        # project.check_schema_exists()
+
+        yield project
+
+        os.chdir(orig_cwd)
+        cleanup_event_logger()
+        reset_deprecations()
+
+
     # The actual sequence of dbt commands and assertions
     # pytest will take care of all "setup" + "teardown"
     def test_run_seed_test(self, project, caplog):
@@ -101,7 +157,7 @@ class TestExample:
         An alternative pattern is to use pytest "xfail" (see below)
         """
         caplog.set_level("INFO")
-        results = run_dbt(["seed"])
+        results = run_dbt(["seed", "--full-refresh"])
         assert len(results) == 1
         results = run_dbt(["run"])
         assert len(results) == 1
@@ -110,9 +166,8 @@ class TestExample:
         result_statuses = sorted(r.status for r in results)
         assert result_statuses == ["fail", "pass"]
 
-    # @pytest.mark.xfail
-    # def test_build(self, project):
-    #     """Expect a failing test"""
-    #     # do it all
-    #     _results = run_dbt(["build"])
-    # 
+    @pytest.mark.xfail
+    def test_build(self, project):
+        """Expect a failing test"""
+        # do it all
+        _results = run_dbt(["build", "--full-refresh"])

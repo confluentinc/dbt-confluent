@@ -1,18 +1,17 @@
+import datetime
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal
-import datetime
+from typing import Type
 
 import agate
 from dbt.adapters.base import BaseRelation
 from dbt.adapters.contracts.relation import Policy, RelationType
-from dbt.adapters.exceptions import RelationTypeNullError
 from dbt.adapters.sql import SQLAdapter
 from dbt.adapters.utils import classproperty
-from dbt.exceptions import CompilationError
 from dbt_common.dataclass_schema import StrEnum
 from dbt_common.events.contextvars import get_node_info
-from typing import Type
+from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.confluentcloud import ConfluentCloudConnectionManager
 
@@ -22,10 +21,6 @@ class ConfluentCloudRelationType(StrEnum):
     External = "EXTERNAL TABLE"
     SystemTable = "SYSTEM TABLE"
     View = "VIEW"
-    # CTE = "cte"
-    # DynamicTable = "dynamic_table"
-    # Function = "function"
-
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -36,7 +31,6 @@ class ConfluentCloudRelation(BaseRelation):
         default_factory=lambda: Policy(database=False, schema=True, identifier=True)
     )
 
-
     def __post_init__(self):
         normalized_type = None
 
@@ -45,7 +39,7 @@ class ConfluentCloudRelation(BaseRelation):
                 normalized_type = self.type
             elif isinstance(self.type, str):
                 type_str = self.type.lower()
-                
+
                 if type_str == RelationType.Table:
                     normalized_type = ConfluentCloudRelationType.Table
                 elif type_str == RelationType.View:
@@ -99,8 +93,10 @@ class ConfluentCloudRelation(BaseRelation):
                 f"Quote character '{self.quote_character}' can't be used in identifiers!",
                 get_node_info(),
             )
-        # return f"{self.quote_character}{identifier}{self.quote_character}"
-        return f"{identifier}"
+        return f"{self.quote_character}{identifier}{self.quote_character}"
+
+    def make_confluent_fqn(self):
+        return ".".join([f"`{p}`" for p in [self.database, self.schema, self.identifier] if p])
 
 
 class ConfluentCloudAdapter(SQLAdapter):
@@ -111,40 +107,32 @@ class ConfluentCloudAdapter(SQLAdapter):
     ConnectionManager: Type[ConfluentCloudConnectionManager] = ConfluentCloudConnectionManager
     Relation: Type[ConfluentCloudRelation] = ConfluentCloudRelation
 
-    def quote(self, value) -> str:
+    def quote(self, identifier: str) -> str:
         """
-        Escapes a value for safe insertion into a Flink SQL query.
-    
-        - None -> NULL
-        - str -> 'escaped string'
-        - int/float -> 123
-        - bool -> TRUE / FALSE
-        - datetime -> TIMESTAMP '...'
+        Quotes identifiers (table names, column names, schemas) with backticks.
         """
-        if value is None:
-            return "NULL"
-        elif isinstance(value, str):
-            # Escape single quotes by doubling them
-            escaped_value = value.replace("'", "''")
-            return f"'{escaped_value}'"
-        elif isinstance(value, (int, float, Decimal)):
-            # Numbers are safe to render directly
-            return f"{value}"
-        elif isinstance(value, bool):
-            # Flink SQL uses TRUE/FALSE keywords
-            return "TRUE" if value else "FALSE"
-        elif isinstance(value, (datetime.datetime, datetime.date)):
-            # Format as ISO string and use Flink SQL's TIMESTAMP literal
-            return f"TIMESTAMP '{value.isoformat(sep=' ', timespec='microseconds')}'"
-        else:
-            # Fallback for other types
-            escaped_value = str(value).replace("'", "''")
-            return f"'{escaped_value}'"
+        return "`{}`".format(identifier)
+
+    def get_relation(self, database: str, schema: str, identifier: str):
+        res = super().get_relation(database, schema, identifier)
+        return res
 
     def check_schema_exists(self, database: str, schema: str) -> bool:
+        # breakpoint()
         results = self.execute_macro("list_schemas", kwargs={"database": database})
         exists = True if schema in [row[0] for row in results] else False
         return exists
+
+    def list_relations_without_caching(self, schema):
+        res = super().list_relations_without_caching(schema)
+        # breakpoint()
+        return res
+
+    def list_schemas(self, database: str) -> list[str]:
+        # breakpoint()
+        res = super().list_schemas(database)
+        # Remove duplicates here since we can't use a DISTINCT on INFORMATION_SCHEMA
+        return list(set(res))
 
     @classmethod
     def date_function(cls):
@@ -159,8 +147,7 @@ class ConfluentCloudAdapter(SQLAdapter):
 
     @classmethod
     def convert_number_type(cls, agate_table: agate.Table, col_idx: int) -> str:
-        # TODO CT-211
-        decimals = agate_table.aggregate(agate.MaxPrecision(col_idx))  # type: ignore[attr-defined]
+        decimals = agate_table.aggregate(agate.MaxPrecision(col_idx))
         return "FLOAT" if decimals else "INT"
 
     @classmethod
@@ -172,58 +159,40 @@ class ConfluentCloudAdapter(SQLAdapter):
         return "TIMESTAMP"
 
     def rename_relation(self, from_relation, to_relation):
+        """Custom rename_relation routine.
+
+        `ALTER TABLE` is not supported, so we raise an exception if a user tries.
+        `ALTER VIEW ... RENAME TO` should be supported, but the server gives an
+        error if we try to use it. I confirmed that it's a bug, it should be supported,
+        but it doesn't work. For now, fall back to creating a clone, and then dropping
+        the original view.
+        """
+        if from_relation.type != ConfluentCloudRelationType.View:
+            raise DbtDatabaseError(
+                f"Renaming is only supported in views, got {from_relation.type}"
+            )
+
         self.cache_renamed(from_relation, to_relation)
 
+        # Now, to manually duplicate a view, we first need to get its definition using a SHOW
         _, res = self.execute(f"SHOW CREATE VIEW {from_relation.identifier}", fetch=True)
         ddl = res[0].values()[0]
 
-        def make_confluent_fqn(rel):
-            return ".".join(
-                [f"`{p}`" for p in [rel.database, rel.schema, rel.identifier] if p]
-            )
+        # Fully quote the entire relation, regardless of include policies.
+        old_fqn = from_relation.make_confluent_fqn()
+        new_fqn = to_relation.make_confluent_fqn()
 
-        old_fqn = make_confluent_fqn(from_relation)
-        new_fqn = make_confluent_fqn(to_relation)
-
+        # I don't like this, but it's a temporary workaround hopefully.
+        # Use regexp to extract the definition of the view we want to clone.
         pattern = re.compile(
-            rf"(CREATE\s+VIEW\s+){re.escape(old_fqn)}(?=(\s|\(|\\n|$))", 
-            re.IGNORECASE | re.MULTILINE
+            rf"(CREATE\s+VIEW\s+){re.escape(old_fqn)}(?=(\s|\(|\\n|$))",
+            re.IGNORECASE | re.MULTILINE,
         )
 
+        # Create the cloned view
         new_ddl = pattern.sub(rf"\1{new_fqn}", ddl, count=1)
         self.execute(new_ddl)
+
+        # Drop the original one
         self.execute(f"DROP VIEW {old_fqn}")
-
-    def list_schemas(self, database: str) -> list[str]:
-        res = super().list_schemas(database)
-        # Remove duplicates here since we can't use a DISTINCT on INFORMATION_SCHEMA
-        return list(set(res))
-
-    # def list_relations_without_caching(
-    #     self,
-    #     schema_relation: ConfluentCloudRelation,
-    # ) -> list[ConfluentCloudRelation]:
-    #     kwargs = {"schema_relation": schema_relation}
-    #     results = self.execute_macro("list_relations_without_caching", kwargs=kwargs)
-    #     print("RESULTS:", results)
-
-    #     relations = []
-    #     quote_policy = {"database": True, "schema": True, "identifier": True}
-    #     for database, name, schema, rel_type in results:
-    #         print(rel_type)
-    #         try:
-    #             rel_type = self.Relation.get_relation_type(rel_type)
-    #         except ValueError:
-    #             rel_type = self.Relation.External
-    #         relations.append(
-    #             self.Relation.create(
-    #                 database=database,
-    #                 schema=schema,
-    #                 identifier=name,
-    #                 quote_policy=quote_policy,
-    #                 type=rel_type,
-    #             )
-    #         )
-    #     print("RELATIONS:", relations)
-    #     return relations
 
