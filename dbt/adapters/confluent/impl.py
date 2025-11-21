@@ -101,7 +101,7 @@ class ConfluentRelation(BaseRelation):
 
 class ConfluentAdapter(SQLAdapter):
     """
-    Controls actual implmentation of adapter, and ability to override certain methods.
+    Controls actual implementation of adapter, and ability to override certain methods.
     """
 
     ConnectionManager: type[ConfluentConnectionManager] = ConfluentConnectionManager

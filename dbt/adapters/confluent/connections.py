@@ -106,7 +106,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
     def get_response(cls, cursor):
         """
         Gets a cursor object and returns adapter-specific information
-        about the last executed command generally a AdapterResponse ojbect
+        about the last executed command generally a AdapterResponse object
         that has items such as code, rows_affected,etc. can also just be a string ex. "OK"
         if your cursor does not offer rich metadata.
         """

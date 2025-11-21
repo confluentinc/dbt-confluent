@@ -97,6 +97,7 @@ class TestExample:
 
     @pytest.fixture(scope="class")
     def project_setup(
+        self,
         initialization,
         clean_up_logging,
         project_root,
