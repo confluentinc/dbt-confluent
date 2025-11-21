@@ -90,5 +90,11 @@ ignore_missing_imports = true
 show_error_codes = true
 pretty = true
 
+[tool.hatch.version]
+path = "dbt/adapters/confluent/__version__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dbt/adapters", "dbt/include"]
+
 [tool.hatch.metadata]
 allow-direct-references = true

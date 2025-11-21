@@ -30,6 +30,8 @@ class ConfluentRelation(BaseRelation):
     )
 
     def __post_init__(self):
+        # TODO: This feels a bit forced, there may be a better way of handling
+        # the different names of relation types, but it works for now.
         normalized_type = None
 
         if self.type is not None:
@@ -81,10 +83,8 @@ class ConfluentRelation(BaseRelation):
         return self.type == ConfluentRelationType.View
 
     def quoted(self, identifier):
-        # TODO: Maybe we should escape it, but confluent sql docs are not explicit about
-        # how to escape identifiers. Empirically, duplicating the quote character works:
-        # `test``-identifier` is correctly interpreted as "test`-identifier", althouth using the
-        # quote character itself in an identifier returns an error from the server.
+        # Flink SQL does not support backticks in identifiers, so raise an error instead
+        # of trying to escape the identifier.
         if self.quote_character in identifier:
             # TODO: Is this the right error?
             raise CompilationError(
@@ -113,19 +113,6 @@ class ConfluentAdapter(SQLAdapter):
         """
         return f"`{identifier}`"
 
-    def get_relation(self, database: str, schema: str, identifier: str):
-        res = super().get_relation(database, schema, identifier)
-        return res
-
-    def check_schema_exists(self, database: str, schema: str) -> bool:
-        results = self.execute_macro("list_schemas", kwargs={"database": database})
-        exists = True if schema in [row[0] for row in results] else False
-        return exists
-
-    def list_relations_without_caching(self, schema):
-        res = super().list_relations_without_caching(schema)
-        return res
-
     def list_schemas(self, database: str) -> list[str]:
         res = super().list_schemas(database)
         # Remove duplicates here since we can't use a DISTINCT on INFORMATION_SCHEMA
@@ -136,7 +123,7 @@ class ConfluentAdapter(SQLAdapter):
         """
         Returns canonical date func
         """
-        return "datenow()"
+        return "CURRENT_TIMESTAMP"
 
     @classmethod
     def convert_text_type(cls, agate_table: agate.Table, col_idx: int) -> str:
