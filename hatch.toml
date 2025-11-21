@@ -7,7 +7,7 @@ sources = ["./"]
 
 [envs.default]
 pre-install-commands = [
-  "pip inspall -e ../dbt-adapters",
+  "pip install -e ../dbt-adapters",
   "pip install -e ../dbt-tests-adapter"
 ]
 dependencies = [

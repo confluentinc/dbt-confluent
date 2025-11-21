@@ -109,6 +109,8 @@ class TestExample:
         logs_dir,
         test_config,
     ):
+        # Override the fixture so it doesn't try to create and drop the schema,
+        # which, in confluent cloud, corresponds to a kafka cluster.
         log_flags = Namespace(
             LOG_PATH=logs_dir,
             LOG_FORMAT="json",
@@ -125,8 +127,6 @@ class TestExample:
         setup_event_logger(log_flags)
         orig_cwd = os.getcwd()
         os.chdir(project_root)
-        # Return whatever is needed later in tests but can only come from fixtures, so we can keep
-        # the signatures in the test signature to a minimum.
         project = TestProjInfo(
             project_root=project_root,
             profiles_dir=profiles_root,
