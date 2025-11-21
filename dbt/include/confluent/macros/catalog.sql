@@ -1,7 +1,7 @@
-{{% macro confluentcloud__get_catalog(information_schema, schemas)-%}}
+{{% macro confluent__get_catalog(information_schema, schemas)-%}}
 
    {{%set msg -%}}
-    get_catalog not implemented for confluentcloud
+    get_catalog not implemented for confluent
    -%}} endset {{%
     /*
       Your database likely has a way of accessing metadata about its objects,

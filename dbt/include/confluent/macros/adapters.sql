@@ -1,4 +1,4 @@
-{% macro confluentcloud__generate_schema_name(custom_schema_name, node) -%}
+{% macro confluent__generate_schema_name(custom_schema_name, node) -%}
   {%- set default_schema = target.schema -%}
   {% if custom_schema_name is none -%}
     {{ default_schema }}
@@ -7,7 +7,7 @@
   {%- endif -%}
 {% endmacro %}
 
-{% macro confluentcloud__check_schema_exists(information_schema,schema) -%}
+{% macro confluent__check_schema_exists(information_schema,schema) -%}
   {% call statement('check_schema_exists', fetch_result=True) -%}
     SELECT count(*)
     FROM {{ information_schema }}.`TABLES`
@@ -18,14 +18,14 @@
   {{ return(load_result('check_schema_exists').table) }}
 {% endmacro %}
 
-{% macro confluentcloud__create_schema(relation) -%}
+{% macro confluent__create_schema(relation) -%}
   {% set msg %}
-    This adapter (confluentcloud) does not support CREATE for schemas.
+    This adapter (confluent) does not support CREATE for schemas.
   {% endset %}
   {% do exceptions.raise_compiler_error(msg) %}
 {% endmacro %}
 
-{% macro confluentcloud__drop_relation(relation) -%}
+{% macro confluent__drop_relation(relation) -%}
   {% if relation.is_table -%}
     {% call statement('drop_relation', fetch_result=False) -%}
       DROP TABLE {{ relation }}
@@ -36,20 +36,20 @@
     {% endcall %}
   {%- else -%}
     {% set msg %}
-      This adapter (confluentcloud) does not support DROP for {{ relation }}.
+      This adapter (confluent) does not support DROP for {{ relation }}.
     {% endset %}
     {% do exceptions.raise_compiler_error(msg) %}
   {%- endif -%}
 {% endmacro %}
 
-{% macro confluentcloud__drop_schema(relation) -%}
+{% macro confluent__drop_schema(relation) -%}
   {% set msg %}
-    This adapter (confluentcloud) does not support DROP for schemas.
+    This adapter (confluent) does not support DROP for schemas.
   {% endset %}
   {% do exceptions.raise_compiler_error(msg) %}
 {% endmacro %}
 
-{% macro confluentcloud__list_relations_without_caching(schema_relation) -%}
+{% macro confluent__list_relations_without_caching(schema_relation) -%}
   {% call statement('list_relations_without_caching', fetch_result=True) -%}
     SELECT
       TABLE_CATALOG_ID as database,
@@ -65,7 +65,7 @@
   {{ return(load_result('list_relations_without_caching').table) }}
 {% endmacro %}
 
-{% macro confluentcloud__list_schemas(database) -%}
+{% macro confluent__list_schemas(database) -%}
   {% call statement('list_schemas', fetch_result=True) -%}
     SELECT
       TABLE_SCHEMA as schema
@@ -77,14 +77,14 @@
   {{ return(load_result('list_schemas').table) }}
 {% endmacro %}
 
-{% macro confluentcloud__truncate_relation(relation) -%}
+{% macro confluent__truncate_relation(relation) -%}
   {% set msg %}
-    This adapter (confluentcloud) does not support TRUNCATE. Relation: {{ relation }}.
+    This adapter (confluent) does not support TRUNCATE. Relation: {{ relation }}.
   {% endset %}
   {% do exceptions.raise_compiler_error(msg) %}
 {% endmacro %}
 
-{% macro confluentcloud__get_test_sql(main_sql, fail_calc, warn_if, error_if, limit) -%}
+{% macro confluent__get_test_sql(main_sql, fail_calc, warn_if, error_if, limit) -%}
     select
       {{ fail_calc }} as failures,
       {{ fail_calc }} {{ warn_if | replace("!=", "<>") }} as should_warn,

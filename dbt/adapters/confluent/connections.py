@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ConfluentCloudCredentials(Credentials):
+class ConfluentCredentials(Credentials):
     """
     Defines database specific credentials that get added to
     profiles.yml to connect to new adapter
@@ -32,7 +32,7 @@ class ConfluentCloudCredentials(Credentials):
     @property
     def type(self):
         """Return name of adapter."""
-        return "confluentcloud"
+        return "confluent"
 
     @property
     def unique_field(self):
@@ -49,8 +49,8 @@ class ConfluentCloudCredentials(Credentials):
         return ("host", "database")
 
 
-class ConfluentCloudConnectionManager(SQLConnectionManager):
-    TYPE = "confluentcloud"
+class ConfluentConnectionManager(SQLConnectionManager):
+    TYPE = "confluent"
 
     @contextmanager
     def exception_handler(self, sql: str):

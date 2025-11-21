@@ -1,5 +1,5 @@
 fixed:
-  type: confluentcloud
+  type: confluent
 prompts:
   host:
     hint: "your host name"

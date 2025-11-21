@@ -21,7 +21,7 @@ def dbt_profile_target():
     dbname = os.getenv("CONFLUENT_TEST_DBNAME")
     host = f"https://flink.{cloud_region}.{cloud_provider}.confluent.cloud"
     target = {
-        "type": "confluentcloud",
+        "type": "confluent",
         "threads": 1,
         "host": host,
         "cloud_provider": cloud_provider,

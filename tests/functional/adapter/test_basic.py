@@ -12,41 +12,41 @@ from dbt.tests.adapter.basic.test_snapshot_timestamp import BaseSnapshotTimestam
 from dbt.tests.adapter.basic.test_adapter_methods import BaseAdapterMethod
 
 
-class TestSimpleMaterializationsConfluentCloud(BaseSimpleMaterializations):
+class TestSimpleMaterializationsConfluent(BaseSimpleMaterializations):
     pass
 
 
-class TestSingularTestsConfluentCloud(BaseSingularTests):
+class TestSingularTestsConfluent(BaseSingularTests):
     pass
 
 
-class TestSingularTestsEphemeralConfluentCloud(BaseSingularTestsEphemeral):
+class TestSingularTestsEphemeralConfluent(BaseSingularTestsEphemeral):
     pass
 
 
-class TestEmptyConfluentCloud(BaseEmpty):
+class TestEmptyConfluent(BaseEmpty):
     pass
 
 
-class TestEphemeralConfluentCloud(BaseEphemeral):
+class TestEphemeralConfluent(BaseEphemeral):
     pass
 
 
-class TestIncrementalConfluentCloud(BaseIncremental):
+class TestIncrementalConfluent(BaseIncremental):
     pass
 
 
-class TestGenericTestsConfluentCloud(BaseGenericTests):
+class TestGenericTestsConfluent(BaseGenericTests):
     pass
 
 
-class TestSnapshotCheckColsConfluentCloud(BaseSnapshotCheckCols):
+class TestSnapshotCheckColsConfluent(BaseSnapshotCheckCols):
     pass
 
 
-class TestSnapshotTimestampConfluentCloud(BaseSnapshotTimestamp):
+class TestSnapshotTimestampConfluent(BaseSnapshotTimestamp):
     pass
 
 
-class TestBaseAdapterMethodConfluentCloud(BaseAdapterMethod):
+class TestBaseAdapterMethodConfluent(BaseAdapterMethod):
     pass

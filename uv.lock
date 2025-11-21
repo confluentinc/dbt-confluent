@@ -261,7 +261,7 @@ wheels = [
 ]
 
 [[package]]
-name = "dbt-confluentcloud"
+name = "dbt-confluent"
 source = { editable = "." }
 dependencies = [
     { name = "agate" },

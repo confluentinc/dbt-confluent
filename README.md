@@ -6,7 +6,7 @@ v<p align="center">
 
 dbt is the T in ELT. Organize, cleanse, denormalize, filter, rename, and pre-aggregate the raw data in your warehouse so that it's ready for analysis.
 
-## dbt-confluentcloud
+## dbt-confluent
 
 This is a dbt adapter plugin for Confluent Cloud's Flink SQL service.
 
@@ -14,7 +14,7 @@ This is a dbt adapter plugin for Confluent Cloud's Flink SQL service.
 
 This adapter plugin follows [semantic versioning](https://semver.org/). The current version is v1.10.0, compatible with dbt Core v1.10.
 
-For ConfluentCloud-specific functionality, we aim for backwards-compatibility wherever possible. Backwards-incompatible changes will be clearly communicated and limited to minor versions.
+For Confluent-specific functionality, we aim for backwards-compatibility wherever possible. Backwards-incompatible changes will be clearly communicated and limited to minor versions.
 
 ## Getting Started
 
@@ -25,7 +25,7 @@ For ConfluentCloud-specific functionality, we aim for backwards-compatibility wh
 ## Join the dbt Community
 
 - Be part of the conversation in the [dbt Community Slack](http://community.getdbt.com/)
-- If one doesn't exist feel free to request a #db-ConfluentCloud channel be made in the [#channel-requests](https://getdbt.slack.com/archives/C01D8J8AJDA) on dbt community slack channel.
+- If one doesn't exist feel free to request a #db-confluent channel be made in the [#channel-requests](https://getdbt.slack.com/archives/C01D8J8AJDA) on dbt community slack channel.
 - Read more on the [dbt Community Discourse](https://discourse.getdbt.com)
 
 ## Reporting bugs and contributing code

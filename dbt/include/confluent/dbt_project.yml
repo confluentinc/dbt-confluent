@@ -1,4 +1,4 @@
-name: dbt_confluentcloud
+name: dbt_confluent
 version: 1.10.0
 config-version: 2
 

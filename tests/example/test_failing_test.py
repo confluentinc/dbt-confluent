@@ -46,7 +46,6 @@ class TestExample:
        These define sequences of dbt commands and 'assert' statements.
     """
 
-
     @pytest.fixture(scope="class")
     def unique_schema(self, request, prefix):
         """
@@ -145,7 +144,6 @@ class TestExample:
         os.chdir(orig_cwd)
         cleanup_event_logger()
         reset_deprecations()
-
 
     # The actual sequence of dbt commands and assertions
     # pytest will take care of all "setup" + "teardown"

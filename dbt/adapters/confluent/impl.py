@@ -11,10 +11,10 @@ from dbt_common.dataclass_schema import StrEnum
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
-from dbt.adapters.confluentcloud import ConfluentCloudConnectionManager
+from dbt.adapters.confluent import ConfluentConnectionManager
 
 
-class ConfluentCloudRelationType(StrEnum):
+class ConfluentRelationType(StrEnum):
     Table = "BASE TABLE"
     External = "EXTERNAL TABLE"
     SystemTable = "SYSTEM TABLE"
@@ -22,8 +22,8 @@ class ConfluentCloudRelationType(StrEnum):
 
 
 @dataclass(frozen=True, eq=False, repr=False)
-class ConfluentCloudRelation(BaseRelation):
-    type: ConfluentCloudRelationType | str | None = None
+class ConfluentRelation(BaseRelation):
+    type: ConfluentRelationType | str | None = None
     quote_character: str = "`"
     include_policy: Policy = field(
         default_factory=lambda: Policy(database=False, schema=True, identifier=True)
@@ -33,36 +33,36 @@ class ConfluentCloudRelation(BaseRelation):
         normalized_type = None
 
         if self.type is not None:
-            if isinstance(self.type, ConfluentCloudRelationType):
+            if isinstance(self.type, ConfluentRelationType):
                 normalized_type = self.type
             elif isinstance(self.type, str):
                 type_str = self.type.lower()
 
                 if type_str == RelationType.Table:
-                    normalized_type = ConfluentCloudRelationType.Table
+                    normalized_type = ConfluentRelationType.Table
                 elif type_str == RelationType.View:
-                    normalized_type = ConfluentCloudRelationType.View
+                    normalized_type = ConfluentRelationType.View
                 elif type_str == RelationType.External:
-                    normalized_type = ConfluentCloudRelationType.External
+                    normalized_type = ConfluentRelationType.External
                 else:
-                    normalized_type = ConfluentCloudRelationType(self.type)
-        object.__setattr__(self, 'type', normalized_type)
+                    normalized_type = ConfluentRelationType(self.type)
+        object.__setattr__(self, "type", normalized_type)
 
     @classproperty
     def Table(cls) -> str:
-        return str(ConfluentCloudRelationType.Table)
+        return str(ConfluentRelationType.Table)
 
     @classproperty
     def View(cls) -> str:
-        return str(ConfluentCloudRelationType.View)
+        return str(ConfluentRelationType.View)
 
     @classproperty
     def External(cls) -> str:
-        return str(ConfluentCloudRelationType.External)
+        return str(ConfluentRelationType.External)
 
     @classproperty
-    def get_relation_type(cls) -> Type[ConfluentCloudRelationType]:
-        return ConfluentCloudRelationType
+    def get_relation_type(cls) -> Type[ConfluentRelationType]:
+        return ConfluentRelationType
 
     @property
     def is_table(self) -> bool:
@@ -70,7 +70,7 @@ class ConfluentCloudRelation(BaseRelation):
         Overridden property.
         Checks if the relation type is a Table.
         """
-        return self.type == ConfluentCloudRelationType.Table
+        return self.type == ConfluentRelationType.Table
 
     @property
     def is_view(self) -> bool:
@@ -78,7 +78,7 @@ class ConfluentCloudRelation(BaseRelation):
         Overridden property.
         Checks if the relation type is a View.
         """
-        return self.type == ConfluentCloudRelationType.View
+        return self.type == ConfluentRelationType.View
 
     def quoted(self, identifier):
         # TODO: Maybe we should escape it, but confluent sql docs are not explicit about
@@ -94,16 +94,18 @@ class ConfluentCloudRelation(BaseRelation):
         return f"{self.quote_character}{identifier}{self.quote_character}"
 
     def make_confluent_fqn(self):
-        return ".".join([f"`{p}`" for p in [self.database, self.schema, self.identifier] if p])
+        return ".".join(
+            [f"`{p}`" for p in [self.database, self.schema, self.identifier] if p]
+        )
 
 
-class ConfluentCloudAdapter(SQLAdapter):
+class ConfluentAdapter(SQLAdapter):
     """
     Controls actual implmentation of adapter, and ability to override certain methods.
     """
 
-    ConnectionManager: Type[ConfluentCloudConnectionManager] = ConfluentCloudConnectionManager
-    Relation: Type[ConfluentCloudRelation] = ConfluentCloudRelation
+    ConnectionManager: Type[ConfluentConnectionManager] = ConfluentConnectionManager
+    Relation: Type[ConfluentRelation] = ConfluentRelation
 
     def quote(self, identifier: str) -> str:
         """
@@ -162,7 +164,7 @@ class ConfluentCloudAdapter(SQLAdapter):
         but it doesn't work. For now, fall back to creating a clone, and then dropping
         the original view.
         """
-        if from_relation.type != ConfluentCloudRelationType.View:
+        if from_relation.type != ConfluentRelationType.View:
             raise DbtDatabaseError(
                 f"Renaming is only supported in views, got {from_relation.type}"
             )
@@ -170,7 +172,9 @@ class ConfluentCloudAdapter(SQLAdapter):
         self.cache_renamed(from_relation, to_relation)
 
         # Now, to manually duplicate a view, we first need to get its definition using a SHOW
-        _, res = self.execute(f"SHOW CREATE VIEW {from_relation.identifier}", fetch=True)
+        _, res = self.execute(
+            f"SHOW CREATE VIEW {from_relation.identifier}", fetch=True
+        )
         ddl = res[0].values()[0]
 
         # Fully quote the entire relation, regardless of include policies.
@@ -190,4 +194,3 @@ class ConfluentCloudAdapter(SQLAdapter):
 
         # Drop the original one
         self.execute(f"DROP VIEW {old_fqn}")
-
