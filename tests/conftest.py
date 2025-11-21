@@ -1,6 +1,6 @@
-import pytest
-
 import os
+
+import pytest
 
 # Import the fuctional fixtures as a plugin
 # Note: fixtures with session scope need to be local

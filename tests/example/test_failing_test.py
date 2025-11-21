@@ -1,12 +1,13 @@
 import os
 from argparse import Namespace
+
 import pytest
-from dbt.tests.util import run_dbt
+from dbt_common.events.event_manager_client import cleanup_event_logger
+
+from dbt.deprecations import reset_deprecations
 from dbt.events.logging import setup_event_logger
 from dbt.tests.fixtures.project import TestProjInfo
-from dbt_common.events.event_manager_client import cleanup_event_logger
-from dbt.deprecations import reset_deprecations
-
+from dbt.tests.util import run_dbt
 
 # seeds/my_seed.csv
 # Add a duplicate row so we can check it fails uniqueness test.

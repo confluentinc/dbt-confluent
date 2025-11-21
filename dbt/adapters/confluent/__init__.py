@@ -6,7 +6,6 @@ from dbt.adapters.confluent.connections import (
 from dbt.adapters.confluent.impl import ConfluentAdapter
 from dbt.include import confluent
 
-
 __all__ = ["Plugin", "ConfluentConnectionManager"]
 
 Plugin = AdapterPlugin(

@@ -1,17 +1,17 @@
+import builtins
 import re
 from dataclasses import dataclass, field
-from typing import Type
 
 import agate
-from dbt.adapters.base import BaseRelation
-from dbt.adapters.contracts.relation import Policy, RelationType
-from dbt.adapters.sql import SQLAdapter
-from dbt.adapters.utils import classproperty
 from dbt_common.dataclass_schema import StrEnum
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
+from dbt.adapters.base import BaseRelation
 from dbt.adapters.confluent import ConfluentConnectionManager
+from dbt.adapters.contracts.relation import Policy, RelationType
+from dbt.adapters.sql import SQLAdapter
+from dbt.adapters.utils import classproperty
 
 
 class ConfluentRelationType(StrEnum):
@@ -61,7 +61,7 @@ class ConfluentRelation(BaseRelation):
         return str(ConfluentRelationType.External)
 
     @classproperty
-    def get_relation_type(cls) -> Type[ConfluentRelationType]:
+    def get_relation_type(cls) -> builtins.type[ConfluentRelationType]:
         return ConfluentRelationType
 
     @property
@@ -104,14 +104,14 @@ class ConfluentAdapter(SQLAdapter):
     Controls actual implmentation of adapter, and ability to override certain methods.
     """
 
-    ConnectionManager: Type[ConfluentConnectionManager] = ConfluentConnectionManager
-    Relation: Type[ConfluentRelation] = ConfluentRelation
+    ConnectionManager: type[ConfluentConnectionManager] = ConfluentConnectionManager
+    Relation: type[ConfluentRelation] = ConfluentRelation
 
     def quote(self, identifier: str) -> str:
         """
         Quotes identifiers (table names, column names, schemas) with backticks.
         """
-        return "`{}`".format(identifier)
+        return f"`{identifier}`"
 
     def get_relation(self, database: str, schema: str, identifier: str):
         res = super().get_relation(database, schema, identifier)

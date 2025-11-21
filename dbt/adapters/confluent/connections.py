@@ -3,10 +3,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 
 import confluent_sql
-from dbt.adapters.contracts.connection import Credentials, AdapterResponse
-from dbt.adapters.sql import SQLConnectionManager
-from dbt_common.exceptions import DbtDatabaseError, ConnectionError, DbtRuntimeError
+from dbt_common.exceptions import ConnectionError, DbtDatabaseError, DbtRuntimeError
 
+from dbt.adapters.contracts.connection import AdapterResponse, Credentials
+from dbt.adapters.sql import SQLConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +62,13 @@ class ConfluentConnectionManager(SQLConnectionManager):
             yield
         except confluent_sql.Error as e:
             # TODO: Use logger, or fire a dbt event? Or both?
-            logger.debug(f"confluent_sql error: {e}")
-            raise DbtDatabaseError(str(e))
+            msg = "confluent_sql error"
+            logger.debug(f"{msg}: {e}")
+            raise DbtDatabaseError(msg) from e
         except Exception as e:
-            logger.debug(f"Error running SQL: {sql}")
-            raise DbtRuntimeError(str(e))
+            msg = "Error running SQL"
+            logger.debug(f"{msg}: {sql}")
+            raise DbtRuntimeError(msg) from e
 
     @classmethod
     def open(cls, connection):
@@ -98,7 +100,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         except Exception as e:
             connection.state = "fail"
             connection.handle = None
-            raise ConnectionError(f"{e}")
+            raise ConnectionError("confluent_sql connection error") from e
 
     @classmethod
     def get_response(cls, cursor):
