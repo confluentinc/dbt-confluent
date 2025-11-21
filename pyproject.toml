@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 dynamic = ["version"]
 name = "dbt-confluentcloud"
 description = "The Confluent Cloud adapter plugin for DBT"
-reasme="README.md"
+readme = "README.md"
 keywords = ["dbt", "adapter", "confluent", "cloud"]
 requires-python = ">=3.10.0"
 authors = [
@@ -27,7 +27,6 @@ classifiers = [
 ]
 dependencies = [
   "confluent-sql",
-  # "confluent-sql @ file://{root:parent}/confluent-sql/",
   "dbt-core~=1.10",
   "dbt-common~=1.12",
   "dbt-adapters~=1.16",
@@ -45,7 +44,7 @@ Homepage = "https://github.com/confluentinc/dbt-confluent-cloud"
 Repository = "https://github.com/confluentinc/dbt-confluent-cloud"
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit", "tests/functional"]
+testpaths = ["tests/functional"]
 addopts = "-v --color=yes -n auto"
 env_files = ["test.env"]
 

@@ -1,7 +1,5 @@
-import datetime
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal
 from typing import Type
 
 import agate
@@ -118,18 +116,15 @@ class ConfluentCloudAdapter(SQLAdapter):
         return res
 
     def check_schema_exists(self, database: str, schema: str) -> bool:
-        # breakpoint()
         results = self.execute_macro("list_schemas", kwargs={"database": database})
         exists = True if schema in [row[0] for row in results] else False
         return exists
 
     def list_relations_without_caching(self, schema):
         res = super().list_relations_without_caching(schema)
-        # breakpoint()
         return res
 
     def list_schemas(self, database: str) -> list[str]:
-        # breakpoint()
         res = super().list_schemas(database)
         # Remove duplicates here since we can't use a DISTINCT on INFORMATION_SCHEMA
         return list(set(res))

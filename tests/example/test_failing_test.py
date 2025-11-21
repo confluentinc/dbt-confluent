@@ -110,7 +110,6 @@ class TestExample:
         logs_dir,
         test_config,
     ):
-        # breakpoint()
         log_flags = Namespace(
             LOG_PATH=logs_dir,
             LOG_FORMAT="json",
@@ -140,7 +139,6 @@ class TestExample:
             database=adapter.config.credentials.database,
             test_config=test_config,
         )
-        # project.check_schema_exists()
 
         yield project
 

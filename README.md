@@ -6,26 +6,21 @@ v<p align="center">
 
 dbt is the T in ELT. Organize, cleanse, denormalize, filter, rename, and pre-aggregate the raw data in your warehouse so that it's ready for analysis.
 
-## ConfluentCloud
-This repo contains the base code to help you start to build out your dbt-confluentcloud adapter plugin, for more information on how to build out the adapter please follow the [docs](https://docs.getdbt.com/docs/contributing/building-a-new-adapter)
+## dbt-confluentcloud
 
-** Note ** this `README` is meant to be replaced with what information would be required to use your adpater once your at a point todo so.
+This is a dbt adapter plugin for Confluent Cloud's Flink SQL service.
 
-** Note **
-### Adapter Scaffold default Versioning
-This adapter plugin follows [semantic versioning](https://semver.org/). The first version of this plugin is v1.7.0, in order to be compatible with dbt Core v1.7.0.
+### Versioning
 
-It's also brand new! For ConfluentCloud-specific functionality, we will aim for backwards-compatibility wherever possible. We are likely to be iterating more quickly than most major-version-1 software projects. To that end, backwards-incompatible changes will be clearly communicated and limited to minor versions (once every three months).
+This adapter plugin follows [semantic versioning](https://semver.org/). The current version is v1.10.0, compatible with dbt Core v1.10.
 
- ## Getting Started
+For ConfluentCloud-specific functionality, we aim for backwards-compatibility wherever possible. Backwards-incompatible changes will be clearly communicated and limited to minor versions.
 
- #### Setting up Locally
-- run `pip install -r dev-requirements.txt`.
-- cd directory into the `dbt-core` you'd like to be testing against and run `make dev`.
+## Getting Started
 
- #### Connect to Github
-- run `git init`.
-- Connect your lcoal code to a Github repo.
+### Setting up Locally
+- Run `uv sync` to install dependencies
+- Configure your Confluent Cloud credentials in a `profiles.yml` file or environment variables
 
 ## Join the dbt Community
 

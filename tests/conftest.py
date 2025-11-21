@@ -1,7 +1,6 @@
 import pytest
 
 import os
-# import json
 
 # Import the fuctional fixtures as a plugin
 # Note: fixtures with session scope need to be local
