@@ -34,5 +34,4 @@ def dbt_profile_target():
         "schema": dbname,
         "test_schema": dbname,
     }
-    print(target)
     return target
