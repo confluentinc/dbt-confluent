@@ -1,6 +1,7 @@
 import builtins
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
 import agate
 from dbt_common.dataclass_schema import StrEnum
@@ -107,7 +108,8 @@ class ConfluentAdapter(SQLAdapter):
     ConnectionManager: type[ConfluentConnectionManager] = ConfluentConnectionManager
     Relation: type[ConfluentRelation] = ConfluentRelation
 
-    def quote(self, identifier: str) -> str:
+    @classmethod
+    def quote(cls, identifier: str) -> str:
         """
         Quotes identifiers (table names, column names, schemas) with backticks.
         """
@@ -115,8 +117,41 @@ class ConfluentAdapter(SQLAdapter):
 
     def list_schemas(self, database: str) -> list[str]:
         res = super().list_schemas(database)
-        # Remove duplicates here since we can't use a DISTINCT on INFORMATION_SCHEMA
         return list(set(res))
+
+    def check_schema_exists(self, database, schema) -> bool:
+        schemas = self.list_schemas(self.quote(database))
+        # Remove duplicates here since we can't use a DISTINCT on INFORMATION_SCHEMA
+        return schema in schemas
+
+    def create_schema(self, relation: BaseRelation) -> None:
+        """
+        Check if schema exists; if it does, do nothing (schemas are managed externally).
+        If it doesn't exist, raise an error requiring pre-creation.
+        """
+        relation = relation.without_identifier()
+
+        # Check if schema already exists
+        if self.check_schema_exists(relation.database, relation.schema):
+            # Schema exists, no need to create - this is expected
+            return
+
+        # Schema doesn't exist - raise error
+        raise DbtDatabaseError(
+            f"Schema '{relation.schema}' does not exist in Confluent Cloud. "
+            f"Schemas (Kafka clusters) must be created in Confluent Cloud before use. "
+            f"This adapter does not support schema creation."
+        )
+
+    def drop_schema(self, relation: BaseRelation) -> None:
+        """
+        Schemas cannot be dropped via dbt - they must be managed in Confluent Cloud.
+        """
+        raise DbtDatabaseError(
+            f"Cannot drop schema '{relation.schema}'. "
+            f"Schemas (Kafka clusters) must be managed in Confluent Cloud. "
+            f"This adapter does not support schema deletion."
+        )
 
     @classmethod
     def date_function(cls):

@@ -54,6 +54,9 @@ confluent-sql = { path = "../confluent-sql", editable = true }
 Homepage = "https://github.com/confluentinc/dbt-confluent"
 Repository = "https://github.com/confluentinc/dbt-confluent"
 
+[project.entry-points."dbt.adapters"]
+confluent = "dbt.adapters.confluent"
+
 [tool.pytest.ini_options]
 testpaths = ["tests/functional"]
 addopts = "-v --color=yes"
@@ -94,7 +97,7 @@ pretty = true
 path = "dbt/adapters/confluent/__version__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["dbt/adapters", "dbt/include"]
+packages = ["dbt"]
 
 [tool.hatch.metadata]
 allow-direct-references = true

@@ -62,12 +62,12 @@ class ConfluentConnectionManager(SQLConnectionManager):
             yield
         except confluent_sql.Error as e:
             # TODO: Use logger, or fire a dbt event? Or both?
-            msg = "confluent_sql error"
-            logger.debug(f"{msg}: {e}")
+            msg = f"confluent_sql error for '{sql}': {e}"
+            logger.debug(msg)
             raise DbtDatabaseError(msg) from e
         except Exception as e:
-            msg = "Error running SQL"
-            logger.debug(f"{msg}: {sql}")
+            msg = f"Error running SQL '{sql}': {e}"
+            logger.debug(msg)
             raise DbtRuntimeError(msg) from e
 
     @classmethod
@@ -117,7 +117,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         """
         Gets a connection object and attempts to cancel any ongoing queries.
         """
-        connection.close()
+        connection.handle.close()
 
     def commit(self):
         # Confluent cloud SQL does not support transactions, so commit is a noop here.
