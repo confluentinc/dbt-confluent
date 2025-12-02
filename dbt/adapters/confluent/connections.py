@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import confluent_sql
 from dbt_common.exceptions import ConnectionError, DbtDatabaseError, DbtRuntimeError
 
-from dbt.adapters.contracts.connection import AdapterResponse, Credentials
+from dbt.adapters.contracts.connection import AdapterResponse, ConnectionState, Credentials
 from dbt.adapters.sql import SQLConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         Receives a connection object and a Credentials object
         and moves it to the "open" state.
         """
-        if connection.state == "open":
+        if connection.state is ConnectionState.OPEN:
             # TODO: Use logger, or fire a dbt event? Or both?
             logger.debug("Connection is already open, skipping open.")
             return connection

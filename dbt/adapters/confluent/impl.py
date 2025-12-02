@@ -39,6 +39,7 @@ class ConfluentRelation(BaseRelation):
             if isinstance(self.type, ConfluentRelationType):
                 normalized_type = self.type
             elif isinstance(self.type, str):
+                # Convert to lowercase because the default relation types are lowercase.
                 type_str = self.type.lower()
 
                 if type_str == RelationType.Table:
@@ -115,10 +116,6 @@ class ConfluentAdapter(SQLAdapter):
         """
         return f"`{identifier}`"
 
-    def list_schemas(self, database: str) -> list[str]:
-        res = super().list_schemas(database)
-        return list(set(res))
-
     def check_schema_exists(self, database, schema) -> bool:
         schemas = self.list_schemas(self.quote(database))
         # Remove duplicates here since we can't use a DISTINCT on INFORMATION_SCHEMA
@@ -185,6 +182,7 @@ class ConfluentAdapter(SQLAdapter):
         error if we try to use it. I confirmed that it's a bug, it should be supported,
         but it doesn't work. For now, fall back to creating a clone, and then dropping
         the original view.
+        Link to jira issue: https://confluentinc.atlassian.net/browse/FSE-878
         """
         if from_relation.type != ConfluentRelationType.View:
             raise DbtDatabaseError(

@@ -57,11 +57,11 @@
 {% macro confluent__list_schemas(database) -%}
   {% call statement('list_schemas', fetch_result=True) -%}
     SELECT
-      TABLE_SCHEMA as schema
+      SCHEMA_NAME as schema
     FROM
-      {{ database }}.`INFORMATION_SCHEMA`.`TABLES`
+      {{ database }}.`INFORMATION_SCHEMA`.`SCHEMATA`
     WHERE
-      TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
+      `SCHEMA_NAME` <> 'INFORMATION_SCHEMA'
   {% endcall %}
   {{ return(load_result('list_schemas').table) }}
 {% endmacro %}
