@@ -1,0 +1,7 @@
+name: dbt_confluent
+version: 1.10.0
+config-version: 2
+
+macro-paths: ["macros"]
+seeds:
+  +full_refresh: true

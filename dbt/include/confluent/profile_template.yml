@@ -1,0 +1,26 @@
+fixed:
+  type: confluent
+prompts:
+  host:
+    hint: "your host name"
+  cloud_provider:
+    hint: "eg: 'AWS'"
+  cloud_region:
+    hint: "eg: us-west-1"
+  compute_pool_id:
+    hint: "eg: lfc-asdasd"
+  organization_id:
+    hint: "eg: org-asda"
+  environment_id:
+    hint: "eg: env-asda"
+  flink_api_key:
+    hint: "flink api key"
+  flink_api_secret:
+    hint: "flink api secret"
+    hide_input: true
+  dbname:
+    hint: "default database name"
+  threads:
+    hint: "1 or more"
+    type: "int"
+    default: 1
