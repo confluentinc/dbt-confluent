@@ -20,6 +20,9 @@ class ConfluentRelationType(StrEnum):
     External = "EXTERNAL TABLE"
     SystemTable = "SYSTEM TABLE"
     View = "VIEW"
+    CTE = "cte"
+    MaterializedView = "materialized_view"
+    Ephemeral = "ephemeral"
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -48,9 +51,9 @@ class ConfluentRelation(BaseRelation):
                     normalized_type = ConfluentRelationType.View
                 elif type_str == RelationType.External:
                     normalized_type = ConfluentRelationType.External
-                elif type_str == RelationType.CTE or type_str == RelationType.Ephemeral:
-                    # CTE and Ephemeral are not database objects, keep them as strings
-                    normalized_type = type_str
+                # elif type_str == RelationType.CTE or type_str == RelationType.Ephemeral:
+                #     # CTE and Ephemeral are not database objects, keep them as strings
+                #     normalized_type = type_str
                 else:
                     normalized_type = ConfluentRelationType(self.type)
         object.__setattr__(self, "type", normalized_type)

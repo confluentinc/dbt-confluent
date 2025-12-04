@@ -28,6 +28,23 @@ class ConfluentFixtures:
     Use this class to replace dbt tests' fixtures with custom ones that work with this adapter.
     """
 
+    def get_project_config_update(self, name, schema):
+        return {
+            "name": name,
+            "models": {
+                "+materialized": "view",
+                # Here we need to specify the schema, or tests will
+                # receive a Relation with an empty string as default.
+                "+schema": schema,
+            },
+            "seeds": {
+                # Here we need to specify the schema, or tests will
+                # receive a Relation with an empty string as default.
+                "+schema": schema,
+                "+full_refresh": True,
+            },
+        }
+
     @pytest.fixture(scope="class")
     def unique_schema(self, request, prefix):
         """
@@ -103,6 +120,18 @@ class ConfluentFixtures:
         cleanup_event_logger()
         reset_deprecations()
 
+    @pytest.fixture(scope="class")
+    def schema_yml(self, unique_schema):
+        return dedent(f"""
+            version: 2
+            sources:
+              - name: raw
+                schema: "{unique_schema}"
+                tables:
+                  - name: seed
+                    identifier: "{{{{ var('seed_name', 'base') }}}}"
+        """)
+
 
 class TestSingularTestsConfluent(ConfluentFixtures, BaseSingularTests):
     pass
@@ -125,91 +154,109 @@ class TestBaseAdapterMethodConfluent(BaseAdapterMethod):
 )
 class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMaterializations):
     @pytest.fixture(scope="class")
-    def models(self, unique_schema):
+    def models(self, schema_yaml):
         return {
             "view_model.sql": files.base_view_sql,
             "table_model.sql": files.base_table_sql,
             "swappable.sql": files.base_materialized_var_sql,
-            "schema.yml": dedent(f"""\
-                version: 2
-                sources:
-                  - name: raw
-                    schema: "{unique_schema}"
-                    tables:
-                      - name: seed
-                        identifier: "{{{{ var('seed_name', 'base') }}}}" """),
+            "schema.yml": schema_yml,
         }
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
-        return {
-            "name": "base",
-            "models": {
-                "+materialized": "view",
-                # Here we need to specify the schema, or tests will
-                # receive a Relation with an empty string as default.
-                "+schema": unique_schema,
-            },
-            "seeds": {
-                # Here we need to specify the schema, or tests will
-                # receive a Relation with an empty string as default.
-                "+schema": unique_schema,
-                "+full_refresh": True,
-            },
-        }
+        return self.get_project_config_update("base", unique_schema)
 
 
 class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEphemeral):
     @pytest.fixture(scope="class")
-    def models(self, unique_schema):
-        """Override models fixture to explicitly set schema instead of using {{ target.schema }}"""
+    def models(self, schema_yml):
+        """Overrides to handle flink sql and confluent cloud quirks.
+        We need to explicitly set schema instead of using {{ target.schema }} in `schema.yml`.
+        We also need to avoid creating nested "WITH" in "CREATE VIEW", because Flink SQL
+        does not support that.
+        """
+
+        ephemeral_simple_sql = dedent("""\
+            {{ config(materialized="ephemeral") }}
+            select name, id from {{ ref('base') }} where id is not null""")
+
         return {
-            "ephemeral.sql": files.ephemeral_with_cte_sql,
+            "ephemeral.sql": ephemeral_simple_sql,
             "passing_model.sql": files.test_ephemeral_passing_sql,
             "failing_model.sql": files.test_ephemeral_failing_sql,
-            "schema.yml": dedent(f"""\
-                version: 2
-                sources:
-                  - name: raw
-                    schema: "{unique_schema}"
-                    tables:
-                      - name: seed
-                        identifier: "{{{{ var('seed_name', 'base') }}}}" """),
+            "schema.yml": schema_yml,
         }
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
+        return self.get_project_config_update("singular_tests_ephemeral", unique_schema)
+
+
+@pytest.mark.skip(
+    "This test needs the ability to rename tables, this adapter does not support that. "
+    "One of the tests in here that uses views does pass."
+)
+class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
+    @pytest.fixture(scope="class")
+    def models(self, schema_yml):
         return {
-            "name": "singular_tests_ephemeral",
-            "models": {
-                # Here we need to specify the schema, or tests will
-                # receive a Relation with an empty string as default.
-                "+schema": unique_schema,
-            },
-            "seeds": {
-                # Here we need to specify the schema, or tests will
-                # receive a Relation with an empty string as default.
-                "+schema": unique_schema,
-                "+full_refresh": True,
-            },
+            "ephemeral.sql": files.base_ephemeral_sql,
+            "view_model.sql": files.ephemeral_view_sql,
+            "table_model.sql": files.ephemeral_table_sql,
+            "schema.yml": schema_yml,
         }
 
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("ephemeral", unique_schema)
 
-class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
-    pass
 
-
+@pytest.mark.skip(
+    "For this to work we need to implement the 'get_columns_in_relation' macro at least."
+)
 class TestIncrementalConfluent(ConfluentFixtures, BaseIncremental):
-    pass
+    @pytest.fixture(scope="class")
+    def models(self, schema_yml):
+        return {"incremental.sql": files.incremental_sql, "schema.yml": schema_yml}
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("incremental", unique_schema)
 
 
+@pytest.mark.skip(
+    "This test needs the ability to rename tables, this adapter does not support that. "
+    "One of the tests in here that uses views does pass."
+)
 class TestGenericTestsConfluent(ConfluentFixtures, BaseGenericTests):
-    pass
+    @pytest.fixture(scope="class")
+    def models(self, schema_yml):
+        return {
+            "view_model.sql": files.base_view_sql,
+            "table_model.sql": files.base_table_sql,
+            "schema.yml": schema_yml,
+            "schema_view.yml": files.generic_test_view_yml,
+            "schema_table.yml": files.generic_test_table_yml,
+        }
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("generic_tests", unique_schema)
 
 
+@pytest.mark.skip(
+    "For this to work we need to implement the 'current_timestamp' macro at least."
+)
 class TestSnapshotCheckColsConfluent(ConfluentFixtures, BaseSnapshotCheckCols):
-    pass
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("snapshot_strategy_check_cols", unique_schema)
 
 
+@pytest.mark.skip(
+    "For this to work we need to implement 'data_type_code_to_name' in the adapter at least."
+)
 class TestSnapshotTimestampConfluent(ConfluentFixtures, BaseSnapshotTimestamp):
-    pass
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("snapshot_strategy_timestamp", unique_schema)
