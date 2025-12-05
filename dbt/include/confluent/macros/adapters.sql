@@ -51,7 +51,28 @@
       TABLE_CATALOG_ID = '{{ schema_relation.database }}'
       AND TABLE_SCHEMA = '{{ schema_relation.schema }}'
   {% endcall %}
-  {{ return(load_result('list_relations_without_caching').table) }}
+
+  {# Transform Flink SQL type names to dbt-compatible lowercase types #}
+  {# We have to do this in jinja because we can't use CASE on INFORMATION_SCHEMA for some reason. #}
+  {% set result_table = load_result('list_relations_without_caching').table %}
+  {% set rows = [] %}
+  {% for row in result_table %}
+    {% set type_mapping = {
+      'BASE TABLE': 'table',
+      'VIEW': 'view',
+      'EXTERNAL TABLE': 'external',
+      'SYSTEM TABLE': 'system_table'
+    } %}
+    {% set normalized_type = type_mapping.get(row['type'], row['type'] | lower) %}
+    {% do rows.append((
+      row['database'],
+      row['name'],
+      row['schema'],
+      normalized_type
+    )) %}
+  {% endfor %}
+
+  {{ return(rows) }}
 {% endmacro %}
 
 {% macro confluent__list_schemas(database) -%}
@@ -82,6 +103,48 @@
       {{ main_sql }}
       {{ "limit " ~ limit if limit != none }}
     ) dbt_internal_test
+{%- endmacro %}
+
+
+{% macro confluent__create_table_as(temporary, relation, sql) -%}
+  {%- set sql_header = config.get('sql_header', none) -%}
+
+  {{ sql_header if sql_header is not none }}
+
+  {# Flink SQL does not support TEMPORARY tables, so we ignore the temporary parameter
+     and create a regular table with a temporary name instead #}
+  create table
+    {{ relation }}
+  {% set contract_config = config.get('contract') %}
+  {% if contract_config.enforced %}
+    {{ get_assert_columns_equivalent(sql) }}
+    {{ get_table_columns_and_constraints() }}
+    {%- set sql = get_select_subquery(sql) %}
+  {% endif %}
+  as (
+    {{ sql }}
+  );
+{%- endmacro %}
+
+
+{% macro confluent__get_columns_in_relation(relation) -%}
+  {% call statement('get_columns_in_relation', fetch_result=True) %}
+    SELECT
+      COLUMN_NAME as column_name,
+      DATA_TYPE as data_type,
+      CAST(NULL AS INT) as character_maximum_length,
+      CAST(NULL AS INT) as numeric_precision,
+      CAST(NULL AS INT) as numeric_scale
+    FROM
+      INFORMATION_SCHEMA.`COLUMNS`
+    WHERE
+      TABLE_CATALOG_ID = '{{ relation.database }}'
+      AND TABLE_SCHEMA = '{{ relation.schema }}'
+      AND TABLE_NAME = '{{ relation.identifier }}'
+      AND COLUMN_NAME <> '$rowtime'
+  {% endcall %}
+  {% set table = load_result('get_columns_in_relation').table %}
+  {{ return(sql_convert_columns_in_relation(table)) }}
 {%- endmacro %}
 
 

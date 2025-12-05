@@ -60,12 +60,42 @@ class ConfluentFixtures:
             raise ValueError("CONFLUENT_TEST_DBNAME env var needs to be set")
         return dbname
 
+    def _drop_relation_if_exists(self, project, identifier):
+        """Helper to drop a relation if it exists."""
+        with project.adapter.connection_named("__test_cleanup"):
+            relation = project.adapter.Relation.create(
+                database=project.database,
+                schema=project.test_schema,
+                identifier=identifier,
+                type="table"  # Try as table first
+            )
+            existing = project.adapter.get_relation(
+                database=project.database,
+                schema=project.test_schema,
+                identifier=identifier
+            )
+            if existing:
+                try:
+                    project.adapter.drop_relation(existing)
+                except Exception as e:
+                    print(f"Failed to drop {identifier}: {e}")
+
+    def get_relations_to_cleanup(self):
+        return []
+
     @pytest.fixture(autouse=True)
     def clean_up(self, project):
         """
-        The original fixture tries to delete the test schema, make this a no-op.
+        Since we can't drop schemas, we need to manually drop specific tables/views
+        created by each test to ensure a clean state for the next test.
+
+        Each test class should override get_relations_to_cleanup() to specify
+        what it creates.
         """
         yield
+        # Drop known test relations - each test can override this list
+        for identifier in self.get_relations_to_cleanup():
+            self._drop_relation_if_exists(project, identifier)
 
     @pytest.fixture(scope="class")
     def project_setup(
@@ -141,33 +171,11 @@ class TestEmptyConfluent(ConfluentFixtures, BaseEmpty):
     pass
 
 
-@pytest.mark.skip(
-    "This test needs the ability to create and drop schemas, this adapter does not support that."
-)
-class TestBaseAdapterMethodConfluent(BaseAdapterMethod):
-    pass
-
-
-@pytest.mark.skip(
-    "This test needs the ability to rename tables, this adapter does not support that. "
-    "One of the three tests in here that uses views does pass."
-)
-class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMaterializations):
-    @pytest.fixture(scope="class")
-    def models(self, schema_yaml):
-        return {
-            "view_model.sql": files.base_view_sql,
-            "table_model.sql": files.base_table_sql,
-            "swappable.sql": files.base_materialized_var_sql,
-            "schema.yml": schema_yml,
-        }
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("base", unique_schema)
-
-
 class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEphemeral):
+    def get_relations_to_cleanup(self):
+        """Specify relations created by this test that need cleanup."""
+        return ["base"]
+
     @pytest.fixture(scope="class")
     def models(self, schema_yml):
         """Overrides to handle flink sql and confluent cloud quirks.
@@ -192,10 +200,56 @@ class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEp
         return self.get_project_config_update("singular_tests_ephemeral", unique_schema)
 
 
-@pytest.mark.skip(
-    "This test needs the ability to rename tables, this adapter does not support that. "
-    "One of the tests in here that uses views does pass."
-)
+@pytest.mark.skip("Implement the 'current_timestamp' macro at least.")
+class TestSnapshotCheckColsConfluent(ConfluentFixtures, BaseSnapshotCheckCols):
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("snapshot_strategy_check_cols", unique_schema)
+
+
+@pytest.mark.skip("Implement 'data_type_code_to_name' in the adapter at least.")
+class TestSnapshotTimestampConfluent(ConfluentFixtures, BaseSnapshotTimestamp):
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("snapshot_strategy_timestamp", unique_schema)
+
+
+class TestIncrementalConfluent(ConfluentFixtures, BaseIncremental):
+    def get_relations_to_cleanup(self):
+        """Specify relations created by this test that need cleanup."""
+        return ["base", "added", "incremental"]
+
+    @pytest.fixture(scope="class")
+    def models(self, schema_yml):
+        return {"incremental.sql": files.incremental_sql, "schema.yml": schema_yml}
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("incremental", unique_schema)
+
+
+@pytest.mark.skip("The adapter does not support creating and dropping schemas.")
+class TestBaseAdapterMethodConfluent(BaseAdapterMethod):
+    pass
+
+
+@pytest.mark.skip("This adapter does not support renaming tables.")
+class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMaterializations):
+    @pytest.fixture(scope="class")
+    def models(self, schema_yaml):
+        return {
+            "view_model.sql": files.base_view_sql,
+            "table_model.sql": files.base_table_sql,
+            "swappable.sql": files.base_materialized_var_sql,
+            "schema.yml": schema_yml,
+        }
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("base", unique_schema)
+
+
+@pytest.mark.skip("This adapter does not support renaming tables.")
 class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
     @pytest.fixture(scope="class")
     def models(self, schema_yml):
@@ -211,23 +265,7 @@ class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
         return self.get_project_config_update("ephemeral", unique_schema)
 
 
-@pytest.mark.skip(
-    "For this to work we need to implement the 'get_columns_in_relation' macro at least."
-)
-class TestIncrementalConfluent(ConfluentFixtures, BaseIncremental):
-    @pytest.fixture(scope="class")
-    def models(self, schema_yml):
-        return {"incremental.sql": files.incremental_sql, "schema.yml": schema_yml}
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("incremental", unique_schema)
-
-
-@pytest.mark.skip(
-    "This test needs the ability to rename tables, this adapter does not support that. "
-    "One of the tests in here that uses views does pass."
-)
+@pytest.mark.skip("This adapter does not support renaming tables.")
 class TestGenericTestsConfluent(ConfluentFixtures, BaseGenericTests):
     @pytest.fixture(scope="class")
     def models(self, schema_yml):
@@ -242,21 +280,3 @@ class TestGenericTestsConfluent(ConfluentFixtures, BaseGenericTests):
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
         return self.get_project_config_update("generic_tests", unique_schema)
-
-
-@pytest.mark.skip(
-    "For this to work we need to implement the 'current_timestamp' macro at least."
-)
-class TestSnapshotCheckColsConfluent(ConfluentFixtures, BaseSnapshotCheckCols):
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("snapshot_strategy_check_cols", unique_schema)
-
-
-@pytest.mark.skip(
-    "For this to work we need to implement 'data_type_code_to_name' in the adapter at least."
-)
-class TestSnapshotTimestampConfluent(ConfluentFixtures, BaseSnapshotTimestamp):
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("snapshot_strategy_timestamp", unique_schema)
