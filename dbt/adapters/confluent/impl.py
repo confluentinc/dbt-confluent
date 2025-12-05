@@ -1,7 +1,7 @@
 import builtins
 import re
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, FrozenSet, Set, Tuple
 
 import agate
 from dbt_common.dataclass_schema import StrEnum
@@ -13,6 +13,7 @@ from dbt.adapters.confluent import ConfluentConnectionManager
 from dbt.adapters.contracts.relation import Policy, RelationType
 from dbt.adapters.sql import SQLAdapter
 from dbt.adapters.utils import classproperty
+from dbt.adapters.base.impl import InformationSchema
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -148,3 +149,131 @@ class ConfluentAdapter(SQLAdapter):
 
         # Drop the original one
         self.execute(f"DROP VIEW {old_fqn}")
+
+    def _get_one_catalog(
+        self,
+        information_schema: InformationSchema,
+        schemas: set[str],
+        used_schemas: frozenset[tuple[str, str]],
+    ) -> "agate.Table":
+        """
+        Override catalog generation to work around Confluent Cloud's INFORMATION_SCHEMA limitations.
+
+        Confluent Cloud doesn't support JOINs on INFORMATION_SCHEMA, so we:
+        1. Query TABLES and COLUMNS separately
+        2. Join them in Python
+        3. Return an agate.Table with the standard catalog structure
+        """
+        database = information_schema.database
+
+        # Build WHERE clause for schemas (case-sensitive, no functions allowed on INFORMATION_SCHEMA)
+        schema_conditions = " or ".join(
+            [f"TABLE_SCHEMA = '{schema}'" for schema in schemas]
+        )
+
+        # Query 1: Get all tables
+        tables_sql = f"""
+            select
+                TABLE_CATALOG_ID as table_database,
+                TABLE_SCHEMA as table_schema,
+                TABLE_NAME as table_name,
+                TABLE_TYPE as table_type
+            from INFORMATION_SCHEMA.`TABLES`
+            where TABLE_CATALOG_ID = '{database}'
+                and ({schema_conditions})
+                and TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
+                and TABLE_TYPE <> 'SYSTEM TABLE'
+        """
+
+        # Query 2: Get all columns
+        # Note: We can't use LIKE to filter out $rowtime here due to INFORMATION_SCHEMA limitations
+        # We'll filter those columns out in Python instead
+        columns_sql = f"""
+            select
+                TABLE_CATALOG_ID as table_database,
+                TABLE_SCHEMA as table_schema,
+                TABLE_NAME as table_name,
+                COLUMN_NAME as column_name,
+                ORDINAL_POSITION as column_index,
+                DATA_TYPE as column_type
+            from INFORMATION_SCHEMA.`COLUMNS`
+            where TABLE_CATALOG_ID = '{database}'
+                and ({schema_conditions})
+                and TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
+        """
+
+        # Execute queries
+        _, tables_result = self.execute(tables_sql, fetch=True, auto_begin=False)
+        _, columns_result = self.execute(columns_sql, fetch=True, auto_begin=False)
+
+        # Build a dictionary of tables for quick lookup
+        table_dict = {}
+        for table_row in tables_result:
+            key = (
+                table_row["table_database"],
+                table_row["table_schema"],
+                table_row["table_name"],
+            )
+            table_dict[key] = table_row["table_type"]
+
+        # Type mapping
+        type_mapping = {
+            "BASE TABLE": "table",
+            "VIEW": "view",
+            "EXTERNAL TABLE": "external",
+            "SYSTEM TABLE": "system_table",
+        }
+
+        # Join columns with tables and build result rows
+        catalog_data = []
+        for col_row in columns_result:
+            # Skip hidden columns (those starting with $, like $rowtime)
+            if col_row["column_name"].startswith("$"):
+                continue
+
+            key = (
+                col_row["table_database"],
+                col_row["table_schema"],
+                col_row["table_name"],
+            )
+            table_type = table_dict.get(key)
+
+            if table_type:
+                normalized_type = type_mapping.get(table_type, table_type.lower())
+                catalog_data.append({
+                    "table_database": col_row["table_database"],
+                    "table_schema": col_row["table_schema"],
+                    "table_name": col_row["table_name"],
+                    "table_type": normalized_type,
+                    "table_comment": None,
+                    "column_name": col_row["column_name"],
+                    "column_index": col_row["column_index"],
+                    "column_type": col_row["column_type"],
+                    "column_comment": None,
+                    "table_owner": None,
+                })
+
+        # Convert to agate.Table with the expected structure
+        column_names = [
+            "table_database",
+            "table_schema",
+            "table_name",
+            "table_type",
+            "table_comment",
+            "column_name",
+            "column_index",
+            "column_type",
+            "column_comment",
+            "table_owner",
+        ]
+
+        # Create agate table
+        if catalog_data:
+            rows = [[row[col] for col in column_names] for row in catalog_data]
+        else:
+            rows = []
+
+        table = agate.Table(rows, column_names)
+
+        # Filter using the base adapter's method
+        return self._catalog_filter_table(table, used_schemas)
