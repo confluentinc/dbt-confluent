@@ -10,7 +10,7 @@ from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.base import BaseRelation
 from dbt.adapters.base.impl import InformationSchema
-from dbt.adapters.confluent import ConfluentConnectionManager
+from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
 from dbt.adapters.contracts.relation import Policy, RelationType
 from dbt.adapters.sql import SQLAdapter
 from dbt.adapters.utils import classproperty
@@ -45,6 +45,7 @@ class ConfluentAdapter(SQLAdapter):
 
     ConnectionManager: type[ConfluentConnectionManager] = ConfluentConnectionManager
     Relation: type[ConfluentRelation] = ConfluentRelation
+    Column: type[ConfluentColumn] = ConfluentColumn
 
     @classmethod
     def quote(cls, identifier: str) -> str:
