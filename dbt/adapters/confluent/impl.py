@@ -9,11 +9,11 @@ from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.base import BaseRelation
+from dbt.adapters.base.impl import InformationSchema
 from dbt.adapters.confluent import ConfluentConnectionManager
 from dbt.adapters.contracts.relation import Policy, RelationType
 from dbt.adapters.sql import SQLAdapter
 from dbt.adapters.utils import classproperty
-from dbt.adapters.base.impl import InformationSchema
 
 
 @dataclass(frozen=True, eq=False, repr=False)

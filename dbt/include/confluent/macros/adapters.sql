@@ -56,13 +56,13 @@
   {# We have to do this in jinja because we can't use CASE on INFORMATION_SCHEMA for some reason. #}
   {% set result_table = load_result('list_relations_without_caching').table %}
   {% set rows = [] %}
+  {% set type_mapping = {
+    'BASE TABLE': 'table',
+    'VIEW': 'view',
+    'EXTERNAL TABLE': 'external',
+    'SYSTEM TABLE': 'system_table'
+  } %}
   {% for row in result_table %}
-    {% set type_mapping = {
-      'BASE TABLE': 'table',
-      'VIEW': 'view',
-      'EXTERNAL TABLE': 'external',
-      'SYSTEM TABLE': 'system_table'
-    } %}
     {% set normalized_type = type_mapping.get(row['type'], row['type'] | lower) %}
     {% do rows.append((
       row['database'],

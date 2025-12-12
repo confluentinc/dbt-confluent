@@ -1,6 +1,7 @@
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import Union
 
 import confluent_sql
 from dbt_common.exceptions import ConnectionError, DbtDatabaseError, DbtRuntimeError
@@ -128,3 +129,27 @@ class ConfluentConnectionManager(SQLConnectionManager):
         # Confluent cloud SQL does not support transactions, so begin is a noop here.
         # TODO: Should we raise an exception if a non supported feature is used instead?
         pass
+
+    @classmethod
+    def data_type_code_to_name(cls, type_code: Union[int, str]) -> str:
+        """
+        Get the string representation of the data type from the type code.
+
+        Flink SQL returns type names like:
+        - ARRAY<STRING> → ARRAY
+        - MAP<INT, STRING> → MAP
+        - DECIMAL(10, 2) → DECIMAL
+        - ROW<field1 INT, field2 STRING> → ROW
+
+        This method extracts the base type name by removing type parameters.
+        """
+        if isinstance(type_code, int):
+            # Confluent SQL library returns string type names, not numeric codes
+            # If we somehow get a numeric code, convert it to string
+            type_code = str(type_code)
+
+        # Remove generic type parameters (e.g., ARRAY<STRING> → ARRAY)
+        # and precision/scale parameters (e.g., DECIMAL(10,2) → DECIMAL)
+        base_type = type_code.split("(")[0].split("<")[0].strip().upper()
+
+        return base_type

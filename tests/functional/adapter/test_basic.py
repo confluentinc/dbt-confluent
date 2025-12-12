@@ -200,7 +200,7 @@ class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEp
         return self.get_project_config_update("singular_tests_ephemeral", unique_schema)
 
 
-@pytest.mark.skip("Implement the 'current_timestamp' macro at least.")
+# @pytest.mark.skip("Implement 'data_type_code_to_name' in the adapter at least.")
 class TestSnapshotCheckColsConfluent(ConfluentFixtures, BaseSnapshotCheckCols):
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
