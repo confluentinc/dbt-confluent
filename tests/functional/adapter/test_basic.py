@@ -200,20 +200,6 @@ class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEp
         return self.get_project_config_update("singular_tests_ephemeral", unique_schema)
 
 
-# @pytest.mark.skip("Implement 'data_type_code_to_name' in the adapter at least.")
-class TestSnapshotCheckColsConfluent(ConfluentFixtures, BaseSnapshotCheckCols):
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("snapshot_strategy_check_cols", unique_schema)
-
-
-# @pytest.mark.skip("Implement 'data_type_code_to_name' in the adapter at least.")
-class TestSnapshotTimestampConfluent(ConfluentFixtures, BaseSnapshotTimestamp):
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("snapshot_strategy_timestamp", unique_schema)
-
-
 class TestIncrementalConfluent(ConfluentFixtures, BaseIncremental):
     def get_relations_to_cleanup(self):
         """Specify relations created by this test that need cleanup."""
@@ -226,6 +212,20 @@ class TestIncrementalConfluent(ConfluentFixtures, BaseIncremental):
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
         return self.get_project_config_update("incremental", unique_schema)
+
+
+@pytest.mark.skip("Snapshots not supported - Flink SQL lacks MERGE/UPDATE capabilities.")
+class TestSnapshotCheckColsConfluent(ConfluentFixtures, BaseSnapshotCheckCols):
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("snapshot_strategy_check_cols", unique_schema)
+
+
+@pytest.mark.skip("Snapshots not supported - Flink SQL lacks MERGE/UPDATE capabilities.")
+class TestSnapshotTimestampConfluent(ConfluentFixtures, BaseSnapshotTimestamp):
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return self.get_project_config_update("snapshot_strategy_timestamp", unique_schema)
 
 
 @pytest.mark.skip("The adapter does not support creating and dropping schemas.")
