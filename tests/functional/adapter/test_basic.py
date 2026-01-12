@@ -207,7 +207,7 @@ class TestSnapshotCheckColsConfluent(ConfluentFixtures, BaseSnapshotCheckCols):
         return self.get_project_config_update("snapshot_strategy_check_cols", unique_schema)
 
 
-@pytest.mark.skip("Implement 'data_type_code_to_name' in the adapter at least.")
+# @pytest.mark.skip("Implement 'data_type_code_to_name' in the adapter at least.")
 class TestSnapshotTimestampConfluent(ConfluentFixtures, BaseSnapshotTimestamp):
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
