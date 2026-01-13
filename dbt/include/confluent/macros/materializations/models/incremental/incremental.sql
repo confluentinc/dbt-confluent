@@ -37,21 +37,14 @@
   {% set incremental_strategy = config.get('incremental_strategy') or 'default' %}
   {% set strategy_sql_macro_func = adapter.get_incremental_strategy_macro(context, incremental_strategy) %}
 
-  {{ log("Existing relation: " ~ existing_relation, info=True) }}
-  {{ log("Full refresh mode: " ~ full_refresh_mode, info=True) }}
-  {{ log("Model SQL preview: " ~ sql[:200], info=True) }}
-
   {% if existing_relation is none %}
-      {{ log("Branch: Creating fresh table", info=True) }}
       {% set build_sql = get_create_table_as_sql(False, target_relation, sql) %}
       {% set relation_for_indexes = target_relation %}
   {% elif full_refresh_mode %}
-      {{ log("Branch: Full refresh", info=True) }}
       {% set build_sql = get_create_table_as_sql(False, intermediate_relation, sql) %}
       {% set relation_for_indexes = intermediate_relation %}
       {% set need_swap = true %}
   {% else %}
-    {{ log("Branch: Incremental update", info=True) }}
     {% do run_query(get_create_table_as_sql(True, temp_relation, sql)) %}
     {#-- Since Confluent doesn't support temporary tables, we create regular tables and need to clean them up manually. Add temp_relation to cleanup list. --#}
     {% do to_drop.append(temp_relation) %}

@@ -1,7 +1,6 @@
 import logging
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Union
 
 import confluent_sql
 from dbt_common.exceptions import ConnectionError, DbtDatabaseError, DbtRuntimeError
@@ -131,7 +130,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         pass
 
     @classmethod
-    def data_type_code_to_name(cls, type_code: Union[int, str]) -> str:
+    def data_type_code_to_name(cls, type_code: int | str) -> str:
         """
         Get the string representation of the data type from the type code.
 

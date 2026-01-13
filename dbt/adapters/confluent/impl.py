@@ -1,19 +1,15 @@
-import builtins
 import re
 from dataclasses import dataclass, field
-from typing import Callable, FrozenSet, Set, Tuple
 
 import agate
-from dbt_common.dataclass_schema import StrEnum
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.base import BaseRelation
 from dbt.adapters.base.impl import InformationSchema
 from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
-from dbt.adapters.contracts.relation import Policy, RelationType
+from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.sql import SQLAdapter
-from dbt.adapters.utils import classproperty
 
 
 @dataclass(frozen=True, eq=False, repr=False)

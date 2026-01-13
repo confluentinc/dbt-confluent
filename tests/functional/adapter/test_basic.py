@@ -236,7 +236,7 @@ class TestBaseAdapterMethodConfluent(BaseAdapterMethod):
 @pytest.mark.skip("This adapter does not support renaming tables.")
 class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMaterializations):
     @pytest.fixture(scope="class")
-    def models(self, schema_yaml):
+    def models(self, schema_yml):
         return {
             "view_model.sql": files.base_view_sql,
             "table_model.sql": files.base_table_sql,
