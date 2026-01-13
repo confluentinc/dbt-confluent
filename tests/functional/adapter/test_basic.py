@@ -174,7 +174,7 @@ class TestEmptyConfluent(ConfluentFixtures, BaseEmpty):
 class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEphemeral):
     def get_relations_to_cleanup(self):
         """Specify relations created by this test that need cleanup."""
-        return ["base"]
+        return ["base", "passing_model", "failing_model"]
 
     @pytest.fixture(scope="class")
     def models(self, schema_yml):
