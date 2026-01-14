@@ -144,7 +144,7 @@
       TABLE_CATALOG_ID = '{{ relation.database }}'
       AND TABLE_SCHEMA = '{{ relation.schema }}'
       AND TABLE_NAME = '{{ relation.identifier }}'
-      AND COLUMN_NAME <> '$rowtime'
+      AND IS_HIDDEN = 'NO'
   {% endcall %}
   {% set table = load_result('get_columns_in_relation').table %}
   {{ return(sql_convert_columns_in_relation(table)) }}

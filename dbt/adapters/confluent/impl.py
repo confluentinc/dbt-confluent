@@ -177,12 +177,8 @@ class ConfluentAdapter(SQLAdapter):
             if i["table_type"] is not None
         }
 
-        # Here we skip hidden columns (those starting with $, like $rowtime)
-        columns = [
-            i
-            for i in catalog
-            if i["column_name"] is not None and not i["column_name"].startswith("$")
-        ]
+        # For columns, we need to filter out rows with no "column_name"
+        columns = [i for i in catalog if i["column_name"] is not None]
 
         # Join columns with tables and build result rows
         catalog_data = []

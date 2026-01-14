@@ -5,7 +5,7 @@
         TABLE_SCHEMA as table_schema,
         TABLE_NAME as table_name,
         TABLE_TYPE as table_type,
-        CAST(NULL as STRING) as table_comment,
+        `COMMENT` as table_comment,
         CAST(NULL as STRING) as table_owner,
         CAST(NULL as STRING) as column_name,
         CAST(NULL as INT) as column_index,
@@ -26,10 +26,11 @@
         COLUMN_NAME as column_name,
         ORDINAL_POSITION as column_index,
         DATA_TYPE as column_type,
-        CAST(NULL as STRING) as column_comment
+        `COMMENT` as column_comment
     from INFORMATION_SCHEMA.`COLUMNS`
     where TABLE_CATALOG_ID = '{{ information_schema.database }}'
         and TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
+        and IS_HIDDEN = 'NO'
     {% endcall %}
     {% set results = load_result('get_catalog').table %}
     {% set rows = [] %}
