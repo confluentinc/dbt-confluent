@@ -161,57 +161,20 @@ class ConfluentAdapter(SQLAdapter):
         2. Join them in Python
         3. Return an agate.Table with the standard catalog structure
         """
-        database = information_schema.database
-
-        # Build WHERE clause for schemas (case-sensitive, no functions allowed on INFORMATION_SCHEMA)
-        schema_conditions = " or ".join(
-            [f"TABLE_SCHEMA = '{schema}'" for schema in schemas]
-        )
-
-        # Query 1: Get all tables
-        tables_sql = f"""
-            select
-                TABLE_CATALOG_ID as table_database,
-                TABLE_SCHEMA as table_schema,
-                TABLE_NAME as table_name,
-                TABLE_TYPE as table_type
-            from INFORMATION_SCHEMA.`TABLES`
-            where TABLE_CATALOG_ID = '{database}'
-                and ({schema_conditions})
-                and TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
-                and TABLE_TYPE <> 'SYSTEM TABLE'
-        """
-
-        # Query 2: Get all columns
-        # Note: We can't use LIKE to filter out $rowtime here due to INFORMATION_SCHEMA limitations
-        # We'll filter those columns out in Python instead
-        columns_sql = f"""
-            select
-                TABLE_CATALOG_ID as table_database,
-                TABLE_SCHEMA as table_schema,
-                TABLE_NAME as table_name,
-                COLUMN_NAME as column_name,
-                ORDINAL_POSITION as column_index,
-                DATA_TYPE as column_type
-            from INFORMATION_SCHEMA.`COLUMNS`
-            where TABLE_CATALOG_ID = '{database}'
-                and ({schema_conditions})
-                and TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
-        """
-
-        # Execute queries
-        _, tables_result = self.execute(tables_sql, fetch=True, auto_begin=False)
-        _, columns_result = self.execute(columns_sql, fetch=True, auto_begin=False)
+        # database = information_schema.database
+        kwargs = {"information_schema": information_schema, "schemas": schemas}
+        tables = self.execute_macro("get_catalog_tables", kwargs=kwargs)
+        columns = self.execute_macro("get_catalog_columns", kwargs=kwargs)
 
         # Build a dictionary of tables for quick lookup
-        table_dict = {}
-        for table_row in tables_result:
-            key = (
-                table_row["table_database"],
-                table_row["table_schema"],
-                table_row["table_name"],
-            )
-            table_dict[key] = table_row["table_type"]
+        table_dict = {
+            (
+                table["table_database"],
+                table["table_schema"],
+                table["table_name"],
+            ): table["table_type"]
+            for table in tables
+        }
 
         # Type mapping
         type_mapping = {
@@ -223,32 +186,34 @@ class ConfluentAdapter(SQLAdapter):
 
         # Join columns with tables and build result rows
         catalog_data = []
-        for col_row in columns_result:
+        for column in columns:
             # Skip hidden columns (those starting with $, like $rowtime)
-            if col_row["column_name"].startswith("$"):
+            if column["column_name"].startswith("$"):
                 continue
 
             key = (
-                col_row["table_database"],
-                col_row["table_schema"],
-                col_row["table_name"],
+                column["table_database"],
+                column["table_schema"],
+                column["table_name"],
             )
             table_type = table_dict.get(key)
 
             if table_type:
                 normalized_type = type_mapping.get(table_type, table_type.lower())
-                catalog_data.append({
-                    "table_database": col_row["table_database"],
-                    "table_schema": col_row["table_schema"],
-                    "table_name": col_row["table_name"],
-                    "table_type": normalized_type,
-                    "table_comment": None,
-                    "column_name": col_row["column_name"],
-                    "column_index": col_row["column_index"],
-                    "column_type": col_row["column_type"],
-                    "column_comment": None,
-                    "table_owner": None,
-                })
+                catalog_data.append(
+                    {
+                        "table_database": column["table_database"],
+                        "table_schema": column["table_schema"],
+                        "table_name": column["table_name"],
+                        "table_type": normalized_type,
+                        "table_comment": None,
+                        "column_name": column["column_name"],
+                        "column_index": column["column_index"],
+                        "column_type": column["column_type"],
+                        "column_comment": None,
+                        "table_owner": None,
+                    }
+                )
 
         # Convert to agate.Table with the expected structure
         column_names = [
@@ -265,11 +230,7 @@ class ConfluentAdapter(SQLAdapter):
         ]
 
         # Create agate table
-        if catalog_data:
-            rows = [[row[col] for col in column_names] for row in catalog_data]
-        else:
-            rows = []
-
+        rows = [[row[col] for col in column_names] for row in catalog_data]
         table = agate.Table(rows, column_names)
 
         # Filter using the base adapter's method
