@@ -38,6 +38,16 @@
   {% do exceptions.raise_compiler_error(msg) %}
 {% endmacro %}
 
+{% macro map_table_type(table_type) %}
+  {% set type_mapping = {
+    'BASE TABLE': 'table',
+    'VIEW': 'view',
+    'EXTERNAL TABLE': 'external',
+    'SYSTEM TABLE': 'system_table'
+  } %}
+  {{ return(type_mapping.get(table_type, table_type)) }}
+{% endmacro %}
+
 {% macro confluent__list_relations_without_caching(schema_relation) -%}
   {% call statement('list_relations_without_caching', fetch_result=True) -%}
     SELECT
@@ -56,14 +66,8 @@
   {# We have to do this in jinja because we can't use CASE on INFORMATION_SCHEMA for some reason. #}
   {% set result_table = load_result('list_relations_without_caching').table %}
   {% set rows = [] %}
-  {% set type_mapping = {
-    'BASE TABLE': 'table',
-    'VIEW': 'view',
-    'EXTERNAL TABLE': 'external',
-    'SYSTEM TABLE': 'system_table'
-  } %}
   {% for row in result_table %}
-    {% set normalized_type = type_mapping.get(row['type'], row['type'] | lower) %}
+    {% set normalized_type = map_table_type(row['type']) %}
     {% do rows.append((
       row['database'],
       row['name'],
@@ -71,7 +75,6 @@
       normalized_type
     )) %}
   {% endfor %}
-
   {{ return(rows) }}
 {% endmacro %}
 

@@ -157,63 +157,44 @@ class ConfluentAdapter(SQLAdapter):
         Override catalog generation to work around Confluent Cloud's INFORMATION_SCHEMA limitations.
 
         Confluent Cloud doesn't support JOINs on INFORMATION_SCHEMA, so we:
-        1. Query TABLES and COLUMNS separately
-        2. Join them in Python
+        1. Query TABLES and COLUMNS with a single query
+        2. Split and then join them in Python
         3. Return an agate.Table with the standard catalog structure
         """
-        # database = information_schema.database
+        # Reuse the same default kwargs, although `schemas` is not used in the macro.
         kwargs = {"information_schema": information_schema, "schemas": schemas}
-        tables = self.execute_macro("get_catalog_tables", kwargs=kwargs)
-        columns = self.execute_macro("get_catalog_columns", kwargs=kwargs)
 
-        # Build a dictionary of tables for quick lookup
-        table_dict = {
-            (
-                table["table_database"],
-                table["table_schema"],
-                table["table_name"],
-            ): table["table_type"]
-            for table in tables
+        # This query return both tables and columns, all with the same row structure.
+        # We distinguish between them by the presence (or lack) of "table_name"/"column_name"
+        # This allows us to get the catalog with a single query, which, given the
+        # overhead of each query, is a significant time saving move.
+        catalog = self.execute_macro("get_catalog", kwargs=kwargs)
+
+        # For tables, all we need is a dict to go from table identifiers to table_type.
+        tables = {
+            (i["table_database"], i["table_schema"], i["table_name"]): i["table_type"]
+            for i in catalog
+            if i["table_type"] is not None
         }
 
-        # Type mapping
-        type_mapping = {
-            "BASE TABLE": "table",
-            "VIEW": "view",
-            "EXTERNAL TABLE": "external",
-            "SYSTEM TABLE": "system_table",
-        }
+        # Here we skip hidden columns (those starting with $, like $rowtime)
+        columns = [
+            i
+            for i in catalog
+            if i["column_name"] is not None and not i["column_name"].startswith("$")
+        ]
 
         # Join columns with tables and build result rows
         catalog_data = []
         for column in columns:
-            # Skip hidden columns (those starting with $, like $rowtime)
-            if column["column_name"].startswith("$"):
-                continue
-
             key = (
                 column["table_database"],
                 column["table_schema"],
                 column["table_name"],
             )
-            table_type = table_dict.get(key)
-
-            if table_type:
-                normalized_type = type_mapping.get(table_type, table_type.lower())
-                catalog_data.append(
-                    {
-                        "table_database": column["table_database"],
-                        "table_schema": column["table_schema"],
-                        "table_name": column["table_name"],
-                        "table_type": normalized_type,
-                        "table_comment": None,
-                        "column_name": column["column_name"],
-                        "column_index": column["column_index"],
-                        "column_type": column["column_type"],
-                        "column_comment": None,
-                        "table_owner": None,
-                    }
-                )
+            if table_type := tables.get(key):
+                column["table_type"] = table_type
+                catalog_data.append(column)
 
         # Convert to agate.Table with the expected structure
         column_names = [
@@ -222,11 +203,11 @@ class ConfluentAdapter(SQLAdapter):
             "table_name",
             "table_type",
             "table_comment",
+            "table_owner",
             "column_name",
             "column_index",
             "column_type",
             "column_comment",
-            "table_owner",
         ]
 
         # Create agate table
