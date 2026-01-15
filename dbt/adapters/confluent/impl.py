@@ -169,6 +169,15 @@ class ConfluentAdapter(SQLAdapter):
         # This allows us to get the catalog with a single query, which, given the
         # overhead of each query, is a significant time saving move.
         catalog = self.execute_macro("get_catalog", kwargs=kwargs)
+        catalog.sort(
+            lambda x: (
+                x["table_database"],
+                x["table_schema"],
+                x["table_name"],
+                x["table_type"] is None,
+            )
+        )
+        breakpoint()
 
         # For tables, all we need is a dict to go from table identifiers to table_type.
         tables = {
