@@ -14,7 +14,6 @@
     from INFORMATION_SCHEMA.`TABLES`
     where TABLE_CATALOG_ID = '{{ information_schema.database }}'
         and TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
-        and TABLE_TYPE <> 'SYSTEM TABLE'
     union all
     select
         TABLE_CATALOG_ID as table_database,

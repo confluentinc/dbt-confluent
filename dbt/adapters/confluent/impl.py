@@ -169,55 +169,34 @@ class ConfluentAdapter(SQLAdapter):
         # This allows us to get the catalog with a single query, which, given the
         # overhead of each query, is a significant time saving move.
         catalog = self.execute_macro("get_catalog", kwargs=kwargs)
+
+        # Sort by database.schema.name first, so we get all the rows (table and columns) for
+        # any given table in the right order.
+        # Then sort based on whether table_type is None.
+        # This sorts the list so that we get the table definition first, then all the
+        # columns for that table.
+        # Finally, sort by column_index so we can build the catalog table by simply
+        # iterating over this list in order.
         catalog.sort(
-            lambda x: (
+            key=lambda x: (
                 x["table_database"],
                 x["table_schema"],
                 x["table_name"],
                 x["table_type"] is None,
+                x["column_index"],
             )
         )
-        breakpoint()
-
-        # For tables, all we need is a dict to go from table identifiers to table_type.
-        tables = {
-            (i["table_database"], i["table_schema"], i["table_name"]): i["table_type"]
-            for i in catalog
-            if i["table_type"] is not None
-        }
-
-        # For columns, we need to filter out rows with no "column_name"
-        columns = [i for i in catalog if i["column_name"] is not None]
-
-        # Join columns with tables and build result rows
-        catalog_data = []
-        for column in columns:
-            key = (
-                column["table_database"],
-                column["table_schema"],
-                column["table_name"],
-            )
-            if table_type := tables.get(key):
-                column["table_type"] = table_type
-                catalog_data.append(column)
-
-        # Convert to agate.Table with the expected structure
-        column_names = [
-            "table_database",
-            "table_schema",
-            "table_name",
-            "table_type",
-            "table_comment",
-            "table_owner",
-            "column_name",
-            "column_index",
-            "column_type",
-            "column_comment",
-        ]
+        rows = []
+        table_type = None
+        for row in catalog:
+            if row["table_type"] is not None:
+                table_type = row["table_type"]
+                continue
+            row["table_type"] = table_type
+            rows.append(row)
 
         # Create agate table
-        rows = [[row[col] for col in column_names] for row in catalog_data]
-        table = agate.Table(rows, column_names)
+        table = agate.Table.from_object(rows)
 
         # Filter using the base adapter's method
         return self._catalog_filter_table(table, used_schemas)
