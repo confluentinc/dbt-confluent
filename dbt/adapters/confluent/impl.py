@@ -1,88 +1,23 @@
-import builtins
 import re
 from dataclasses import dataclass, field
-from typing import Callable
 
 import agate
-from dbt_common.dataclass_schema import StrEnum
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.base import BaseRelation
-from dbt.adapters.confluent import ConfluentConnectionManager
-from dbt.adapters.contracts.relation import Policy, RelationType
+from dbt.adapters.base.impl import InformationSchema
+from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
+from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.sql import SQLAdapter
-from dbt.adapters.utils import classproperty
-
-
-class ConfluentRelationType(StrEnum):
-    Table = "BASE TABLE"
-    External = "EXTERNAL TABLE"
-    SystemTable = "SYSTEM TABLE"
-    View = "VIEW"
 
 
 @dataclass(frozen=True, eq=False, repr=False)
 class ConfluentRelation(BaseRelation):
-    type: ConfluentRelationType | str | None = None
     quote_character: str = "`"
     include_policy: Policy = field(
         default_factory=lambda: Policy(database=False, schema=True, identifier=True)
     )
-
-    def __post_init__(self):
-        # TODO: This feels a bit forced, there may be a better way of handling
-        # the different names of relation types, but it works for now.
-        normalized_type = None
-
-        if self.type is not None:
-            if isinstance(self.type, ConfluentRelationType):
-                normalized_type = self.type
-            elif isinstance(self.type, str):
-                # Convert to lowercase because the default relation types are lowercase.
-                type_str = self.type.lower()
-
-                if type_str == RelationType.Table:
-                    normalized_type = ConfluentRelationType.Table
-                elif type_str == RelationType.View:
-                    normalized_type = ConfluentRelationType.View
-                elif type_str == RelationType.External:
-                    normalized_type = ConfluentRelationType.External
-                else:
-                    normalized_type = ConfluentRelationType(self.type)
-        object.__setattr__(self, "type", normalized_type)
-
-    @classproperty
-    def Table(cls) -> str:
-        return str(ConfluentRelationType.Table)
-
-    @classproperty
-    def View(cls) -> str:
-        return str(ConfluentRelationType.View)
-
-    @classproperty
-    def External(cls) -> str:
-        return str(ConfluentRelationType.External)
-
-    @classproperty
-    def get_relation_type(cls) -> builtins.type[ConfluentRelationType]:
-        return ConfluentRelationType
-
-    @property
-    def is_table(self) -> bool:
-        """
-        Overridden property.
-        Checks if the relation type is a Table.
-        """
-        return self.type == ConfluentRelationType.Table
-
-    @property
-    def is_view(self) -> bool:
-        """
-        Overridden property.
-        Checks if the relation type is a View.
-        """
-        return self.type == ConfluentRelationType.View
 
     def quoted(self, identifier):
         # Flink SQL does not support backticks in identifiers, so raise an error instead
@@ -96,9 +31,7 @@ class ConfluentRelation(BaseRelation):
         return f"{self.quote_character}{identifier}{self.quote_character}"
 
     def make_confluent_fqn(self):
-        return ".".join(
-            [f"`{p}`" for p in [self.database, self.schema, self.identifier] if p]
-        )
+        return ".".join([f"`{p}`" for p in [self.database, self.schema, self.identifier] if p])
 
 
 class ConfluentAdapter(SQLAdapter):
@@ -108,6 +41,7 @@ class ConfluentAdapter(SQLAdapter):
 
     ConnectionManager: type[ConfluentConnectionManager] = ConfluentConnectionManager
     Relation: type[ConfluentRelation] = ConfluentRelation
+    Column: type[ConfluentColumn] = ConfluentColumn
 
     @classmethod
     def quote(cls, identifier: str) -> str:
@@ -184,7 +118,7 @@ class ConfluentAdapter(SQLAdapter):
         the original view.
         Link to jira issue: https://confluentinc.atlassian.net/browse/FSE-878
         """
-        if from_relation.type != ConfluentRelationType.View:
+        if not from_relation.is_view:
             raise DbtDatabaseError(
                 f"Renaming is only supported in views, got {from_relation.type}"
             )
@@ -192,9 +126,7 @@ class ConfluentAdapter(SQLAdapter):
         self.cache_renamed(from_relation, to_relation)
 
         # Now, to manually duplicate a view, we first need to get its definition using a SHOW
-        _, res = self.execute(
-            f"SHOW CREATE VIEW {from_relation.identifier}", fetch=True
-        )
+        _, res = self.execute(f"SHOW CREATE VIEW {from_relation.identifier}", fetch=True)
         ddl = res[0].values()[0]
 
         # Fully quote the entire relation, regardless of include policies.
@@ -214,3 +146,57 @@ class ConfluentAdapter(SQLAdapter):
 
         # Drop the original one
         self.execute(f"DROP VIEW {old_fqn}")
+
+    def _get_one_catalog(
+        self,
+        information_schema: InformationSchema,
+        schemas: set[str],
+        used_schemas: frozenset[tuple[str, str]],
+    ) -> "agate.Table":
+        """
+        Override catalog generation to work around Confluent Cloud's INFORMATION_SCHEMA limitations.
+
+        Confluent Cloud doesn't support JOINs on INFORMATION_SCHEMA, so we:
+        1. Query TABLES and COLUMNS with a single query
+        2. Split and then join them in Python
+        3. Return an agate.Table with the standard catalog structure
+        """
+        # Reuse the same default kwargs, although `schemas` is not used in the macro.
+        kwargs = {"information_schema": information_schema, "schemas": schemas}
+
+        # This query return both tables and columns, all with the same row structure.
+        # We distinguish between them by the presence (or lack) of "table_name"/"column_name"
+        # This allows us to get the catalog with a single query, which, given the
+        # overhead of each query, is a significant time saving move.
+        catalog = self.execute_macro("get_catalog", kwargs=kwargs)
+
+        # Sort by database.schema.name first, so we get all the rows (table and columns) for
+        # any given table in the right order.
+        # Then sort based on whether table_type is None.
+        # This sorts the list so that we get the table definition first, then all the
+        # columns for that table.
+        # Finally, sort by column_index so we can build the catalog table by simply
+        # iterating over this list in order.
+        catalog.sort(
+            key=lambda x: (
+                x["table_database"],
+                x["table_schema"],
+                x["table_name"],
+                x["table_type"] is None,
+                x["column_index"],
+            )
+        )
+        rows = []
+        table_type = None
+        for row in catalog:
+            if row["table_type"] is not None:
+                table_type = row["table_type"]
+                continue
+            row["table_type"] = table_type
+            rows.append(row)
+
+        # Create agate table
+        table = agate.Table.from_object(rows)
+
+        # Filter using the base adapter's method
+        return self._catalog_filter_table(table, used_schemas)
