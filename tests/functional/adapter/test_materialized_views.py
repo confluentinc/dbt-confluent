@@ -1,7 +1,8 @@
 import pytest
+from fixtures import ConfluentFixtures
 
 from dbt.adapters.base.relation import BaseRelation
-from dbt.tests.adapter.materialized_view import basic
+from dbt.tests.adapter.materialized_view.basic import MaterializedViewBasic
 from dbt.tests.util import (
     assert_message_in_logs,
     get_model_file,
@@ -10,34 +11,8 @@ from dbt.tests.util import (
     set_model_file,
 )
 
-# class TestConfluentMaterializedViewsBasic(basic.MaterializedViewBasic):
-#     @pytest.fixture(scope="function", autouse=True)
-#     def setup(self, project, my_materialized_view):
-#         run_dbt(["seed"])
-#         run_dbt(["run", "--models", my_materialized_view.identifier, "--full-refresh"])
 
-#         # the tests touch these files, store their contents in memory
-#         initial_model = get_model_file(project, my_materialized_view)
-
-#         yield
-
-#         # and then reset them after the test runs
-#         set_model_file(project, my_materialized_view, initial_model)
-#         # Override this method to avoid trying dropping the schema
-#         # project.run_sql(f"drop schema if exists {project.test_schema} cascade")
-
-#     @pytest.fixture(scope="class")
-#     def project_config_update(self, unique_schema):
-#         return {
-#             "models": {"+schema": unique_schema},
-#             "seeds": {
-#                 "+schema": unique_schema,
-#                 "+full_refresh": True,
-#             },
-#         }
-
-
-class TestConfluentMaterializedViewsBasic(basic.MaterializedViewBasic):
+class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBasic):
     """
     Confluent Flink SQL implements materialized views as CTAS tables.
     The materialized_view materialization works, but INFORMATION_SCHEMA
@@ -54,16 +29,6 @@ class TestConfluentMaterializedViewsBasic(basic.MaterializedViewBasic):
         initial_model = get_model_file(project, my_materialized_view)
         yield
         set_model_file(project, my_materialized_view, initial_model)
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return {
-            "models": {"+schema": unique_schema},
-            "seeds": {
-                "+schema": unique_schema,
-                "+full_refresh": True,
-            },
-        }
 
     @staticmethod
     def query_relation_type(project, relation: BaseRelation) -> str | None:
@@ -103,7 +68,9 @@ class TestConfluentMaterializedViewsBasic(basic.MaterializedViewBasic):
             ["--debug", "run", "--models", my_materialized_view.identifier, "--full-refresh"]
         )
         assert self.query_relation_type(project, my_materialized_view) == "table"
-        assert_message_in_logs(f"Applying REPLACE to: {my_materialized_view}", logs)
+        # This message doesn't show up because our materialization strategy
+        # never call the default replace_sql macro.
+        # assert_message_in_logs(f"Applying REPLACE to: {my_materialized_view}", logs)
 
     def test_materialized_view_replaces_table(self, project, my_table):
         run_dbt(["run", "--models", my_table.identifier])

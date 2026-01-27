@@ -1,13 +1,4 @@
 {% macro confluent__get_replace_sql(existing_relation, target_relation, sql) %}
-    {# Confluent doesn't support multiple statements in one query.
-       Execute drop separately, then return the create statement. #}
-    {% call statement('drop_for_replace') %}
-        DROP TABLE IF EXISTS {{ existing_relation.render() }}
-    {% endcall %}
-    {{ get_create_sql(target_relation, sql) }}
-{% endmacro %}
-
-{% macro confluent__get_replace_sql(existing_relation, target_relation, sql) %}
     {% set is_replaceable = existing_relation.type == target_relation_type and existing_relation.can_be_replaced %}
     {{ print("Is replaceable? " ~ is_replaceable) }}
 
@@ -50,6 +41,6 @@
     {# /* no renaming is allowed, so just drop and create */ #}
     {%- else -%}
         {{ get_drop_sql(existing_relation) }};
-        {{ get_create_sql(target_relation, sql) }};
+        {{ get_create_sql(target_relation, sql) }}
     {%- endif -%}
 {% endmacro %}

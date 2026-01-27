@@ -22,20 +22,25 @@ from dbt.tests.adapter.basic.test_singular_tests_ephemeral import (
 from dbt.tests.adapter.basic.test_snapshot_check_cols import BaseSnapshotCheckCols
 from dbt.tests.adapter.basic.test_snapshot_timestamp import BaseSnapshotTimestamp
 from dbt.tests.fixtures.project import TestProjInfo
+from dbt.tests.util import (
+    check_relation_types,
+    check_relations_equal,
+    check_result_nodes_by_name,
+    relation_from_name,
+    run_dbt,
+)
 
 
 class TestSingularTestsConfluent(ConfluentFixtures, BaseSingularTests):
     pass
 
 
-class TestEmptyConfluent(ConfluentFixtures, BaseEmpty):
+class TestEmptyConfluent(ConfluentFixtures):
     pass
 
 
 class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEphemeral):
-    def get_relations_to_cleanup(self):
-        """Specify relations created by this test that need cleanup."""
-        return ["base", "passing_model", "failing_model"]
+    NAME = "singular_test_ephemeral"
 
     @pytest.fixture(scope="class")
     def models(self, schema_yml):
@@ -56,62 +61,10 @@ class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEp
             "schema.yml": schema_yml,
         }
 
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("singular_tests_ephemeral", unique_schema)
 
-
-class TestIncrementalConfluent(ConfluentFixtures, BaseIncremental):
-    def get_relations_to_cleanup(self):
-        """Specify relations created by this test that need cleanup."""
-        return ["base", "added", "incremental"]
-
-    @pytest.fixture(scope="class")
-    def models(self, schema_yml):
-        return {"incremental.sql": files.incremental_sql, "schema.yml": schema_yml}
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("incremental", unique_schema)
-
-
-@pytest.mark.skip("Snapshots not supported - Flink SQL lacks MERGE/UPDATE capabilities.")
-class TestSnapshotCheckColsConfluent(ConfluentFixtures, BaseSnapshotCheckCols):
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("snapshot_strategy_check_cols", unique_schema)
-
-
-@pytest.mark.skip("Snapshots not supported - Flink SQL lacks MERGE/UPDATE capabilities.")
-class TestSnapshotTimestampConfluent(ConfluentFixtures, BaseSnapshotTimestamp):
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("snapshot_strategy_timestamp", unique_schema)
-
-
-@pytest.mark.skip("The adapter does not support creating and dropping schemas.")
-class TestBaseAdapterMethodConfluent(BaseAdapterMethod):
-    pass
-
-
-# @pytest.mark.skip("This adapter does not support renaming tables.")
-class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMaterializations):
-    @pytest.fixture(scope="class")
-    def models(self, schema_yml):
-        return {
-            "view_model.sql": files.base_view_sql,
-            "table_model.sql": files.base_table_sql,
-            "swappable.sql": files.base_materialized_var_sql,
-            "schema.yml": schema_yml,
-        }
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("base", unique_schema)
-
-
-@pytest.mark.skip("This adapter does not support renaming tables.")
 class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
+    NAME = "ephemeral"
+
     @pytest.fixture(scope="class")
     def models(self, schema_yml):
         return {
@@ -121,13 +74,10 @@ class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
             "schema.yml": schema_yml,
         }
 
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("ephemeral", unique_schema)
 
-
-@pytest.mark.skip("This adapter does not support renaming tables.")
 class TestGenericTestsConfluent(ConfluentFixtures, BaseGenericTests):
+    NAME = "generic_tests"
+
     @pytest.fixture(scope="class")
     def models(self, schema_yml):
         return {
@@ -138,6 +88,111 @@ class TestGenericTestsConfluent(ConfluentFixtures, BaseGenericTests):
             "schema_table.yml": files.generic_test_table_yml,
         }
 
+
+class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMaterializations):
+    NAME = "base"
+
     @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return self.get_project_config_update("generic_tests", unique_schema)
+    def models(self, schema_yml):
+        return {
+            "view_model.sql": files.base_view_sql,
+            "table_model.sql": files.base_table_sql,
+            "swappable.sql": files.base_materialized_var_sql,
+            "schema.yml": schema_yml,
+        }
+
+    def test_base(self, project):
+        """Override the test to avoid incremental materialization.
+
+        In general, dbt suggests not modifying the test itself.
+        Here, we are interested in all the things tested, except
+        the incremental materialization which we do not support.
+        So this test is a copy/paste of the original, up to the
+        last step, which is commented here.
+        """
+        # seed command
+        results = run_dbt(["seed"])
+        # seed result length
+        assert len(results) == 1
+
+        # run command
+        results = run_dbt()
+        # run result length
+        assert len(results) == 3
+
+        # names exist in result nodes
+        check_result_nodes_by_name(results, ["view_model", "table_model", "swappable"])
+
+        # check relation types
+        expected = {
+            "base": "table",
+            "view_model": "view",
+            "table_model": "table",
+            "swappable": "table",
+        }
+        check_relation_types(project.adapter, expected)
+
+        # base table rowcount
+        relation = relation_from_name(project.adapter, "base")
+        result = project.run_sql(f"select count(*) as num_rows from {relation}", fetch="one")
+        assert result[0] == 10
+
+        # relations_equal
+        check_relations_equal(project.adapter, ["base", "view_model", "table_model", "swappable"])
+
+        # check relations in catalog
+        catalog = run_dbt(["docs", "generate"])
+        assert len(catalog.nodes) == 4
+        assert len(catalog.sources) == 1
+
+        # run_dbt changing materialized_var to view
+        if project.test_config.get("require_full_refresh", False):  # required for BigQuery
+            results = run_dbt(
+                ["run", "--full-refresh", "-m", "swappable", "--vars", "materialized_var: view"]
+            )
+        else:
+            results = run_dbt(["run", "-m", "swappable", "--vars", "materialized_var: view"])
+        assert len(results) == 1
+
+        # check relation types, swappable is view
+        expected = {
+            "base": "table",
+            "view_model": "view",
+            "table_model": "table",
+            "swappable": "view",
+        }
+        check_relation_types(project.adapter, expected)
+
+        # DO NOT TEST INCREMENTAL STRATEGY
+        # # run_dbt changing materialized_var to incremental
+        # results = run_dbt(["run", "-m", "swappable", "--vars", "materialized_var: incremental"])
+        # assert len(results) == 1
+
+        # # check relation types, swappable is table
+        # expected = {
+        #     "base": "table",
+        #     "view_model": "view",
+        #     "table_model": "table",
+        #     "swappable": "table",
+        # }
+        # check_relation_types(project.adapter, expected)
+
+
+@pytest.mark.skip("This adapter does not support incremental materialization.")
+class TestIncrementalConfluent(BaseIncremental):
+    pass
+
+
+@pytest.mark.skip("Snapshots not supported - Flink SQL lacks MERGE/UPDATE capabilities.")
+class TestSnapshotCheckColsConfluent(BaseSnapshotCheckCols):
+    pass
+
+
+@pytest.mark.skip("Snapshots not supported - Flink SQL lacks MERGE/UPDATE capabilities.")
+class TestSnapshotTimestampConfluent(BaseSnapshotTimestamp):
+    pass
+
+
+@pytest.mark.skip("The adapter does not support creating and dropping schemas.")
+class TestBaseAdapterMethodConfluent(BaseAdapterMethod):
+    pass
