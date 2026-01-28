@@ -1,5 +1,4 @@
 import pytest
-from fixtures import ConfluentFixtures
 
 from dbt.adapters.base.relation import BaseRelation
 from dbt.tests.adapter.materialized_view.basic import MaterializedViewBasic
@@ -10,6 +9,7 @@ from dbt.tests.util import (
     run_dbt_and_capture,
     set_model_file,
 )
+from tests.functional.adapter.fixtures import ConfluentFixtures
 
 
 class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBasic):

@@ -4,7 +4,6 @@ from textwrap import dedent
 
 import pytest
 from dbt_common.events.event_manager_client import cleanup_event_logger
-from fixtures import ConfluentFixtures
 
 from dbt.deprecations import reset_deprecations
 from dbt.events.logging import setup_event_logger
@@ -29,13 +28,14 @@ from dbt.tests.util import (
     relation_from_name,
     run_dbt,
 )
+from tests.functional.adapter.fixtures import ConfluentFixtures
 
 
 class TestSingularTestsConfluent(ConfluentFixtures, BaseSingularTests):
     pass
 
 
-class TestEmptyConfluent(ConfluentFixtures):
+class TestEmptyConfluent(ConfluentFixtures, BaseEmpty):
     pass
 
 

@@ -5,8 +5,8 @@ import pytest
 
 class ConfluentFixtures:
     @pytest.fixture(scope="class")
-    def project_config_update(request, unique_schema):
-        if name := getattr(request, "NAME", None):
+    def project_config_update(self, unique_schema):
+        if name := getattr(self, "NAME", None):
             config = {"name": name}
         else:
             config = {}
@@ -26,7 +26,7 @@ class ConfluentFixtures:
         }
 
     @pytest.fixture(autouse=True)
-    def clean_up(project):
+    def clean_up(self):
         """
         This adapter does not support creating and dropping whole schemas.
         For now this is a no-op.
