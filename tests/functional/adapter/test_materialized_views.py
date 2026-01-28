@@ -69,7 +69,7 @@ class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBas
         )
         assert self.query_relation_type(project, my_materialized_view) == "table"
         # This message doesn't show up because our materialization strategy
-        # never call the default replace_sql macro.
+        # never calls the default replace_sql macro.
         # assert_message_in_logs(f"Applying REPLACE to: {my_materialized_view}", logs)
 
     def test_materialized_view_replaces_table(self, project, my_table):
