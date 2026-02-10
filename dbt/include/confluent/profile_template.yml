@@ -20,6 +20,10 @@ prompts:
     hide_input: true
   dbname:
     hint: "default database name"
+  execution_mode:
+    hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'. Defaults to 'streaming_query'"
+    type: "string"
+    default: 'snapshot'
   threads:
     hint: "1 or more"
     type: "int"
