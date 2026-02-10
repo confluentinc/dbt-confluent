@@ -5,9 +5,10 @@ import agate
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
-from dbt.adapters.base import BaseRelation
-from dbt.adapters.base.impl import InformationSchema
+from dbt.adapters.base import BaseRelation, available
+from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_table
 from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
+from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.sql import SQLAdapter
 
@@ -90,6 +91,23 @@ class ConfluentAdapter(SQLAdapter):
         Returns canonical date func
         """
         return "CURRENT_TIMESTAMP"
+
+    @available.parse(_parse_callback_empty_table)
+    def execute(
+        self,
+        sql: str,
+        auto_begin: bool = False,
+        fetch: bool = False,
+        limit: int | None = None,
+        execution_mode: str | None = None,
+    ) -> tuple[AdapterResponse, "agate.Table"]:
+        return self.connections.execute(
+            sql=sql,
+            auto_begin=auto_begin,
+            fetch=fetch,
+            limit=limit,
+            execution_mode=execution_mode,
+        )
 
     @classmethod
     def convert_text_type(cls, agate_table: agate.Table, col_idx: int) -> str:

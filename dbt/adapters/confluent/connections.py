@@ -2,7 +2,7 @@ import logging
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import confluent_sql
 from confluent_sql.execution_mode import ExecutionMode
@@ -28,6 +28,9 @@ from dbt.adapters.events.types import (
     SQLQueryStatus,
 )
 from dbt.adapters.sql import SQLConnectionManager
+
+if TYPE_CHECKING:
+    import agate
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +77,26 @@ class ConfluentCredentials(Credentials):
 class ConfluentConnectionManager(SQLConnectionManager):
     TYPE = "confluent"
 
+    def execute(
+        self,
+        sql: str,
+        auto_begin: bool = False,
+        fetch: bool = False,
+        limit: int | None = None,
+        execution_mode: str | None = None,
+    ) -> tuple[AdapterResponse, "agate.Table"]:
+        """ This is customized so we can pass execution_mode down the chain. """
+        from dbt_common.clients.agate_helper import empty_table
+
+        sql = self._add_query_comment(sql)
+        _, cursor = self.add_query(sql, auto_begin, execution_mode=execution_mode)
+        response = self.get_response(cursor)
+        if fetch:
+            table = self.get_result_from_cursor(cursor, limit)
+        else:
+            table = empty_table()
+        return response, table
+
     def add_query(
         self,
         sql: str,
@@ -82,6 +105,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         abridge_sql_log: bool = False,
         retryable_exceptions: tuple[type[Exception], ...] = (),
         retry_limit: int = 1,
+        execution_mode: str | None = None,
     ) -> tuple[Connection, Any]:
         """
         Copied from upstream (in SqlConnectionManager) with handling of cursor's
@@ -152,14 +176,12 @@ class ConfluentConnectionManager(SQLConnectionManager):
 
             pre = time.perf_counter()
 
-            node_info = get_node_info()
-            node_mode = node_info.get("config", {}).get("execution_mode")
-            if node_mode:
-                execution_mode = ExecutionMode(node_mode)
+            if execution_mode:
+                resolved_mode = ExecutionMode(execution_mode)
             else:
-                execution_mode = ExecutionMode(connection.credentials.execution_mode)
+                resolved_mode = ExecutionMode(connection.credentials.execution_mode)
 
-            cursor = connection.handle.cursor(mode=execution_mode)
+            cursor = connection.handle.cursor(mode=resolved_mode)
             _execute_query_with_retry(
                 cursor=cursor,
                 sql=sql,

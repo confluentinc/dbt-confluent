@@ -7,7 +7,8 @@
       {{ write(compiled_code) }}
     {%- endif -%}
     {%- if language == 'sql'-%}
-      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result) -%}
+      {%- set execution_mode = config.get('execution_mode', none) if config is defined else none -%}
+      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode) -%}
     {%- elif language == 'python' -%}
       {%- set res = submit_python_job(model, compiled_code) -%}
       {#-- TODO: What should table be for python models? --#}

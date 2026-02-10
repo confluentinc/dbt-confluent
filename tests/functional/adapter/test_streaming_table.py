@@ -18,7 +18,6 @@ from tests.functional.adapter.fixtures import ConfluentFixtures
 MY_STREAMING_TABLE = """
 {{ config(
     materialized='streaming_table',
-    execution_mode='snapshot',
     options={'changelog.mode': 'append'}
 ) }}
 select order_id, price, order_time from {{ ref('my_streaming_source') }}
@@ -27,7 +26,6 @@ select order_id, price, order_time from {{ ref('my_streaming_source') }}
 MY_STREAMING_SOURCE = """
 {{ config(
     materialized='streaming_source',
-    execution_mode='snapshot',
     connector='faker',
     options={
         'rows-per-second': '1',
@@ -67,15 +65,6 @@ class TestStreamingTable(ConfluentFixtures):
             "my_streaming_source.sql": MY_STREAMING_SOURCE,
             "my_streaming_table.sql": MY_STREAMING_TABLE,
             "models.yml": MODELS_YML
-        }
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return {
-            "models": {
-                "+schema": unique_schema,
-                "+execution_mode": "snapshot"
-            },
         }
 
     @pytest.fixture(autouse=True)
