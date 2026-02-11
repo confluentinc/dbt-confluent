@@ -1,4 +1,4 @@
-{%- macro statement(name=None, fetch_result=False, auto_begin=True, language='sql') -%}
+{%- macro statement(name=None, fetch_result=False, auto_begin=True, language='sql', limit=None) -%}
   {%- if execute: -%}
     {%- set compiled_code = caller() -%}
 
@@ -8,7 +8,7 @@
     {%- endif -%}
     {%- if language == 'sql'-%}
       {%- set execution_mode = config.get('execution_mode', none) if config is defined else none -%}
-      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode) -%}
+      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode, limit=limit) -%}
     {%- elif language == 'python' -%}
       {%- set res = submit_python_job(model, compiled_code) -%}
       {#-- TODO: What should table be for python models? --#}

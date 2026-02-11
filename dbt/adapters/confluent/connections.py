@@ -85,7 +85,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         limit: int | None = None,
         execution_mode: str | None = None,
     ) -> tuple[AdapterResponse, "agate.Table"]:
-        """ This is customized so we can pass execution_mode down the chain. """
+        """This is customized so we can pass execution_mode down the chain."""
         from dbt_common.clients.agate_helper import empty_table
 
         sql = self._add_query_comment(sql)
@@ -234,8 +234,8 @@ class ConfluentConnectionManager(SQLConnectionManager):
             return connection
 
         credentials = connection.credentials
-        logging.basicConfig(level=logging.INFO, force=True)
-        logging.getLogger().handlers[0].addFilter(logging.Filter("confluent_sql"))
+        # logging.basicConfig(level=logging.INFO, force=True)
+        # logging.getLogger().handlers[0].addFilter(logging.Filter("confluent_sql"))
 
         try:
             handle = confluent_sql.connect(
