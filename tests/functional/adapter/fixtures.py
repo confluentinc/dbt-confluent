@@ -16,6 +16,9 @@ class ConfluentFixtures:
         # empty string as default.
         return {
             **config,
+            "tests": {
+                "+schema": unique_schema,
+            },
             "models": {
                 "+schema": unique_schema,
             },

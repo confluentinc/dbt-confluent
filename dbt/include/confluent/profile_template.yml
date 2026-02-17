@@ -21,9 +21,9 @@ prompts:
   dbname:
     hint: "default database name"
   execution_mode:
-    hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'. Defaults to 'streaming_query'"
+    hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'"
     type: "string"
-    default: 'snapshot'
+    default: 'streaming_query'
   threads:
     hint: "1 or more"
     type: "int"

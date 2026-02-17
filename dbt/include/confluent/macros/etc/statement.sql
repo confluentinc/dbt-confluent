@@ -1,4 +1,14 @@
-{%- macro statement(name=None, fetch_result=False, auto_begin=True, language='sql', limit=None) -%}
+-- This macro is customized so we can add a `limit` at call site to call `fetchmany(limit)`
+-- rather than `fetchall`, and also to get the `execution_mode` from the config, so that
+-- we can instantiate a different cursor in `adapter.execute`
+{%- macro statement(
+  name=None,
+  fetch_result=False,
+  auto_begin=True,
+  language='sql',
+  limit=None,
+  execution_mode=None
+) -%}
   {%- if execute: -%}
     {%- set compiled_code = caller() -%}
 
@@ -7,7 +17,9 @@
       {{ write(compiled_code) }}
     {%- endif -%}
     {%- if language == 'sql'-%}
-      {%- set execution_mode = config.get('execution_mode', none) if config is defined else none -%}
+      {% if not execution_mode %}
+        {% set execution_mode = config.get("execution_mode", None) %}
+      {% endif %}
       {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode, limit=limit) -%}
     {%- elif language == 'python' -%}
       {%- set res = submit_python_job(model, compiled_code) -%}

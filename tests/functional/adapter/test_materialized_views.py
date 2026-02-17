@@ -20,8 +20,12 @@ class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBas
     """
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_seed(self, project, my_materialized_view):
+    def cleanup(self, project):
         run_dbt(["seed"])
+        yield
+        project.run_sql(f"drop table if exists my_seed")
+        project.run_sql(f"drop table if exists my_table")
+        project.run_sql(f"drop table if exists my_view")
 
     @pytest.fixture(scope="function", autouse=True)
     def setup(self, project, my_materialized_view):
@@ -29,6 +33,7 @@ class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBas
         initial_model = get_model_file(project, my_materialized_view)
         yield
         set_model_file(project, my_materialized_view, initial_model)
+        project.run_sql(f"drop table if exists {my_materialized_view}")
 
     @staticmethod
     def query_relation_type(project, relation: BaseRelation) -> str | None:
@@ -44,7 +49,7 @@ class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBas
         if result is None:
             return None
 
-        table_type = result[0]
+        table_type = result[0][0]
         type_mapping = {
             "BASE TABLE": "table",
             "VIEW": "view",

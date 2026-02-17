@@ -12,6 +12,8 @@ from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.sql import SQLAdapter
 
+from .utils import compact_changelog_results, fetchall_with_retry, fetchone_with_retry
+
 
 @dataclass(frozen=True, eq=False, repr=False)
 class ConfluentRelation(BaseRelation):
@@ -41,6 +43,7 @@ class ConfluentAdapter(SQLAdapter):
     """
 
     ConnectionManager: type[ConfluentConnectionManager] = ConfluentConnectionManager
+    connections: ConfluentConnectionManager
     Relation: type[ConfluentRelation] = ConfluentRelation
     Column: type[ConfluentColumn] = ConfluentColumn
 
@@ -218,3 +221,29 @@ class ConfluentAdapter(SQLAdapter):
 
         # Filter using the base adapter's method
         return self._catalog_filter_table(table, used_schemas)
+
+    def run_sql_for_tests(self, sql, fetch, conn):
+        cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
+        try:
+            cursor.execute(sql)
+            if hasattr(conn.handle, "commit"):
+                conn.handle.commit()
+            if fetch == "one":
+                res = fetchone_with_retry(cursor)
+                rows = [res] if res else []
+            elif fetch == "all":
+                rows = fetchall_with_retry(cursor)
+            else:
+                return
+            if cursor.returns_changelog and rows:
+                rows = compact_changelog_results(rows)
+            return rows
+        except BaseException as e:
+            if conn.handle and not getattr(conn.handle, "closed", True):
+                conn.handle.rollback()
+            print(sql)
+            print(e)
+            raise
+        finally:
+            conn.transaction_open = False
+            cursor.close()

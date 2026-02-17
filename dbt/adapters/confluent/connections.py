@@ -1,5 +1,6 @@
 import logging
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,8 @@ from dbt.adapters.events.types import (
     SQLQueryStatus,
 )
 from dbt.adapters.sql import SQLConnectionManager
+
+from .utils import compact_changelog_results, fetch_from_cursor
 
 if TYPE_CHECKING:
     import agate
@@ -77,6 +80,24 @@ class ConfluentCredentials(Credentials):
 class ConfluentConnectionManager(SQLConnectionManager):
     TYPE = "confluent"
 
+    @classmethod
+    def get_result_from_cursor(cls, cursor: Any, limit: int | None) -> "agate.Table":
+        from dbt_common.clients.agate_helper import table_from_data_flat
+
+        data: Iterable[Any] = []
+        column_names: list[str] = []
+
+        if cursor.description is not None:
+            column_names = [col[0] for col in cursor.description]
+            rows = fetch_from_cursor(cursor, limit)
+
+            if cursor.returns_changelog and rows:
+                rows = compact_changelog_results(rows)
+
+            data = cls.process_results(column_names, rows)
+
+        return table_from_data_flat(data, column_names)
+
     def execute(
         self,
         sql: str,
@@ -92,8 +113,10 @@ class ConfluentConnectionManager(SQLConnectionManager):
         _, cursor = self.add_query(sql, auto_begin, execution_mode=execution_mode)
         response = self.get_response(cursor)
         if fetch:
+            print(f"LIMIT in execute {limit}")
             table = self.get_result_from_cursor(cursor, limit)
         else:
+            cursor.close()
             table = empty_table()
         return response, table
 
@@ -234,8 +257,8 @@ class ConfluentConnectionManager(SQLConnectionManager):
             return connection
 
         credentials = connection.credentials
-        # logging.basicConfig(level=logging.INFO, force=True)
-        # logging.getLogger().handlers[0].addFilter(logging.Filter("confluent_sql"))
+        logging.basicConfig(level=logging.INFO, force=True)
+        logging.getLogger().handlers[0].addFilter(logging.Filter("confluent_sql"))
 
         try:
             handle = confluent_sql.connect(
