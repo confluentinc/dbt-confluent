@@ -279,8 +279,6 @@ class ConfluentConnectionManager(SQLConnectionManager):
             return connection
 
         credentials = connection.credentials
-        logging.basicConfig(level=logging.INFO, force=True)
-        logging.getLogger().handlers[0].addFilter(logging.Filter("confluent_sql"))
 
         try:
             handle = confluent_sql.connect(

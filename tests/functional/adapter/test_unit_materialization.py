@@ -18,7 +18,6 @@ from tests.functional.adapter.fixtures import ConfluentFixtures
 MY_STREAMING_TABLE = """
 {{ config(
     materialized='streaming_table',
-    with={'changelog.mode': 'append'}
 ) }}
 select order_id, price, order_time from {{ ref('my_streaming_source') }}
 """
@@ -30,7 +29,6 @@ MY_STREAMING_SOURCE = """
     options={
         'rows-per-second': '1',
         'number-of-rows': '100',
-        'changelog.mode': 'append',
     }
 ) }}
 order_id BIGINT,
@@ -44,11 +42,6 @@ SCHEMA_YML = """
 unit_tests:
   - name: test_streaming_table
     model: my_streaming_table
-    config:
-      watermarks:
-        my_streaming_source:
-          column: order_time
-          expression: "order_time + INTERVAL '10' SECONDS"
     given:
       - input: ref('my_streaming_source')
         rows:
@@ -96,18 +89,15 @@ class TestStreamingTests(ConfluentFixtures):
         yield {
             "my_streaming_source.sql": MY_STREAMING_SOURCE,
             "my_streaming_table.sql": MY_STREAMING_TABLE,
-            "schema.yml": SCHEMA_YML
+            "schema.yml": SCHEMA_YML,
         }
 
-    @pytest.fixture(autouse=True)
-    def clean_up(self, project):
+    @pytest.fixture(scope="class", autouse=True)
+    def custom_clean_up(self, project):
         yield
         project.run_sql(f"drop table my_streaming_source")
         project.run_sql(f"drop table my_streaming_table")
 
-
     def test_streamint_tests(self, project):
         results = run_dbt(["run"])
         run_dbt(["test"])
-
-

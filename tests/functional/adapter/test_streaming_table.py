@@ -66,7 +66,7 @@ class TestStreamingTable(ConfluentFixtures):
         }
 
     @pytest.fixture(autouse=True)
-    def clean_up(self, project):
+    def custom_clean_up(self, project):
         yield
         project.run_sql(f"drop table if exists my_streaming_source")
         project.run_sql(f"drop table if exists my_streaming_table")

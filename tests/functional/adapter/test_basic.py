@@ -80,6 +80,7 @@ def check_relations_equal(adapter, relation_names, compare_snapshot_cols=False):
 class TestSingularTestsConfluent(ConfluentFixtures, BaseSingularTests):
     NAME = "singular_tests"
 
+
 class TestEmptyConfluent(ConfluentFixtures, BaseEmpty):
     pass
 
@@ -120,10 +121,12 @@ class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
         }
 
     def test_ephemeral(self, project):
-        """This is overridden solely so we can use fetchall instead of fetchone.
+        """This is overridden to use fetchall instead of fetchone, and a custom check for rels.
 
         The problem is that fetchone fetches a single changelog operation in a
-        non-append-only statement, so our "COUNT" result won't be the latest one"""
+        non-append-only statement, so our "COUNT" result won't be the latest one.
+        See the comment in `check_relations_equal` for why that's needed.
+        """
         # seed command
         results = run_dbt(["seed"])
         assert len(results) == 1
@@ -153,6 +156,7 @@ class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
         manifest = get_manifest(project.project_root)
         assert len(manifest.nodes) == 4
         assert len(manifest.sources) == 1
+
 
 class TestGenericTestsConfluent(ConfluentFixtures, BaseGenericTests):
     NAME = "generic_tests"
