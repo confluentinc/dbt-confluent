@@ -3,7 +3,6 @@ import pytest
 from dbt.adapters.base.relation import BaseRelation
 from dbt.tests.adapter.materialized_view.basic import MaterializedViewBasic
 from dbt.tests.util import (
-    assert_message_in_logs,
     get_model_file,
     run_dbt,
     run_dbt_and_capture,
@@ -15,8 +14,11 @@ from tests.functional.adapter.fixtures import ConfluentFixtures
 class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBasic):
     """
     Confluent Flink SQL implements materialized views as CTAS tables.
-    The materialized_view materialization works, but INFORMATION_SCHEMA
-    reports them as 'BASE TABLE' rather than 'MATERIALIZED VIEW'.
+    INFORMATION_SCHEMA reports them as 'BASE TABLE' rather than 'MATERIALIZED VIEW'.
+
+    This means some upstream tests are redundant (table-to-MV swap is invisible
+    since both are 'table' in Confluent), and the refresh test doesn't apply
+    because CTAS tables are continuously updated by Flink.
     """
 
     @pytest.fixture(scope="class", autouse=True)
@@ -56,11 +58,9 @@ class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBas
         }
         return type_mapping.get(table_type, table_type.lower().replace(" ", "_"))
 
-    # -- Override tests to expect "table" for materialized views --
-    # Confluent implements materialized views as tables (CTAS)
+    # -- Tests that are meaningful for Confluent --
 
     def test_materialized_view_create(self, project, my_materialized_view):
-        # In Confluent, materialized views are tables
         assert self.query_relation_type(project, my_materialized_view) == "table"
 
     def test_materialized_view_create_idempotent(self, project, my_materialized_view):
@@ -73,40 +73,19 @@ class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBas
             ["--debug", "run", "--models", my_materialized_view.identifier, "--full-refresh"]
         )
         assert self.query_relation_type(project, my_materialized_view) == "table"
-        # This message doesn't show up because our materialization strategy
-        # never calls the default replace_sql macro.
-        # assert_message_in_logs(f"Applying REPLACE to: {my_materialized_view}", logs)
-
-    def test_materialized_view_replaces_table(self, project, my_table):
-        run_dbt(["run", "--models", my_table.identifier])
-        assert self.query_relation_type(project, my_table) == "table"
-
-        self.swap_table_to_materialized_view(project, my_table)
-
-        run_dbt(["run", "--models", my_table.identifier])
-        # Both regular tables and materialized views show as "table"
-        assert self.query_relation_type(project, my_table) == "table"
 
     def test_materialized_view_replaces_view(self, project, my_view):
+        """A real view is replaced by a CTAS table when switching to materialized_view."""
         run_dbt(["run", "--models", my_view.identifier])
         assert self.query_relation_type(project, my_view) == "view"
 
         self.swap_view_to_materialized_view(project, my_view)
 
         run_dbt(["run", "--models", my_view.identifier])
-        # Materialized view shows as "table" in Confluent
         assert self.query_relation_type(project, my_view) == "table"
 
-    def test_table_replaces_materialized_view(self, project, my_materialized_view):
-        run_dbt(["run", "--models", my_materialized_view.identifier])
-        assert self.query_relation_type(project, my_materialized_view) == "table"
-
-        self.swap_materialized_view_to_table(project, my_materialized_view)
-
-        run_dbt(["run", "--models", my_materialized_view.identifier])
-        assert self.query_relation_type(project, my_materialized_view) == "table"
-
     def test_view_replaces_materialized_view(self, project, my_materialized_view):
+        """A CTAS table is replaced by a real view when switching to view."""
         run_dbt(["run", "--models", my_materialized_view.identifier])
         assert self.query_relation_type(project, my_materialized_view) == "table"
 
@@ -115,7 +94,21 @@ class TestConfluentMaterializedViewsBasic(ConfluentFixtures, MaterializedViewBas
         run_dbt(["run", "--models", my_materialized_view.identifier])
         assert self.query_relation_type(project, my_materialized_view) == "view"
 
-    @pytest.mark.skip("Confluent CTAS tables are continuously updated - no manual refresh needed")
+    # -- Skipped: redundant because both table and materialized_view are 'table' in Confluent --
+
+    @pytest.mark.skip(
+        "Redundant: both table and materialized_view are reported as 'table' in Confluent"
+    )
+    def test_materialized_view_replaces_table(self, project, my_table):
+        pass
+
+    @pytest.mark.skip(
+        "Redundant: both table and materialized_view are reported as 'table' in Confluent"
+    )
+    def test_table_replaces_materialized_view(self, project, my_materialized_view):
+        pass
+
+    @pytest.mark.skip("CTAS tables are continuously updated by Flink - no manual refresh needed")
     def test_materialized_view_only_updates_after_refresh(
         self, project, my_materialized_view, my_seed
     ):

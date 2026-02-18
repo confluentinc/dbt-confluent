@@ -1,11 +1,13 @@
 import logging
 import time
+import uuid
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import confluent_sql
+from confluent_sql.exceptions import ComputePoolExhaustedError
 from confluent_sql.execution_mode import ExecutionMode
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.events.functions import fire_event
@@ -24,6 +26,7 @@ from dbt.adapters.contracts.connection import (
 )
 from dbt.adapters.events.types import (
     AdapterEventDebug,
+    AdapterEventWarning,
     ConnectionUsed,
     SQLQuery,
     SQLQueryStatus,
@@ -54,6 +57,7 @@ class ConfluentCredentials(Credentials):
     flink_api_key: str
     flink_api_secret: str
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
+    statement_name_prefix: str = "dbapi-"
 
     ALIASES = {"environment_id": "database", "dbname": "schema"}
 
@@ -113,7 +117,6 @@ class ConfluentConnectionManager(SQLConnectionManager):
         _, cursor = self.add_query(sql, auto_begin, execution_mode=execution_mode)
         response = self.get_response(cursor)
         if fetch:
-            print(f"LIMIT in execute {limit}")
             table = self.get_result_from_cursor(cursor, limit)
         else:
             cursor.close()
@@ -126,8 +129,8 @@ class ConfluentConnectionManager(SQLConnectionManager):
         auto_begin: bool = True,
         bindings: Any | None = None,
         abridge_sql_log: bool = False,
-        retryable_exceptions: tuple[type[Exception], ...] = (),
-        retry_limit: int = 1,
+        retryable_exceptions: tuple[type[Exception], ...] = (ComputePoolExhaustedError,),
+        retry_limit: int = 5,
         execution_mode: str | None = None,
     ) -> tuple[Connection, Any]:
         """
@@ -143,26 +146,41 @@ class ConfluentConnectionManager(SQLConnectionManager):
             retryable_exceptions: tuple[type[Exception], ...],
             retry_limit: int,
             attempt: int,
+            statement_name: str | None = None,
         ):
             """
             A success sees the try exit cleanly and avoid any recursive
             retries. Failure begins a sleep and retry routine.
             """
             try:
-                cursor.execute(sql, bindings)
+                cursor.execute(sql, bindings, statement_name=statement_name)
             except retryable_exceptions as e:
                 # Cease retries and fail when limit is hit.
                 if attempt >= retry_limit:
                     raise e
 
-                fire_event(
-                    AdapterEventDebug(
-                        base_msg=f"Got a retryable error {type(e)}. {retry_limit - attempt} retries left. "
-                        f"Retrying in 1 second.\nError:\n{e}"
-                    )
-                )
-                time.sleep(1)
+                backoff = min(attempt * 3, 15)
+                retries_left = retry_limit - attempt
 
+                if isinstance(e, ComputePoolExhaustedError):
+                    fire_event(
+                        AdapterEventWarning(
+                            base_msg=f"Compute pool exhausted. {retries_left} retries left. "
+                            f"Retrying in {backoff} seconds."
+                        )
+                    )
+                else:
+                    fire_event(
+                        AdapterEventDebug(
+                            base_msg=f"Got a retryable error {type(e)}. {retries_left} retries left. "
+                            f"Retrying in {backoff} seconds.\nError:\n{e}"
+                        )
+                    )
+                time.sleep(backoff)
+
+                # Generate a new statement name for the retry since the
+                # previous one may have been deleted by ComputePoolExhaustedError.
+                retry_statement_name = f"{prefix}{uuid.uuid4()}" if statement_name else None
                 return _execute_query_with_retry(
                     cursor=cursor,
                     sql=sql,
@@ -170,6 +188,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                     retryable_exceptions=retryable_exceptions,
                     retry_limit=retry_limit,
                     attempt=attempt + 1,
+                    statement_name=retry_statement_name,
                 )
 
         connection = self.get_thread_connection()
@@ -204,6 +223,8 @@ class ConfluentConnectionManager(SQLConnectionManager):
             else:
                 resolved_mode = ExecutionMode(connection.credentials.execution_mode)
 
+            prefix = connection.credentials.statement_name_prefix
+            statement_name = f"{prefix}{uuid.uuid4()}"
             cursor = connection.handle.cursor(mode=resolved_mode)
             _execute_query_with_retry(
                 cursor=cursor,
@@ -212,6 +233,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 retryable_exceptions=retryable_exceptions,
                 retry_limit=retry_limit,
                 attempt=1,
+                statement_name=statement_name,
             )
 
             result = self.get_response(cursor)

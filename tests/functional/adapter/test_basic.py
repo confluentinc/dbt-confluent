@@ -23,12 +23,58 @@ from dbt.tests.adapter.basic.test_snapshot_timestamp import BaseSnapshotTimestam
 from dbt.tests.fixtures.project import TestProjInfo
 from dbt.tests.util import (
     check_relation_types,
-    check_relations_equal,
     check_result_nodes_by_name,
+    get_connection,
+    get_manifest,
     relation_from_name,
     run_dbt,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
+
+
+def check_relations_equal(adapter, relation_names, compare_snapshot_cols=False):
+    """Streaming-compatible alternative to dbt's check_relations_equal.
+
+    The upstream implementation uses get_rows_different_sql which produces a
+    complex EXCEPT/UNION ALL/COUNT/JOIN query. In streaming mode, this results
+    in an unbounded query whose changelog oscillates with intermediate results,
+    making compaction unreliable.
+
+    Instead, we fetch rows from each relation separately and compare in Python.
+    """
+    relations = [relation_from_name(adapter, name) for name in relation_names]
+    with get_connection(adapter):
+        basis, compares = relations[0], relations[1:]
+        column_names = [
+            c.name
+            for c in adapter.get_columns_in_relation(basis)
+            if not c.name.lower().startswith("dbt_") or compare_snapshot_cols
+        ]
+
+        cols = ", ".join(f"`{c}`" for c in column_names)
+
+        def fetch_rows(relation):
+            """Fetch rows with extended retries for CTAS tables that need data propagation time."""
+            import time
+
+            sql = f"select {cols} from {relation}"
+            for attempt in range(5):
+                _, tbl = adapter.execute(sql, fetch=True)
+                rows = sorted(str(row) for row in tbl)
+                if rows:
+                    return rows
+                time.sleep(min((attempt + 1) * 3, 15))
+            return []
+
+        basis_rows = fetch_rows(basis)
+
+        for relation in compares:
+            compare_rows = fetch_rows(relation)
+
+            assert basis_rows == compare_rows, (
+                f"Relations {basis} and {relation} are not equal: "
+                f"{len(basis_rows)} vs {len(compare_rows)} rows"
+            )
 
 
 class TestSingularTestsConfluent(ConfluentFixtures, BaseSingularTests):

@@ -42,8 +42,6 @@ def fetch_from_cursor(cursor: Cursor, limit: int | None) -> agate.Table:
         rows = fetchmany_with_retry(cursor, limit)
     else:
         rows = fetchall_with_retry(cursor)
-    if cursor.returns_changelog and rows:
-        rows = compact_changelog_results(rows)
     return rows
 
 
