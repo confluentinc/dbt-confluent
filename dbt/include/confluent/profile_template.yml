@@ -7,23 +7,31 @@ prompts:
     hint: "eg: 'AWS'"
   cloud_region:
     hint: "eg: us-west-1"
-  compute_pool_id:
-    hint: "eg: lfc-asdasd"
   organization_id:
     hint: "eg: org-asda"
+  compute_pool_id:
+    hint: "eg: lfc-asdasd"
   environment_id:
     hint: "eg: env-asda"
+  dbname:
+    hint: "database name"
   flink_api_key:
     hint: "flink api key"
   flink_api_secret:
     hint: "flink api secret"
     hide_input: true
-  dbname:
-    hint: "default database name"
   execution_mode:
     hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'"
     type: "string"
     default: 'streaming_query'
+  statement_name_prefix:
+    hint: "A prefix to prepend to each statement name"
+    type: "string"
+    default: "dbt-confluent-"
+  statement_label:
+    hint: "An optional label applied to all statements"
+    type: "string"
+    default: null
   threads:
     hint: "1 or more"
     type: "int"

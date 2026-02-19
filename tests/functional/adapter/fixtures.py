@@ -17,7 +17,8 @@ class ConfluentFixtures:
                 "outputs": {
                     "default": {
                         **dbt_profile_target,
-                        "statement_name_prefix": f"dbt-test-{uuid4()}-"
+                        "statement_name_prefix": "dbt-adapter-test-",
+                        "statement_label": f"dbt-test-{uuid4()}"
                     },
                 },
                 "target": "default",
@@ -61,13 +62,15 @@ class ConfluentFixtures:
         streaming jobs) created during the test to free compute pool resources.
         """
         yield
-        prefix = dbt_profile_data["test"]["outputs"]["default"]["statement_name_prefix"]
-        if not prefix:
+
+        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+        if not label:
             logger.warning(
-                "No statement_name_prefix set in profile target. "
+                "No statement_label set in profile target. "
                 "Skipping statement cleanup — lingering statements may remain."
             )
             return
         with project.adapter.connection_named("cleanup"):
             conn = project.adapter.connections.get_thread_connection()
-            conn.handle.cleanup_statements(prefix=prefix)
+            for statement in conn.handle.list_statements(label=label):
+                conn.handle.delete_statement(statement)

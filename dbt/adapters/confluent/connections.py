@@ -57,9 +57,10 @@ class ConfluentCredentials(Credentials):
     flink_api_key: str
     flink_api_secret: str
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
-    statement_name_prefix: str = "dbapi-"
+    statement_name_prefix: str = "dbt-confluent-"
+    statement_label: str | None = None
 
-    ALIASES = {"environment_id": "database", "dbname": "schema"}
+    _ALIASES = {"environment_id": "database", "dbname": "schema"}
 
     @property
     def type(self):
@@ -140,20 +141,23 @@ class ConfluentConnectionManager(SQLConnectionManager):
         """
 
         def _execute_query_with_retry(
-            cursor: Any,
+            cursor: confluent_sql.Cursor,
             sql: str,
             bindings: Any | None,
             retryable_exceptions: tuple[type[Exception], ...],
             retry_limit: int,
             attempt: int,
             statement_name: str | None = None,
+            statement_label: str | None = None,
         ):
             """
             A success sees the try exit cleanly and avoid any recursive
             retries. Failure begins a sleep and retry routine.
             """
             try:
-                cursor.execute(sql, bindings, statement_name=statement_name)
+                cursor.execute(
+                    sql, bindings, statement_name=statement_name, statement_label=statement_label
+                )
             except retryable_exceptions as e:
                 # Cease retries and fail when limit is hit.
                 if attempt >= retry_limit:
@@ -189,6 +193,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                     retry_limit=retry_limit,
                     attempt=attempt + 1,
                     statement_name=retry_statement_name,
+                    statement_label=statement_label
                 )
 
         connection = self.get_thread_connection()
@@ -225,6 +230,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
 
             prefix = connection.credentials.statement_name_prefix
             statement_name = f"{prefix}{uuid.uuid4()}"
+            label = connection.credentials.statement_label
             cursor = connection.handle.cursor(mode=resolved_mode)
             _execute_query_with_retry(
                 cursor=cursor,
@@ -234,6 +240,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 retry_limit=retry_limit,
                 attempt=1,
                 statement_name=statement_name,
+                statement_label=label
             )
 
             result = self.get_response(cursor)
