@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import confluent_sql
+from confluent_sql import Cursor
 from confluent_sql.exceptions import ComputePoolExhaustedError
 from confluent_sql.execution_mode import ExecutionMode
 from dbt_common.events.contextvars import get_node_info
@@ -33,7 +34,7 @@ from dbt.adapters.events.types import (
 )
 from dbt.adapters.sql import SQLConnectionManager
 
-from .utils import compact_changelog_results, fetch_from_cursor
+from .utils import fetch_from_cursor
 
 if TYPE_CHECKING:
     import agate
@@ -86,7 +87,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
     TYPE = "confluent"
 
     @classmethod
-    def get_result_from_cursor(cls, cursor: Any, limit: int | None) -> "agate.Table":
+    def get_result_from_cursor(cls, cursor: Cursor, limit: int | None) -> "agate.Table":
         from dbt_common.clients.agate_helper import table_from_data_flat
 
         data: Iterable[Any] = []
@@ -95,10 +96,6 @@ class ConfluentConnectionManager(SQLConnectionManager):
         if cursor.description is not None:
             column_names = [col[0] for col in cursor.description]
             rows = fetch_from_cursor(cursor, limit)
-
-            if cursor.returns_changelog and rows:
-                rows = compact_changelog_results(rows)
-
             data = cls.process_results(column_names, rows)
 
         return table_from_data_flat(data, column_names)

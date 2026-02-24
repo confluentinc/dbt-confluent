@@ -28,7 +28,6 @@
   {% call statement('main') -%}
     CREATE TABLE {{ target_relation }}
     ( {{ sql }})
-    {{ columns_declaration }}
     WITH (
       'connector' = '{{ connector }}'
       {%- for key, value in with_options.items() -%}

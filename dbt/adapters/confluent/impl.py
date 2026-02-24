@@ -1,3 +1,4 @@
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -12,7 +13,9 @@ from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.sql import SQLAdapter
 
-from .utils import compact_changelog_results, fetchall_with_retry, fetchone_with_retry
+from .utils import fetch_from_cursor
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -229,21 +232,16 @@ class ConfluentAdapter(SQLAdapter):
             if hasattr(conn.handle, "commit"):
                 conn.handle.commit()
             if fetch == "one":
-                res = fetchone_with_retry(cursor)
-                rows = [res] if res else []
+                return fetch_from_cursor(cursor, limit=1)
             elif fetch == "all":
-                rows = fetchall_with_retry(cursor)
+                return fetch_from_cursor(cursor)
             else:
                 return
-            if cursor.returns_changelog and rows:
-                rows = compact_changelog_results(rows)
-            return rows
         except BaseException as e:
             if conn.handle and not getattr(conn.handle, "closed", True):
                 conn.handle.rollback()
-            print(sql)
-            print(e)
-            raise
+            logger.exception(sql)
+            raise e
         finally:
             conn.transaction_open = False
             cursor.close()
