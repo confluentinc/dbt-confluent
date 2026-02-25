@@ -71,6 +71,9 @@ def check_relations_equal(adapter, relation_names, compare_snapshot_cols=False):
         for relation in compares:
             compare_rows = fetch_rows(relation)
 
+            # Check that both `basis_rows` and `compare_rows` are not empty first
+            assert basis_rows and compare_rows, f"Both {basis} and {relation} are empty"
+            # Then check that they are equal
             assert basis_rows == compare_rows, (
                 f"Relations {basis} and {relation} are not equal: "
                 f"{len(basis_rows)} vs {len(compare_rows)} rows"

@@ -33,12 +33,6 @@ def fetchmany_with_retry(cursor, limit, attempts=3, interval=3):
                 retry -= 1
     return results
 
-    rows = cursor.fetchmany(limit)
-    if not rows and cursor.may_have_results and attempts > 0:
-        time.sleep(interval)
-        rows = fetchmany_with_retry(cursor, limit, attempts=attempts - 1, interval=interval)
-    return rows
-
 
 def fetchall_with_retry(cursor, attempts=3, interval=3):
     """Try to fetch all rows `attempts` times.
@@ -68,7 +62,7 @@ def fetchall_with_retry(cursor, attempts=3, interval=3):
     return results
 
 
-def fetch_from_cursor(cursor: Cursor, limit: int | None = None, attempts=3, interval=3) -> agate.Table:
+def fetch_from_cursor(cursor: Cursor, limit: int | None = None, attempts=4, interval=5) -> agate.Table:
     if not limit:
         return fetchall_with_retry(cursor, attempts, interval)
     else:
