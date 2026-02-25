@@ -17,6 +17,12 @@ def fetchmany_with_retry(cursor, limit, attempts=3, interval=3):
     results = []
     retry = attempts
     if cursor.returns_changelog:
+        msg = (
+            "Calling fetchmany on a non-append-only stream. "
+            "Results comes from a snapshot, and they may be partial. "
+            "Let us know if this is causing issues!"
+        )
+        logger.warning(msg)
         compressor = cursor.changelog_compressor()
         snapshots = compressor.snapshots()
         while len(results) < limit and retry > 0:
