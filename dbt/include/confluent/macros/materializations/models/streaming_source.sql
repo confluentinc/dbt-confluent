@@ -25,7 +25,7 @@
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   -- Create the table
-  {% call statement('main') -%}
+  {% call statement('main', execution_mode="streaming_ddl") -%}
     CREATE TABLE {{ target_relation }}
     ( {{ sql }})
     WITH (

@@ -26,7 +26,7 @@ MY_STREAMING_SOURCE = """
 {{ config(
     materialized='streaming_source',
     connector='faker',
-    options={
+    with={
         'rows-per-second': '1',
         'number-of-rows': '100',
     }
@@ -95,9 +95,9 @@ class TestStreamingTests(ConfluentFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def custom_clean_up(self, project):
         yield
-        project.run_sql(f"drop table my_streaming_source")
-        project.run_sql(f"drop table my_streaming_table")
+        project.run_sql(f"drop table if exists my_streaming_source")
+        project.run_sql(f"drop table if exists my_streaming_table")
 
-    def test_streamint_tests(self, project):
+    def test_streaming_tests(self, project):
         results = run_dbt(["run"])
         run_dbt(["test"])

@@ -62,8 +62,10 @@ def fetchall_with_retry(cursor, attempts=3, interval=3):
     return results
 
 
-def fetch_from_cursor(cursor: Cursor, limit: int | None = None, attempts=4, interval=5) -> agate.Table:
-    if not limit:
+def fetch_from_cursor(
+    cursor: Cursor, limit: int | None = None, attempts=4, interval=5
+) -> agate.Table:
+    if limit is None:
         return fetchall_with_retry(cursor, attempts, interval)
     else:
         return fetchmany_with_retry(cursor, limit, attempts, interval)

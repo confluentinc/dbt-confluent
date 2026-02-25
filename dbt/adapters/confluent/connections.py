@@ -181,6 +181,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
 
                 # Generate a new statement name for the retry since the
                 # previous one may have been deleted by ComputePoolExhaustedError.
+                prefix = connection.credentials.statement_name_prefix
                 retry_statement_name = f"{prefix}{uuid.uuid4()}" if statement_name else None
                 return _execute_query_with_retry(
                     cursor=cursor,
@@ -190,7 +191,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                     retry_limit=retry_limit,
                     attempt=attempt + 1,
                     statement_name=retry_statement_name,
-                    statement_label=statement_label
+                    statement_label=statement_label,
                 )
 
         connection = self.get_thread_connection()
@@ -237,7 +238,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 retry_limit=retry_limit,
                 attempt=1,
                 statement_name=statement_name,
-                statement_label=label
+                statement_label=label,
             )
 
             result = self.get_response(cursor)
@@ -311,7 +312,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         that has items such as code, rows_affected,etc. can also just be a string ex. "OK"
         if your cursor does not offer rich metadata.
         """
-        assert cursor._statement is not None, "Cursor has no active statement"
+        assert cursor.statement is not None, "Cursor has no active statement"
         return AdapterResponse(f"{cursor._statement.phase}")
 
     def cancel(self, connection):

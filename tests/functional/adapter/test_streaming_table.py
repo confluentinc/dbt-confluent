@@ -2,17 +2,7 @@ from textwrap import dedent
 
 import pytest
 
-from dbt.adapters.base.relation import BaseRelation
-from dbt.adapters.contracts.relation import RelationType
-from dbt.tests.adapter.materialized_view import files
-from dbt.tests.util import (
-    assert_message_in_logs,
-    get_model_file,
-    relation_from_name,
-    run_dbt,
-    run_dbt_and_capture,
-    set_model_file,
-)
+from dbt.tests.util import relation_from_name, run_dbt
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 MY_STREAMING_TABLE = """
@@ -56,21 +46,21 @@ models:
         data_type: timestamp(3)
 """
 
+
 class TestStreamingTable(ConfluentFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {
             "my_streaming_source.sql": MY_STREAMING_SOURCE,
             "my_streaming_table.sql": MY_STREAMING_TABLE,
-            "models.yml": MODELS_YML
+            "models.yml": MODELS_YML,
         }
 
     @pytest.fixture(autouse=True)
     def custom_clean_up(self, project):
         yield
-        project.run_sql(f"drop table if exists my_streaming_source")
-        project.run_sql(f"drop table if exists my_streaming_table")
-
+        project.run_sql("drop table if exists my_streaming_source")
+        project.run_sql("drop table if exists my_streaming_table")
 
     def test_materialized_source(self, project):
         results = run_dbt(["run"])
@@ -83,5 +73,3 @@ class TestStreamingTable(ConfluentFixtures):
         catalog = run_dbt(["docs", "generate"])
         assert len(catalog.nodes) == 2
         assert len(catalog.sources) == 0
-
-
