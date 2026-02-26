@@ -43,7 +43,9 @@ blocks:
         - name: "Build Package"
           commands:
             - uv build
-            - uv venv
+            # Install it locally and check that it can be imported.
+            # Clean the venv created in the prologue first
+            - uv venv --clear
             - uv pip install dist/dbt_confluent-*.whl
             - uv run python -c "import confluent_sql; import dbt.adapters.confluent; print('OK')"
 
