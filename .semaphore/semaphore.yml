@@ -60,9 +60,9 @@ blocks:
             - |
               if [ -z "${CONFLUENT_FLINK_API_KEY:-}" ]; then
                 echo "CONFLUENT_FLINK_API_KEY not set, skipping tests"
-                exit 0
+              else
+                uv run pytest --junitxml=test-results.xml
               fi
-            - uv run pytest --junitxml=test-results.xml
       epilogue:
         always:
           commands:
