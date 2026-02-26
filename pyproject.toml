@@ -27,11 +27,11 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-  "confluent-sql",
   "dbt-core~=1.11",
   "dbt-common~=1.12",
   "dbt-adapters~=1.16",
   "agate~=1.0",
+  "httpx>=0.23.0,<0.29.0",
 ]
 
 [project.optional-dependencies]
@@ -46,9 +46,6 @@ test = [
   "pytest-dotenv>=0.5.2",
   "dbt-tests-adapter>=1.10",
 ]
-
-[tool.uv.sources]
-confluent-sql = { path = "../confluent-sql", editable = true }
 
 [project.urls]
 Homepage = "https://github.com/confluentinc/dbt-confluent"
@@ -97,7 +94,7 @@ pretty = true
 path = "dbt/adapters/confluent/__version__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["dbt"]
+packages = ["dbt", "confluent-sql/src/confluent_sql"]
 
-[tool.hatch.metadata]
-allow-direct-references = true
+[tool.hatch.build.targets.wheel.sources]
+"confluent-sql/src" = ""
