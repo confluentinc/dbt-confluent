@@ -1,0 +1,76 @@
+version: v1.0
+name: build-test-release
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-1
+
+auto_cancel:
+  running:
+    when: "branch != 'master'"
+
+execution_time_limit:
+  hours: 1
+
+queue:
+  - when: "branch != 'master'"
+    processing: parallel
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      - . vault-setup
+      - git submodule update --init
+      - curl -LsSf https://astral.sh/uv/install.sh | sh
+      - uv sync --extra dev --extra test
+
+blocks:
+  - name: "Lint"
+    dependencies: []
+    task:
+      jobs:
+        - name: "Ruff Check"
+          commands:
+            - uv run ruff check dbt/ tests/
+        - name: "Ruff Format Check"
+          commands:
+            - uv run ruff format --check dbt/ tests/
+
+  - name: "Build"
+    dependencies: []
+    task:
+      jobs:
+        - name: "Build Package"
+          commands:
+            - uv build
+            # Install it locally and check that it can be imported.
+            # Clean the venv created in the prologue first
+            - uv venv --clear
+            - uv pip install dist/dbt_confluent-*.whl
+            - uv run python -c "import confluent_sql; import dbt.adapters.confluent; print('OK')"
+
+  - name: "Test"
+    dependencies:
+      - "Lint"
+      - "Build"
+    task:
+      jobs:
+        - name: "Run Tests"
+          commands:
+            - |
+              if [ -z "${CONFLUENT_FLINK_API_KEY:-}" ]; then
+                echo "CONFLUENT_FLINK_API_KEY not set, skipping tests"
+                exit 0
+              fi
+            - uv run pytest --junitxml=test-results.xml
+      epilogue:
+        always:
+          commands:
+            - "[[ -f test-results.xml ]] && test-results publish test-results.xml"
+
+after_pipeline:
+  task:
+    jobs:
+      - name: Publish Test Results to Semaphore
+        commands:
+          - test-results gen-pipeline-report || echo "Could not publish pipeline test result report. Are there any test results to publish?"

@@ -1,0 +1,3 @@
+[submodule "confluent-sql"]
+	path = confluent-sql
+	url = git@github.com:confluentinc/confluent-sql.git

@@ -18,7 +18,7 @@ class ConfluentFixtures:
                     "default": {
                         **dbt_profile_target,
                         "statement_name_prefix": "dbt-adapter-test-",
-                        "statement_label": f"dbt-test-{uuid4()}"
+                        "statement_label": f"dbt-test-{uuid4()}",
                     },
                 },
                 "target": "default",
@@ -28,7 +28,6 @@ class ConfluentFixtures:
         if profiles_config_update:
             profile.update(profiles_config_update)
         return profile
-
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
