@@ -43,7 +43,7 @@ blocks:
           commands:
             - uv build
             - uv venv
-            - uv pip install --python /tmp/test-install/bin/python dist/dbt_confluent-*.whl
+            - uv pip install dist/dbt_confluent-*.whl
             - uv run python -c "import confluent_sql; import dbt.adapters.confluent; print('OK')"
 
   - name: "Test"
