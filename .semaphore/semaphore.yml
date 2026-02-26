@@ -22,6 +22,7 @@ global_job_config:
       - . vault-setup
       - git submodule update --init
       - curl -LsSf https://astral.sh/uv/0.9.27/install.sh | sh
+      - uv sync --extra dev --extra test
 
 blocks:
   - name: "Lint"
@@ -51,9 +52,6 @@ blocks:
       - "Lint"
       - "Build"
     task:
-      prologue:
-        commands:
-          - uv sync --extra test
       jobs:
         - name: "Run Tests"
           commands:
