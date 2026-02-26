@@ -31,7 +31,8 @@ it works fine anyway. #}
   {% endif %}
   {% set unit_test_sql = get_unit_test_sql(sql, expected_sql, expected_column_names_quoted) %}
 
-  {% call statement('main', fetch_result=True, limit=expected_rows | length) -%}
+  {% set fetch_limit = expected_rows | length if expected_rows | length > 0 else none %}
+  {% call statement('main', fetch_result=True, limit=fetch_limit) -%}
     {{ unit_test_sql }}
   {%- endcall %}
 
