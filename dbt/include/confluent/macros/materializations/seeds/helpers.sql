@@ -7,7 +7,7 @@
     {%- set inferred_type = adapter.convert_type(agate_table, loop.index0) -%}
     {%- set type = column_override.get(column, inferred_type) -%}
 
-    {%- if type in ("STRING", "VARCHAR", "TEXT") -%}
+    {%- if type | upper in ("STRING", "VARCHAR", "TEXT") -%}
       {{ get_binding_char() }}
     {%- else -%}
       cast({{ get_binding_char() }} as {{type}})

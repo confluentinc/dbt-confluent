@@ -2,7 +2,7 @@
   {% call statement('get_columns_in_relation', fetch_result=True) %}
     SELECT
       COLUMN_NAME as column_name,
-      DATA_TYPE as data_type,
+      FULL_DATA_TYPE as data_type,
       CAST(NULL AS INT) as character_maximum_length,
       CAST(NULL AS INT) as numeric_precision,
       CAST(NULL AS INT) as numeric_scale

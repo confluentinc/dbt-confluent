@@ -28,7 +28,7 @@ classifiers = [
 ]
 dependencies = [
   "confluent-sql",
-  "dbt-core~=1.10",
+  "dbt-core~=1.11",
   "dbt-common~=1.12",
   "dbt-adapters~=1.16",
   "agate~=1.0",

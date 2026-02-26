@@ -1,3 +1,4 @@
+import logging
 import re
 from dataclasses import dataclass, field
 
@@ -5,11 +6,16 @@ import agate
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
-from dbt.adapters.base import BaseRelation
-from dbt.adapters.base.impl import InformationSchema
+from dbt.adapters.base import BaseRelation, available
+from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_table
 from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
+from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.sql import SQLAdapter
+
+from .utils import fetch_from_cursor
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -40,6 +46,7 @@ class ConfluentAdapter(SQLAdapter):
     """
 
     ConnectionManager: type[ConfluentConnectionManager] = ConfluentConnectionManager
+    connections: ConfluentConnectionManager
     Relation: type[ConfluentRelation] = ConfluentRelation
     Column: type[ConfluentColumn] = ConfluentColumn
 
@@ -90,6 +97,23 @@ class ConfluentAdapter(SQLAdapter):
         Returns canonical date func
         """
         return "CURRENT_TIMESTAMP"
+
+    @available.parse(_parse_callback_empty_table)
+    def execute(
+        self,
+        sql: str,
+        auto_begin: bool = False,
+        fetch: bool = False,
+        limit: int | None = None,
+        execution_mode: str | None = None,
+    ) -> tuple[AdapterResponse, "agate.Table"]:
+        return self.connections.execute(
+            sql=sql,
+            auto_begin=auto_begin,
+            fetch=fetch,
+            limit=limit,
+            execution_mode=execution_mode,
+        )
 
     @classmethod
     def convert_text_type(cls, agate_table: agate.Table, col_idx: int) -> str:
@@ -200,3 +224,24 @@ class ConfluentAdapter(SQLAdapter):
 
         # Filter using the base adapter's method
         return self._catalog_filter_table(table, used_schemas)
+
+    def run_sql_for_tests(self, sql, fetch, conn):
+        cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
+        try:
+            cursor.execute(sql)
+            if hasattr(conn.handle, "commit"):
+                conn.handle.commit()
+            if fetch == "one":
+                return fetch_from_cursor(cursor, limit=1)
+            elif fetch == "all":
+                return fetch_from_cursor(cursor)
+            else:
+                return
+        except BaseException as e:
+            if conn.handle and not getattr(conn.handle, "closed", True):
+                conn.handle.rollback()
+            logger.exception(sql)
+            raise e
+        finally:
+            conn.transaction_open = False
+            cursor.close()
