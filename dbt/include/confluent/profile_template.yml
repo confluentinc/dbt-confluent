@@ -16,9 +16,9 @@ prompts:
   dbname:
     hint: "Database name"
   flink_api_key:
-    hint: "Flink api key"
+    hint: "Flink API key"
   flink_api_secret:
-    hint: "Flink api secret"
+    hint: "Flink API secret"
     hide_input: true
   execution_mode:
     hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'"
