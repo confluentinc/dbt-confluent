@@ -50,7 +50,6 @@ class ConfluentCredentials(Credentials):
     """
 
     # Add credentials members here, like:
-    host: str
     cloud_provider: str
     cloud_region: str
     compute_pool_id: str
@@ -59,7 +58,7 @@ class ConfluentCredentials(Credentials):
     flink_api_secret: str
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
     statement_name_prefix: str = "dbt-confluent-"
-    statement_label: str | None = None
+    statement_label: str = "dbt-confluent"
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}
 
@@ -74,13 +73,13 @@ class ConfluentCredentials(Credentials):
         Hashed and included in anonymous telemetry to track adapter adoption.
         Pick a field that can uniquely identify one team/organization building with this adapter
         """
-        return self.host
+        return f"{self.cloud_provider}-{self.cloud_region}-{self.organization_id}"
 
     def _connection_keys(self):
         """
         List of keys to display in the `dbt debug` output.
         """
-        return ("host", "database")
+        return ("organization_id", "database")
 
 
 class ConfluentConnectionManager(SQLConnectionManager):
