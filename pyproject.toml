@@ -90,6 +90,9 @@ ignore_missing_imports = true
 show_error_codes = true
 pretty = true
 
+[tool.uv.sources]
+confluent_sql = { path = "./confluent-sql" }
+
 [tool.hatch.version]
 path = "dbt/adapters/confluent/__version__.py"
 

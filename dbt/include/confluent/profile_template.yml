@@ -1,24 +1,24 @@
 fixed:
   type: confluent
 prompts:
-  host:
-    hint: "your host name"
   cloud_provider:
-    hint: "eg: 'AWS'"
+    hint: "eg: 'aws'"
+    default: "aws"
   cloud_region:
     hint: "eg: us-west-1"
+    default: "us-west-1"
   organization_id:
-    hint: "eg: org-asda"
+    hint: "eg: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
   compute_pool_id:
-    hint: "eg: lfc-asdasd"
+    hint: "eg: lfcp-xxxxx"
   environment_id:
-    hint: "eg: env-asda"
+    hint: "eg: env-xxxxxx"
   dbname:
-    hint: "database name"
+    hint: "Database name"
   flink_api_key:
-    hint: "flink api key"
+    hint: "Flink api key"
   flink_api_secret:
-    hint: "flink api secret"
+    hint: "Flink api secret"
     hide_input: true
   execution_mode:
     hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'"
@@ -29,9 +29,9 @@ prompts:
     type: "string"
     default: "dbt-confluent-"
   statement_label:
-    hint: "An optional label applied to all statements"
+    hint: "A user label applied to all statements"
     type: "string"
-    default: null
+    default: "dbt-confluent"
   threads:
     hint: "1 or more"
     type: "int"
