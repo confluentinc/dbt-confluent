@@ -1,7 +1,7 @@
 {% materialization streaming_table, adapter='confluent' %}
   -- Check if the relation exists already, and precreate the target_relation
   {%- set existing_relation = load_cached_relation(this) -%}
-  {%- set target_relation = this.incorporate(type=this.Table).include(database=true, schema=true) -%}
+  {%- set target_relation = this.incorporate(type=this.Table) -%}
 
   -- This is a config option that makes it easier to add WITH clauses.
   -- We could technically avoid this and let users write custom constraints,
