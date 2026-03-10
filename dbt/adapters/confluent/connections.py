@@ -34,6 +34,7 @@ from dbt.adapters.events.types import (
 )
 from dbt.adapters.sql import SQLConnectionManager
 
+from .__version__ import version
 from .utils import fetch_from_cursor
 
 if TYPE_CHECKING:
@@ -285,6 +286,9 @@ class ConfluentConnectionManager(SQLConnectionManager):
         credentials = connection.credentials
 
         try:
+            # This is hardcoded here as we don't want this to be customizable
+            user_agent = f"Confluent-dbt/v{version}"
+
             handle = confluent_sql.connect(
                 flink_api_key=credentials.flink_api_key,
                 flink_api_secret=credentials.flink_api_secret,
@@ -294,6 +298,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 cloud_provider=credentials.cloud_provider,
                 cloud_region=credentials.cloud_region,
                 dbname=credentials.schema,
+                http_user_agent=user_agent
             )
             connection.state = "open"
             connection.handle = handle
