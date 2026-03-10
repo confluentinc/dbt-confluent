@@ -298,7 +298,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 cloud_provider=credentials.cloud_provider,
                 cloud_region=credentials.cloud_region,
                 dbname=credentials.schema,
-                http_user_agent=user_agent
+                http_user_agent=user_agent,
             )
             connection.state = "open"
             connection.handle = handle
