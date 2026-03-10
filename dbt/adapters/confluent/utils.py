@@ -24,9 +24,8 @@ def fetchmany_with_retry(cursor, limit, attempts=3, interval=3):
         )
         logger.warning(msg)
         compressor = cursor.changelog_compressor()
-        snapshots = compressor.snapshots()
-        while len(results) < limit and retry > 0:
-            results = next(snapshots)
+        while len(results) < limit and retry > 0 and cursor.may_have_results:
+            results = compressor.get_current_snapshot(limit)
             time.sleep(interval)
             retry -= 1
     else:
@@ -50,9 +49,9 @@ def fetchall_with_retry(cursor, attempts=3, interval=3):
     retry = attempts
     if cursor.returns_changelog:
         compressor = cursor.changelog_compressor()
-        snapshots = compressor.snapshots()
-        while not results and retry > 0:
-            results = next(snapshots)
+        while not results and retry > 0 and cursor.may_have_results:
+            # Use a batch_size bigger than the default `1`
+            results = compressor.get_current_snapshot(10)
             time.sleep(interval)
             retry -= 1
     else:
