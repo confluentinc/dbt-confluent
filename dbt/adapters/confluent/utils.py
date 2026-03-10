@@ -7,7 +7,7 @@ from confluent_sql import Cursor
 logger = logging.getLogger(__name__)
 
 
-def fetchmany_with_retry(cursor, limit, attempts=3, interval=3):
+def fetchmany_with_retry(cursor, limit, attempts=4, interval=5):
     """Try to fetch one `limit` rows `attempts` times.
 
     On a streaming cursor, this will return the first batch of results received,
@@ -15,7 +15,6 @@ def fetchmany_with_retry(cursor, limit, attempts=3, interval=3):
     You'll need to call this multiple times if you don't get all the results at once.
     """
     results = []
-    retry = attempts
     if cursor.returns_changelog:
         msg = (
             "Calling fetchmany on a non-append-only stream. "
@@ -24,37 +23,39 @@ def fetchmany_with_retry(cursor, limit, attempts=3, interval=3):
         )
         logger.warning(msg)
         compressor = cursor.changelog_compressor()
-        snapshots = compressor.snapshots()
-        while len(results) < limit and retry > 0:
-            results = next(snapshots)
+        for _ in range(attempts):
+            results = compressor.get_current_snapshot(limit)
+            if len(results) >= limit or not cursor.may_have_results:
+                break
             time.sleep(interval)
-            retry -= 1
     else:
         if cursor.statement.is_bounded:
             results = cursor.fetchmany(limit)
         else:
-            while len(results) < limit and retry > 0:
+            for _ in range(attempts):
                 results += cursor.fetchmany(limit)
+                if len(results) >= limit or not cursor.may_have_results:
+                    break
                 time.sleep(interval)
-                retry -= 1
     return results
 
 
-def fetchall_with_retry(cursor, attempts=3, interval=3):
+def fetchall_with_retry(cursor, attempts=4, interval=5):
     """Try to fetch all rows `attempts` times.
 
     On a streaming cursor, fetchall won't work, so we revert to call
     fetchmany with a limit of 1000.
     """
     results = []
-    retry = attempts
     if cursor.returns_changelog:
         compressor = cursor.changelog_compressor()
-        snapshots = compressor.snapshots()
-        while not results and retry > 0:
-            results = next(snapshots)
+        for _ in range(attempts):
+            # Use a batch_size bigger than the default `1`
+            results = compressor.get_current_snapshot(10)
+            # Early break if we got results to avoid the sleep
+            if results or not cursor.may_have_results:
+                break
             time.sleep(interval)
-            retry -= 1
     else:
         if cursor.statement.is_bounded:
             results = cursor.fetchall()
