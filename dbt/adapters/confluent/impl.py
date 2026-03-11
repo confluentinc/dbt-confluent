@@ -247,6 +247,7 @@ class ConfluentAdapter(SQLAdapter):
                 f"'{tested_node_unique_id}'. Looked for relation with identifier "
                 f"'{identifier}' in database '{database}', schema '{schema}'"
             )
+        return relation
 
     @available
     def parse_unit_test_ctes(self, extra_ctes, compiled_sql):
