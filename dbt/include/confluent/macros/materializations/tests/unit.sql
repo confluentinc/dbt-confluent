@@ -66,7 +66,6 @@
   {%- set unit_test_sql = get_unit_test_sql(main_sql, expected_sql, expected_column_names_quoted) -%}
 
   {# The query returns both actual and expected rows via UNION ALL, so double the limit #}
-  {%- set fetch_limit = 2 * (expected_rows | length) if expected_rows | length > 0 else none -%}
   {%- call statement('main', fetch_result=True) -%}
 {{ unit_test_sql }}
   {%- endcall -%}

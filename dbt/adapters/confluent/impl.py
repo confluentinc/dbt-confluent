@@ -240,7 +240,13 @@ class ConfluentAdapter(SQLAdapter):
         _, _, name, *v = tested_node_unique_id.split(".")
         version = f"_{v[0]}" if v and v[0].startswith("v") else ""
         identifier = f"{name}{version}"
-        return self.get_relation(database, schema, identifier)
+        relation = self.get_relation(database, schema, identifier)
+        if relation is None:
+            raise DbtDatabaseError(
+                "Could not find relation for tested model with unique_id "
+                f"'{tested_node_unique_id}'. Looked for relation with identifier "
+                f"'{identifier}' in database '{database}', schema '{schema}'"
+            )
 
     @available
     def parse_unit_test_ctes(self, extra_ctes, compiled_sql):
