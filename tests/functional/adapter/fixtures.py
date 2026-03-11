@@ -46,6 +46,7 @@ class ConfluentFixtures:
             },
             "models": {
                 "+schema": unique_schema,
+                "+full_refresh": True,
             },
             "seeds": {
                 "+schema": unique_schema,
