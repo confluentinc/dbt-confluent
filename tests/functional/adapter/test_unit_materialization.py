@@ -48,22 +48,22 @@ unit_tests:
           - order_id: 1
             price: 10.0
             order_time: '2024-01-01 10:00:00'
-          - order_id: 1
-            price: 10.0
-            order_time: '2024-01-01 10:05:00'
           - order_id: 2
-            price: 10.0
+            price: 20.0
+            order_time: '2024-01-01 10:05:00'
+          - order_id: 3
+            price: 30.0
             order_time: '2024-01-01 10:10:00'
     expect:
       rows:
         - order_id: 1
           price: 10.0
           order_time: '2024-01-01 10:00:00'
-        - order_id: 1
-          price: 10.0
-          order_time: '2024-01-01 10:05:00'
         - order_id: 2
-          price: 10.0
+          price: 20.0
+          order_time: '2024-01-01 10:05:00'
+        - order_id: 3
+          price: 30.0
           order_time: '2024-01-01 10:10:00'
 
 models:
@@ -82,7 +82,105 @@ models:
 """
 
 
-@pytest.mark.skip("Testing strategy are still TODO with streaming tables")
+JOIN_SOURCE_A = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+    }
+) }}
+id BIGINT,
+event_time TIMESTAMP(3),
+WATERMARK FOR event_time AS event_time + INTERVAL '10' SECONDS
+"""
+
+JOIN_SOURCE_B = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+    }
+) }}
+id BIGINT,
+event_time TIMESTAMP(3),
+WATERMARK FOR event_time AS event_time + INTERVAL '10' SECONDS
+"""
+
+JOIN_MODEL = """
+{{ config(
+    materialized='streaming_table',
+) }}
+SELECT
+  a.event_time AS a_time,
+  b.event_time AS b_time,
+  a.id AS a_id
+FROM {{ ref('join_source_a') }} a
+INNER JOIN {{ ref('join_source_b') }} b
+  ON a.id = b.id
+WHERE
+  a.event_time BETWEEN b.event_time AND b.event_time + INTERVAL '10' SECONDS
+"""
+
+JOIN_SCHEMA_YML = """
+unit_tests:
+  - name: test_join_on_event_time
+    model: join_model
+    given:
+      - input: ref('join_source_a')
+        rows:
+          - id: 1
+            event_time: '2024-01-01 10:00:00'
+      - input: ref('join_source_b')
+        rows:
+          - id: 1
+            event_time: '2024-01-01 10:00:00'
+    expect:
+      rows:
+        - a_time: '2024-01-01 10:00:00'
+          b_time: '2024-01-01 10:00:00'
+          a_id: 1
+
+models:
+  - name: join_model
+    columns:
+      - name: a_time
+        data_type: timestamp(3)
+      - name: b_time
+        data_type: timestamp(3)
+      - name: a_id
+        data_type: bigint
+"""
+
+
+class TestJoinOnExplicitTimestamp(ConfluentFixtures):
+    """Test that joining two streaming sources on explicit timestamp columns
+    works correctly in unit tests (as opposed to $rowtime which is uncontrollable)."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "join_source_a.sql": JOIN_SOURCE_A,
+            "join_source_b.sql": JOIN_SOURCE_B,
+            "join_model.sql": JOIN_MODEL,
+            "schema.yml": JOIN_SCHEMA_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def custom_clean_up(self, project):
+        yield
+        project.run_sql("drop table if exists join_source_a")
+        project.run_sql("drop table if exists join_source_b")
+        project.run_sql("drop table if exists join_model")
+
+    def test_join_on_explicit_timestamp(self, project):
+        run_dbt(["run"])
+        run_dbt(["test"])
+
+
 class TestStreamingTests(ConfluentFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def models(self):

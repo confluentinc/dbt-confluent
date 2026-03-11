@@ -225,6 +225,23 @@ class ConfluentAdapter(SQLAdapter):
         # Filter using the base adapter's method
         return self._catalog_filter_table(table, used_schemas)
 
+    @available
+    def get_tested_model_relation(self, tested_node_unique_id, database, schema):
+        """Resolve the tested model's relation from its unique_id.
+
+        Unit tests run in a separate manifest where graph.nodes is empty,
+        so we can't look up nodes directly. Instead, we extract the model
+        identifier from the unique_id (format: model.<package>.<name>)
+        and find the relation in the adapter's cache.
+        """
+        # unique_id format:
+        #   non-versioned: model.<package>.<name>
+        #   versioned:     model.<package>.<name>.v<version>
+        _, _, name, *v = tested_node_unique_id.split(".")
+        version = f"_{v[0]}" if v and v[0].startswith("v") else ""
+        identifier = f"{name}{version}"
+        return self.get_relation(database, schema, identifier)
+
     def run_sql_for_tests(self, sql, fetch, conn):
         cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
         try:
