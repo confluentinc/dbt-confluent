@@ -225,6 +225,71 @@ class ConfluentAdapter(SQLAdapter):
         # Filter using the base adapter's method
         return self._catalog_filter_table(table, used_schemas)
 
+    @available
+    def get_tested_model_relation(self, tested_node_unique_id, database, schema):
+        """Resolve the tested model's relation from its unique_id.
+
+        Unit tests run in a separate manifest where graph.nodes is empty,
+        so we can't look up nodes directly. Instead, we extract the model
+        identifier from the unique_id (format: model.<package>.<name>)
+        and find the relation in the adapter's cache.
+        """
+        # unique_id format:
+        #   non-versioned: model.<package>.<name>
+        #   versioned:     model.<package>.<name>.v<version>
+        _, _, name, *v = tested_node_unique_id.split(".")
+        version = f"_{v[0]}" if v and v[0].startswith("v") else ""
+        identifier = f"{name}{version}"
+        relation = self.get_relation(database, schema, identifier)
+        if relation is None:
+            raise DbtDatabaseError(
+                "Could not find relation for tested model with unique_id "
+                f"'{tested_node_unique_id}'. Looked for relation with identifier "
+                f"'{identifier}' in database '{database}', schema '{schema}'"
+            )
+
+    @available
+    def parse_unit_test_ctes(self, extra_ctes, compiled_sql):
+        """Parse the CTE information injected by dbt-core for unit tests.
+
+        dbt-core compiles unit test fixtures as CTEs with the format:
+            " __dbt__cte__<name> as (\n<fixture_sql>\n)"
+        and prepends them to the compiled SQL as:
+            "with <cte1>, <cte2> <main_sql>"
+
+        This method extracts each CTE's name, fixture body, and original
+        model identifier, and strips the CTE prefix from the compiled SQL
+        to recover the main query.
+
+        Returns a dict with:
+            - ctes: list of {cte_name, body, original_identifier} dicts
+            - main_sql: the compiled SQL with the CTE prefix removed
+        """
+        ctes = []
+        for cte in extra_ctes:
+            cte_sql = cte["sql"].strip()
+            # Format is: __dbt__cte__<name> as (\n<body>\n)
+            as_idx = cte_sql.index(" as (")
+            cte_name = cte_sql[:as_idx].strip()
+            body = cte_sql[as_idx + 5 : -1]  # skip " as (" and trailing ")"
+            original_identifier = cte_name.replace("__dbt__cte__", "")
+            ctes.append(
+                {
+                    "cte_name": cte_name,
+                    "body": body,
+                    "original_identifier": original_identifier,
+                }
+            )
+
+        # Strip the CTE prefix to get the main query
+        main_sql = compiled_sql
+        if ctes:
+            cte_sqls = [cte["sql"] for cte in extra_ctes]
+            cte_prefix = "with" + ", ".join(cte_sqls) + " "
+            main_sql = compiled_sql[len(cte_prefix) :]
+
+        return {"ctes": ctes, "main_sql": main_sql}
+
     def run_sql_for_tests(self, sql, fetch, conn):
         cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
         try:
