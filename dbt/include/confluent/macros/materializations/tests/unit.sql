@@ -1,9 +1,7 @@
 {# Unit test materialization for Confluent.
    Instead of using CTEs for input fixtures (which don't support watermarks),
    we create real tables using CREATE TABLE ... LIKE and insert fixture data.
-
-   The CTE format is well-defined by dbt-core's compiler:
-   " __dbt__cte__<identifier> as (\n<compiled_fixture_sql>\n)" #}
+   CTE parsing is handled in Python by adapter.parse_unit_test_ctes(). #}
 {%- materialization unit, adapter='confluent' -%}
   {%- set relations = [] -%}
   {%- set expected_rows = config.get('expected_rows') -%}
@@ -16,30 +14,17 @@
 
   {%- set temp_tables = [] -%}
 
-  {# Strip injected CTE prefix from compiled SQL to get the main query.
-     dbt-core prepends "with <cte1>, <cte2> " to the compiled SQL. #}
-  {%- set cte_sqls = [] -%}
-  {%- for cte in model['extra_ctes'] -%}
-    {%- do cte_sqls.append(cte['sql']) -%}
-  {%- endfor -%}
-  {%- set main_sql = sql -%}
-  {%- if cte_sqls | length > 0 -%}
-    {%- set cte_prefix = 'with' ~ cte_sqls | join(', ') ~ ' ' -%}
-    {%- set main_sql = sql[cte_prefix | length :] -%}
-  {%- endif -%}
+  {# Parse CTEs and extract main query in Python #}
+  {%- set parsed = adapter.parse_unit_test_ctes(model['extra_ctes'], sql) -%}
+  {%- set main_sql = parsed['main_sql'] -%}
 
-  {# For each injected CTE, extract its info and create a real table with fixture data #}
-  {%- for cte in model['extra_ctes'] -%}
-    {%- set cte_sql = cte['sql'] | trim -%}
-    {%- set cte_name = cte_sql.split(' as (')[0] | trim -%}
-    {%- set body = cte_sql[cte_sql.index(' as (') + 5 : -1] -%}
-    {%- set original_identifier = cte_name.replace('__dbt__cte__', '') -%}
-
-    {%- set original_relation = adapter.get_relation(this.database, this.schema, original_identifier) -%}
+  {# For each CTE, create a real table with fixture data #}
+  {%- for cte in parsed['ctes'] -%}
+    {%- set original_relation = adapter.get_relation(this.database, this.schema, cte['original_identifier']) -%}
     {%- set temp_relation = api.Relation.create(
         database=this.database,
         schema=this.schema,
-        identifier=cte_name,
+        identifier=cte['cte_name'],
         type='table'
     ) -%}
 
@@ -52,7 +37,7 @@
     {%- endcall %}
 
     {% call statement('insert_' ~ loop.index) -%}
-      INSERT INTO {{ temp_relation }} {{ body }}
+      INSERT INTO {{ temp_relation }} {{ cte['body'] }}
     {%- endcall %}
 
     {%- do temp_tables.append(temp_relation) -%}
