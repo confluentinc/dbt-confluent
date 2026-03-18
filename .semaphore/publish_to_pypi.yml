@@ -1,0 +1,25 @@
+
+version: v1.0
+name: Publish `dbt_confluent` to PyPi
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-1
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      - . vault-setup
+      - git submodule update --init
+      - curl -LsSf https://astral.sh/uv/install.sh | sh
+      - uv sync --extra dev --extra test
+
+blocks:
+  - name: Publish `dbt_confluent` to PyPi
+    task:
+      jobs:
+        - name: Publish `dbt_confluent` to PyPi
+          commands:
+            - DBT_CONFLUENT_KEY=$(vault kv get -field=dbt-confluent v1/ci/kv/pypi/pypi.org)
+            - uv build
+            - uv publish -u __token__ -p "$DBT_CONFLUENT_KEY" dist/*
