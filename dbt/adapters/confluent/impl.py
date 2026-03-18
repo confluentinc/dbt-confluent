@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class ConfluentRelation(BaseRelation):
     quote_character: str = "`"
     include_policy: Policy = field(
-        default_factory=lambda: Policy(database=False, schema=True, identifier=True)
+        default_factory=lambda: Policy(database=True, schema=True, identifier=True)
     )
 
     def quoted(self, identifier):
