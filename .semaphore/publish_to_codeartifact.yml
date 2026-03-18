@@ -1,0 +1,27 @@
+version: v1.0
+name: Publish `dbt_confluent` to Codeartifact
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-amd64-1
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      - . vault-setup
+      - git submodule update --init
+      - curl -LsSf https://astral.sh/uv/install.sh | sh
+      - uv sync --extra dev --extra test
+
+blocks:
+  - name: Publish `dbt_confluent` to codeartifact
+    task:
+      jobs:
+        - name: Publish `dbt_confluent` to codeartifact
+          commands:
+            - uv build
+            - uv publish --index codeartifact dist/*
+
+promotions:
+  - name: Publish dbt-confluent to PyPi
+    pipeline_file: publish_to_pypi.yml
