@@ -13,3 +13,7 @@ semaphore:
   enable: true
   status_level: block
   pipeline_enable: false
+code_artifact:
+  enable: true
+  package_paths:
+    - pypi-internal/pypi//dbt-confluent*
