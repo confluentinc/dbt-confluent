@@ -98,7 +98,7 @@ See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 ## Known Limitations
 
 - **No schema management**: Schemas (Kafka clusters) cannot be created or dropped — they are managed in Confluent Cloud.
-- **No table renames**: `ALTER TABLE RENAME` is not supported; materializations use drop-and-recreate.
+- **No table renames**: `ALTER TABLE RENAME` is not supported; to effectively rename a model you must drop and recreate the underlying table, which for `table`, `streaming_table`, and `streaming_source` materializations requires running with `--full-refresh`.
 - **No transactions**: Flink SQL is non-transactional.
 - **No snapshots**: Flink SQL lacks the batch operations (MERGE, UPDATE) required by dbt snapshots.
 - **No incremental**: dbt's batch-incremental semantics don't map to Flink's continuous processing model. Use `streaming_table` instead.
