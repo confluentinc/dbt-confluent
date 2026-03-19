@@ -4,7 +4,7 @@
 
 | Materialization | Description |
 |---|---|
-| `table` | Drop-and-recreate table via CTAS. |
+| `table` | Create table via CTAS. Requires `--full-refresh` to replace an existing table. |
 | `view` | Drop-and-recreate view. |
 | `materialized_view` | CTAS table continuously updated by Flink. No manual refresh needed. |
 | `streaming_table` | Creates a table then runs a continuous INSERT query. Supports table options via `config(with={...})`. Requires `--full-refresh` to re-run against an existing table. |
