@@ -80,7 +80,7 @@ class ConfluentCredentials(Credentials):
         """
         List of keys to display in the `dbt debug` output.
         """
-        return ("organization_id", "database")
+        return ("organization_id", "database", "schema")
 
 
 class ConfluentConnectionManager(SQLConnectionManager):
