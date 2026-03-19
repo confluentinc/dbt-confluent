@@ -204,6 +204,14 @@ wheels = [
 ]
 
 [[package]]
+name = "confluent-sql"
+version = "0.1.0"
+source = { git = "https://github.com/confluentinc/confluent-sql#973a0a819fa861e671fa1659100e998a41416f6b" }
+dependencies = [
+    { name = "httpx" },
+]
+
+[[package]]
 name = "daff"
 version = "1.4.2"
 source = { registry = "https://pypi.org/simple" }
@@ -259,6 +267,7 @@ name = "dbt-confluent"
 source = { editable = "." }
 dependencies = [
     { name = "agate" },
+    { name = "confluent-sql" },
     { name = "dbt-adapters" },
     { name = "dbt-common" },
     { name = "dbt-core" },
@@ -281,6 +290,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "agate", specifier = "~=1.0" },
+    { name = "confluent-sql", git = "https://github.com/confluentinc/confluent-sql" },
     { name = "dbt-adapters", specifier = "~=1.16" },
     { name = "dbt-common", specifier = "~=1.12" },
     { name = "dbt-core", specifier = "~=1.11" },
