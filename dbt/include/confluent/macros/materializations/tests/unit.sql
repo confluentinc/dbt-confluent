@@ -21,6 +21,9 @@
   {# For each CTE, create a real table with fixture data #}
   {%- for cte in parsed['ctes'] -%}
     {%- set original_relation = adapter.get_relation(this.database, this.schema, cte['original_identifier']) -%}
+    {%- if not original_relation -%}
+      {%- do exceptions.raise_compiler_error("The original relation referenced in tests does not exists: " ~ original_relation) -%}
+    {%- endif -%}
     {%- set temp_relation = api.Relation.create(
         database=this.database,
         schema=this.schema,
