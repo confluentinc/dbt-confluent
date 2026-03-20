@@ -25,7 +25,7 @@ pip install dbt-confluent
 or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv pip install dbt-confluent
+uv add dbt-confluent
 ```
 
 Requires Python 3.10+.
@@ -40,9 +40,18 @@ dbt init my_project
 
 Select `confluent` as the adapter and fill in the prompts for your Confluent Cloud credentials (API key, compute pool, environment, etc.).
 
+### Concept mapping
+
+Confluent Cloud Flink uses different terminology than traditional databases. Here's how dbt concepts map to Flink and Confluent Cloud:
+
+| dbt concept | Flink concept | Confluent Cloud entity |
+|---|---|---|
+| `database` | Catalog | Environment |
+| `schema` | Database | Kafka cluster |
+
 ### Schema configuration
 
-Unlike most dbt adapters, `dbt-confluent` cannot create or drop schemas — a dbt schema maps to a Kafka cluster in Confluent Cloud, which is managed externally. Both the `dbname` in your `profiles.yml` and any model-level `schema` config must reference an existing Kafka cluster:
+Unlike most dbt adapters, `dbt-confluent` cannot create or drop schemas — a dbt schema maps to a Flink database (Kafka cluster) in Confluent Cloud, which is managed externally. Both the `dbname` in your `profiles.yml` and any model-level `schema` config must reference an existing Flink database by name:
 
 ```yaml
 # dbt_project.yml
@@ -97,11 +106,11 @@ See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 
 ## Known Limitations
 
-- **No schema management**: Schemas (Kafka clusters) cannot be created or dropped — they are managed in Confluent Cloud.
+- **No schema management**: Flink databases (Kafka clusters) cannot be created or dropped — they are managed in Confluent Cloud.
 - **No table renames**: `ALTER TABLE RENAME` is not supported; to effectively rename a model you must drop and recreate the underlying table, which for `table`, `streaming_table`, and `streaming_source` materializations requires running with `--full-refresh`.
 - **No transactions**: Flink SQL is non-transactional.
 - **No snapshots**: Flink SQL lacks the batch operations (MERGE, UPDATE) required by dbt snapshots.
-- **No incremental**: dbt's batch-incremental semantics don't map to Flink's continuous processing model. Use `streaming_table` instead.
+- **No incremental**: dbt's batch-incremental semantics does not map to Flink's continuous processing model. Use `streaming_table` instead.
 
 ## Development
 
@@ -139,7 +148,7 @@ uv run pytest
 
 ## Versioning
 
-This adapter follows [semantic versioning](https://semver.org/). The major.minor version tracks dbt Core compatibility (e.g., `dbt-confluent` 1.11.x is compatible with `dbt-core` 1.11.x).
+This adapter follows [semantic versioning](https://semver.org/) and is versioned independently from dbt Core. Compatibility with dbt Core is declared via dependencies (currently requires `dbt-core~=1.11`).
 
 ## License
 
