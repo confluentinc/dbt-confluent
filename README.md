@@ -1,70 +1,155 @@
-## dbt-confluent
+# dbt-confluent
 
-This is a dbt adapter plugin for Confluent Cloud's Flink SQL service.
+The [dbt](https://www.getdbt.com/) adapter for [Confluent Cloud](https://confluent.io/confluent-cloud/) Flink SQL.
 
-### Versioning
-This adapter plugin follows [semantic versioning](https://semver.org/). The current version is v1.10.0, compatible with dbt Core v1.10.
+Build, test, and manage streaming data transformations on Confluent Cloud using dbt's familiar development workflow.
 
-For Confluent-specific functionality, we aim for backwards-compatibility wherever possible. Backwards-incompatible changes will be clearly communicated and limited to minor versions.
+## Overview
 
-## Getting Started
+`dbt-confluent` lets you use dbt to define and run SQL transformations on Confluent Cloud's fully managed Apache Flink service. It supports both batch-style and streaming materializations, enabling continuous data pipelines defined as dbt models.
 
-### Installation
+Features:
+- Standard dbt materializations (table, view, ephemeral) adapted for Flink SQL
+- Streaming-native materializations (`streaming_table`, `streaming_source`) for continuous data pipelines
+- Materialized views powered by Flink's continuous query execution
+- Integration with Confluent Cloud connectors (e.g., Datagen/Faker) via `streaming_source`
 
-Install from the repository (requires access):
+See [Materializations](MATERIALIZATIONS.md) for the full list and details.
+
+## Installation
 
 ```bash
-uv pip install "dbt-confluent @ git+https://github.com/confluentinc/dbt-confluent"
+pip install dbt-confluent
 ```
 
-Or from a built wheel:
+or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
-uv pip install dbt_confluent-<version>-py3-none-any.whl
+uv add dbt-confluent
 ```
 
-Configure your Confluent Cloud credentials in a `profiles.yml` file or environment variables.
+Requires Python 3.10+.
 
-### Development Setup
+## Configuration
 
-Clone the repository (with submodules) and install dependencies:
+After installing, scaffold a new project with:
 
 ```bash
-git clone --recurse-submodules <repo-url>
-cd dbt-confluentcloud
+dbt init my_project
+```
+
+Select `confluent` as the adapter and fill in the prompts for your Confluent Cloud credentials (API key, compute pool, environment, etc.).
+
+### Concept mapping
+
+Confluent Cloud Flink uses different terminology than traditional databases. Here's how dbt concepts map to Flink and Confluent Cloud:
+
+| dbt concept | Flink concept | Confluent Cloud entity |
+|---|---|---|
+| `database` | Catalog | Environment |
+| `schema` | Database | Kafka cluster |
+
+### Schema configuration
+
+Unlike most dbt adapters, `dbt-confluent` cannot create or drop schemas — a dbt schema maps to a Flink database (Kafka cluster) in Confluent Cloud, which is managed externally. Both the `dbname` in your `profiles.yml` and any model-level `schema` config must reference an existing Flink database by name:
+
+```yaml
+# dbt_project.yml
+models:
+  my_project:
+    +schema: my-kafka-cluster
+```
+
+## Usage
+
+### Streaming table
+
+A streaming table creates a table and runs a continuous INSERT query against it:
+
+```sql
+-- models/pageviews_enriched.sql
+{{
+  config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'}
+  )
+}}
+
+SELECT
+  p.user_id,
+  p.page_url,
+  u.username
+FROM {{ ref('pageviews') }} p
+JOIN {{ ref('users') }} u ON p.user_id = u.user_id
+```
+
+### Streaming source
+
+A streaming source creates a connector-backed source table. The model SQL defines the column definitions:
+
+```sql
+-- models/datagen_users.sql
+{{
+  config(
+    materialized='streaming_source',
+    connector='faker',
+    with={'rows-per-second': '10'}
+  )
+}}
+
+`user_id` INT,
+`username` STRING,
+`email` STRING
+```
+
+See [Materializations](MATERIALIZATIONS.md) for the full list and details.
+
+## Known Limitations
+
+- **No schema management**: Flink databases (Kafka clusters) cannot be created or dropped — they are managed in Confluent Cloud.
+- **No table renames**: `ALTER TABLE RENAME` is not supported; to effectively rename a model you must drop and recreate the underlying table, which for `table`, `streaming_table`, and `streaming_source` materializations requires running with `--full-refresh`.
+- **No transactions**: Flink SQL is non-transactional.
+- **No snapshots**: Flink SQL lacks the batch operations (MERGE, UPDATE) required by dbt snapshots.
+- **No incremental**: dbt's batch-incremental semantics does not map to Flink's continuous processing model. Use `streaming_table` instead.
+
+## Development
+
+```bash
+git clone https://github.com/confluentinc/dbt-confluent
+cd dbt-confluent
 uv sync --extra dev --extra test
 ```
 
-Run tests with `uv run pytest`.
-Tests require Confluent Cloud credentials to be set through the following env vars:
-```
-export CONFLUENT_ENV_ID = <value>
-export CONFLUENT_ORG_ID = <value>
-export CONFLUENT_COMPUTE_POOL_ID = <value>
-export CONFLUENT_CLOUD_PROVIDER = <value>
-export CONFLUENT_CLOUD_REGION = <value>
-export CONFLUENT_TEST_DBNAME = <value>
-export CONFLUENT_FLINK_API_KEY = <value>
-export CONFLUENT_FLINK_API_SECRET = <value>
-```
-
-To install as an editable dependency in another project:
+### Code quality
 
 ```bash
-uv pip install -e /path/to/dbt-confluentcloud
+uv run ruff check dbt/ tests/
+uv run ruff format --check dbt/ tests/
 ```
 
-Note: `dbt-confluent` is a namespace package (`dbt.adapters.confluent`), which means goto-definition and other static analysis features may not resolve the adapter's source code in editable mode. If your LSP does not resolve `dbt.adapters.confluent` imports, add the source path to your project's pyright configuration:
+### Running tests
 
-```toml
-# pyproject.toml
-[tool.pyright]
-extraPaths = ["/path/to/dbt-confluentcloud"]
+Tests require a Confluent Cloud environment. Set the following environment variables (or add them to a `test.env` file):
+
+```bash
+export CONFLUENT_ENV_ID=env-xxxxxx
+export CONFLUENT_ORG_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+export CONFLUENT_COMPUTE_POOL_ID=lfcp-xxxxx
+export CONFLUENT_CLOUD_PROVIDER=aws
+export CONFLUENT_CLOUD_REGION=us-west-6
+export CONFLUENT_TEST_DBNAME=dbname
+export CONFLUENT_FLINK_API_KEY=xxx
+export CONFLUENT_FLINK_API_SECRET=xxx
 ```
 
-### Known Limitations
+```bash
+uv run pytest
+```
 
-- **Schema Management**: Cannot create or drop schemas/databases (managed in Confluent Cloud)
-- **Table Renames**: ALTER TABLE is not supported; tables cannot be renamed
-- **Transactions**: Confluent Cloud Flink SQL is non-transactional
-- **DBT Snapshots**: Flink SQL does not provide the transaction operations (MERGE, UPDATE with CTEs) required to implement Type 2 Slowly Changing Dimensions in the batch-processing style that dbt snapshots use.
+## Versioning
+
+This adapter follows [semantic versioning](https://semver.org/) and is versioned independently from dbt Core. Compatibility with dbt Core is declared via dependencies (currently requires `dbt-core~=1.11`).
+
+## License
+
+Apache-2.0 — see [LICENSE](./LICENSE) for details.
