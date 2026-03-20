@@ -17,7 +17,12 @@
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
   -- TODO: Support altering table options without full refresh (ALTER TABLE ... SET).
-  {{ skip_or_drop_existing(existing_relation, target_relation) }}
+  {% if skip_or_drop_existing(existing_relation, target_relation, has_select_query=false) %}
+    {# dbt requires a 'main' statement result even when skipping #}
+    {% call noop_statement('main', 'SKIP') %}{% endcall %}
+    {{ run_hooks(post_hooks, inside_transaction=False) }}
+    {{ return({'relations': [target_relation]}) }}
+  {% endif %}
 
   -- See comment above about calling hooks
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
