@@ -4,8 +4,7 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  -- Drop the existing relation if it already exists and full refresh is set
-  {{ drop_if_full_refresh(existing_relation) }}
+  {{ skip_or_drop_existing(existing_relation, target_relation) }}
 
   -- `BEGIN` happens here:
   {{ run_hooks(pre_hooks, inside_transaction=True) }}

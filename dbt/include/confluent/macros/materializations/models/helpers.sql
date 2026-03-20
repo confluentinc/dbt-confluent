@@ -1,15 +1,15 @@
-{% macro drop_if_full_refresh(relation) %}
-  -- If full refresh is set to true, drop the relation if it exists.
-  -- Otherwise, raise an error and specify you need to set full_refresh to true.
-  {% if relation %}
+{% macro skip_or_drop_existing(existing_relation, target_relation) %}
+  {# If the relation already exists, either drop it (on --full-refresh) or skip re-creation.
+     Returns early from the calling materialization if skipping. #}
+  {# TODO: Compare the existing relation's schema against the expected one and raise
+     a compilation error if they differ (e.g., column changes that require --full-refresh). #}
+  {% if existing_relation %}
     {% if should_full_refresh() %}
-      {{ drop_relation_if_exists(relation) }}
+      {{ drop_relation_if_exists(existing_relation) }}
     {% else %}
-      {% set msg %}
-        Relation '{{ relation }}' already exists.
-        Set full_refresh to true if you want to overwrite the existing relation
-      {% endset %}
-      {% do exceptions.raise_compiler_error(msg) %}
+      {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
+      {{ run_hooks(post_hooks, inside_transaction=False) }}
+      {{ return({'relations': [target_relation]}) }}
     {% endif %}
   {% endif %}
 {% endmacro %}
