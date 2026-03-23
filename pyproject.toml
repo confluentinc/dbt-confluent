@@ -32,6 +32,7 @@ dependencies = [
   "dbt-adapters~=1.16",
   "agate~=1.0",
   "httpx>=0.23.0,<0.29.0",
+  "confluent-sql~=0.1",
 ]
 
 [project.optional-dependencies]
@@ -90,14 +91,8 @@ ignore_missing_imports = true
 show_error_codes = true
 pretty = true
 
-[tool.uv.sources]
-confluent_sql = { path = "./confluent-sql" }
-
 [tool.hatch.version]
 path = "dbt/adapters/confluent/__version__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["dbt", "confluent-sql/src/confluent_sql"]
-
-[tool.hatch.build.targets.wheel.sources]
-"confluent-sql/src" = ""
+packages = ["dbt"]
