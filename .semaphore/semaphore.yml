@@ -77,3 +77,7 @@ after_pipeline:
       - name: Publish Test Results to Semaphore
         commands:
           - test-results gen-pipeline-report || echo "Could not publish pipeline test result report. Are there any test results to publish?"
+
+promotions:
+  - name: Publish dbt-confluent to PyPi
+    pipeline_file: publish_to_pypi.yml
