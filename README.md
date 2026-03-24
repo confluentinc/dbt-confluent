@@ -11,7 +11,6 @@ Build, test, and manage streaming data transformations on Confluent Cloud using 
 Features:
 - Standard dbt materializations (table, view, ephemeral) adapted for Flink SQL
 - Streaming-native materializations (`streaming_table`, `streaming_source`) for continuous data pipelines
-- Materialized views powered by Flink's continuous query execution
 - Integration with Confluent Cloud connectors (e.g., Datagen/Faker) via `streaming_source`
 
 See [Materializations](MATERIALIZATIONS.md) for the full list and details.
