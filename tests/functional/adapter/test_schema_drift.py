@@ -297,14 +297,19 @@ class TestTableColumnDrift(ConfluentFixtures):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_REORDERED_COLUMNS)
         result = run_dbt(["run"])
         assert len(result) == 2
+        # Verify both models were skipped (no drift detected)
+        for r in result:
+            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
 
     def test_full_refresh_fixes_drift(self, project):
         """After detecting drift, --full-refresh should succeed."""
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
         result = run_dbt(["run", "--full-refresh"])
         assert len(result) == 2
+        # Verify both models succeeded
+        for r in result:
+            assert r.status.name == "Success", f"{r.node.name} failed: {r.status}"
 
-    @pytest.mark.skip("Data type drift detection not yet implemented")
     def test_type_change_detected(self, project):
         """Changing column data types should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_TYPE_CHANGE)
@@ -382,7 +387,6 @@ class TestStreamingTableOptionsDrift(ConfluentFixtures):
         result = run_dbt(["run"], expect_pass=False)
         assert_result_has_status(result, "my_streaming_table", "error")
 
-    @pytest.mark.skip("Data type drift detection not yet implemented")
     def test_type_change_detected(self, project):
         """Changing column data types should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_TYPE_CHANGE)
@@ -420,7 +424,7 @@ class TestStreamingSourceIdempotent(ConfluentFixtures):
 
 
 class TestStreamingSourceOptionsDrift(ConfluentFixtures):
-    """Changing WITH options in a streaming_source should raise an error."""
+    """Changing WITH options or columns in a streaming_source should raise an error."""
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -446,36 +450,24 @@ class TestStreamingSourceOptionsDrift(ConfluentFixtures):
         result = run_dbt(["run"], expect_pass=False)
         assert_result_has_status(result, "my_source", "error")
 
-    def test_column_drift_not_detected(self, project):
-        """Column drift is not currently checked for streaming_source - only WITH options."""
-        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN)
-        result = run_dbt(["run"])
-        # Should succeed (skip) even though columns changed
-        assert len(result) == 1
-        assert result[0].message == "SKIP", f"Expected skip but got: {result[0].message}"
-
-    @pytest.mark.skip("Column drift detection not yet implemented for streaming_source")
     def test_extra_column_detected(self, project):
         """Adding a column should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
         assert_result_has_status(result, "my_source", "error")
 
-    @pytest.mark.skip("Column drift detection not yet implemented for streaming_source")
     def test_removed_column_detected(self, project):
         """Removing a column should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_REMOVED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
         assert_result_has_status(result, "my_source", "error")
 
-    @pytest.mark.skip("Column drift detection not yet implemented for streaming_source")
     def test_renamed_column_detected(self, project):
         """Renaming a column should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_RENAMED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
         assert_result_has_status(result, "my_source", "error")
 
-    @pytest.mark.skip("Data type drift detection not yet implemented for streaming_source")
     def test_type_change_detected(self, project):
         """Changing column data types should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_TYPE_CHANGE)
