@@ -15,6 +15,21 @@ from tests.functional.adapter.fixtures import ConfluentFixtures
 def relation(project, name):
     return project.adapter.Relation.create(identifier=name)
 
+
+def get_result_by_name(results, name):
+    """Extract a specific result by node name from run results."""
+    for result in results:
+        if result.node.name == name:
+            return result
+    return None
+
+
+def assert_result_has_status(results, name, expected_status):
+    """Assert that a specific result has the expected status."""
+    result = get_result_by_name(results, name)
+    assert result is not None, f"{name} not found in results"
+    assert result.status == expected_status, f"{name} expected status '{expected_status}' but got '{result.status}'"
+
 # -- Table (CTAS) models --
 
 TABLE_MODEL = """
@@ -42,6 +57,15 @@ TABLE_MODEL_REORDERED_COLUMNS = """
 select price, order_id, order_time from {{ ref('source_for_drift') }}
 """
 
+TABLE_MODEL_TYPE_CHANGE = """
+{{ config(materialized='table') }}
+select
+  cast(order_id as int) as order_id,
+  cast(price as decimal(10, 3)) as price,
+  order_time
+from {{ ref('source_for_drift') }}
+"""
+
 # -- Streaming table models --
 
 STREAMING_TABLE_MODEL = """
@@ -66,6 +90,18 @@ STREAMING_TABLE_MODEL_EXTRA_COLUMN = """
     with={'changelog.mode': 'upsert'},
 ) }}
 select order_id, price, order_time, order_id as duplicate_col from {{ ref('source_for_drift') }}
+"""
+
+STREAMING_TABLE_MODEL_TYPE_CHANGE = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+) }}
+select
+  cast(order_id as int) as order_id,
+  price,
+  order_time
+from {{ ref('source_for_drift') }}
 """
 
 STREAMING_TABLE_MODELS_YML = """
@@ -128,6 +164,58 @@ STREAMING_SOURCE_MODEL_DIFFERENT_OPTIONS = """
 `value` STRING
 """
 
+STREAMING_SOURCE_MODEL_EXTRA_COLUMN = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+    }
+) }}
+`id` BIGINT,
+`value` STRING,
+`extra_column` STRING
+"""
+
+STREAMING_SOURCE_MODEL_REMOVED_COLUMN = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+    }
+) }}
+`id` BIGINT
+"""
+
+STREAMING_SOURCE_MODEL_RENAMED_COLUMN = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+    }
+) }}
+`id` BIGINT,
+`name` STRING
+"""
+
+STREAMING_SOURCE_MODEL_TYPE_CHANGE = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+    }
+) }}
+`id` INT,
+`value` STRING
+"""
+
 
 class TestTableIdempotent(ConfluentFixtures):
     """A table model should be idempotent: two consecutive runs without --full-refresh should succeed."""
@@ -158,6 +246,9 @@ class TestTableIdempotent(ConfluentFixtures):
         """Second run without --full-refresh should skip, not fail."""
         results = run_dbt(["run"])
         assert len(results) == 2
+        # Verify both models were skipped
+        for r in results:
+            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
 
 
 class TestTableColumnDrift(ConfluentFixtures):
@@ -189,17 +280,17 @@ class TestTableColumnDrift(ConfluentFixtures):
     def test_extra_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert any(r.status == "error" for r in result)
+        assert_result_has_status(result, "my_table", "error")
 
     def test_removed_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_REMOVED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert any(r.status == "error" for r in result)
+        assert_result_has_status(result, "my_table", "error")
 
     def test_renamed_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_RENAMED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert any(r.status == "error" for r in result)
+        assert_result_has_status(result, "my_table", "error")
 
     def test_reordered_columns_not_detected(self, project):
         """Column reordering is not considered drift — order doesn't matter for Kafka tables."""
@@ -212,6 +303,13 @@ class TestTableColumnDrift(ConfluentFixtures):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
         result = run_dbt(["run", "--full-refresh"])
         assert len(result) == 2
+
+    @pytest.mark.skip("Data type drift detection not yet implemented")
+    def test_type_change_detected(self, project):
+        """Changing column data types should raise an error without --full-refresh."""
+        set_model_file(project, relation(project, "my_table"), TABLE_MODEL_TYPE_CHANGE)
+        result = run_dbt(["run"], expect_pass=False)
+        assert_result_has_status(result, "my_table", "error")
 
 
 class TestStreamingTableIdempotent(ConfluentFixtures):
@@ -242,6 +340,9 @@ class TestStreamingTableIdempotent(ConfluentFixtures):
     def test_second_run_skips(self, project):
         results = run_dbt(["run"])
         assert len(results) == 2
+        # Verify both models were skipped
+        for r in results:
+            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
 
 
 class TestStreamingTableOptionsDrift(ConfluentFixtures):
@@ -274,12 +375,19 @@ class TestStreamingTableOptionsDrift(ConfluentFixtures):
     def test_changed_options_detected(self, project):
         set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_DIFFERENT_OPTIONS)
         result = run_dbt(["run"], expect_pass=False)
-        assert any(r.status == "error" for r in result)
+        assert_result_has_status(result, "my_streaming_table", "error")
 
     def test_column_drift_detected(self, project):
         set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_EXTRA_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert any(r.status == "error" for r in result)
+        assert_result_has_status(result, "my_streaming_table", "error")
+
+    @pytest.mark.skip("Data type drift detection not yet implemented")
+    def test_type_change_detected(self, project):
+        """Changing column data types should raise an error without --full-refresh."""
+        set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_TYPE_CHANGE)
+        result = run_dbt(["run"], expect_pass=False)
+        assert_result_has_status(result, "my_streaming_table", "error")
 
 
 class TestStreamingSourceIdempotent(ConfluentFixtures):
@@ -307,6 +415,8 @@ class TestStreamingSourceIdempotent(ConfluentFixtures):
     def test_second_run_skips(self, project):
         results = run_dbt(["run"])
         assert len(results) == 1
+        # Verify the model was skipped
+        assert results[0].message == "SKIP", f"{results[0].node.name} was not skipped (message: {results[0].message})"
 
 
 class TestStreamingSourceOptionsDrift(ConfluentFixtures):
@@ -334,4 +444,40 @@ class TestStreamingSourceOptionsDrift(ConfluentFixtures):
     def test_changed_options_detected(self, project):
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_DIFFERENT_OPTIONS)
         result = run_dbt(["run"], expect_pass=False)
-        assert any(r.status == "error" for r in result)
+        assert_result_has_status(result, "my_source", "error")
+
+    def test_column_drift_not_detected(self, project):
+        """Column drift is not currently checked for streaming_source - only WITH options."""
+        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN)
+        result = run_dbt(["run"])
+        # Should succeed (skip) even though columns changed
+        assert len(result) == 1
+        assert result[0].message == "SKIP", f"Expected skip but got: {result[0].message}"
+
+    @pytest.mark.skip("Column drift detection not yet implemented for streaming_source")
+    def test_extra_column_detected(self, project):
+        """Adding a column should raise an error without --full-refresh."""
+        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN)
+        result = run_dbt(["run"], expect_pass=False)
+        assert_result_has_status(result, "my_source", "error")
+
+    @pytest.mark.skip("Column drift detection not yet implemented for streaming_source")
+    def test_removed_column_detected(self, project):
+        """Removing a column should raise an error without --full-refresh."""
+        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_REMOVED_COLUMN)
+        result = run_dbt(["run"], expect_pass=False)
+        assert_result_has_status(result, "my_source", "error")
+
+    @pytest.mark.skip("Column drift detection not yet implemented for streaming_source")
+    def test_renamed_column_detected(self, project):
+        """Renaming a column should raise an error without --full-refresh."""
+        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_RENAMED_COLUMN)
+        result = run_dbt(["run"], expect_pass=False)
+        assert_result_has_status(result, "my_source", "error")
+
+    @pytest.mark.skip("Data type drift detection not yet implemented for streaming_source")
+    def test_type_change_detected(self, project):
+        """Changing column data types should raise an error without --full-refresh."""
+        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_TYPE_CHANGE)
+        result = run_dbt(["run"], expect_pass=False)
+        assert_result_has_status(result, "my_source", "error")
