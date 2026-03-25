@@ -129,7 +129,10 @@
 
   {# Create temp table from the query #}
   {% call statement('create_temp_table') %}
-    CREATE TABLE {{ temp_relation }} AS {{ model_sql }} WHERE FALSE
+    CREATE TABLE {{ temp_relation }} AS
+    SELECT * FROM (
+      {{ model_sql }}
+    ) WHERE FALSE
   {% endcall %}
 
   {# Query INFORMATION_SCHEMA for column names and types #}
