@@ -119,7 +119,7 @@
      Returns a list of dicts with column_name and data_type. #}
 
   {# Create a unique temp table name #}
-  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ (modules.datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S%f')) %}
+  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ (modules.uuid.uuid4().hex) %}
   {% set temp_relation = adapter.Relation.create(
     database=this.database,
     schema=this.schema,
@@ -154,7 +154,7 @@
      Returns a list of dicts with column_name and data_type. #}
 
   {# Create a unique temp table name #}
-  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ (modules.datetime.datetime.utcnow().strftime('%Y%m%d%H%M%S%f')) %}
+  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ (modules.uuid.uuid4().hex) %}
   {% set temp_relation = adapter.Relation.create(
     database=this.database,
     schema=this.schema,

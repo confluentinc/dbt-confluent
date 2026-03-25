@@ -106,9 +106,9 @@ class TestWindowFunctionConstraintsInDataType(ConfluentFixtures):
 
         # Find the window_table result
         window_table_result = None
-        for r in results:
-            if r.node.name == "window_table":
-                window_table_result = r
+        for res in results:
+            if res.node.name == "window_table":
+                window_table_result = res
                 break
 
         assert window_table_result is not None, "window_table not found in results"
