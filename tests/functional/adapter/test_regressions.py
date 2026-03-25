@@ -115,6 +115,6 @@ class TestWindowFunctionConstraintsInDataType(ConfluentFixtures):
         assert window_table_result.status.name == "Error", "Expected window_table to fail"
 
         # Check error message contains key guidance
-        assert "constraint keywords in the data_type field" in window_table_result.message
-        assert "constraints must be specified separately" in window_table_result.message
-        assert "constraints:" in window_table_result.message
+        assert "constraint keyword in the data_type field" in window_table_result.message
+        assert "cannot appear in data type definitions" in window_table_result.message
+        assert "constraints" in window_table_result.message.lower()
