@@ -12,7 +12,32 @@
 
 ## Schema Drift Detection
 
-When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation:
+When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation.
+
+### Configuration
+
+Control drift detection behavior with the `on_schema_change` config:
+
+```sql
+{{ config(
+    materialized='table',
+    on_schema_change='fail'  -- 'fail' (default) or 'ignore'
+) }}
+```
+
+**Options**:
+- `fail` (default) - Raise an error if schema drift is detected
+- `ignore` - Skip drift detection entirely; always skip if the table exists
+
+**Example**:
+```sql
+-- Disable drift detection for a specific model
+{{ config(
+    materialized='streaming_table',
+    on_schema_change='ignore'
+) }}
+select * from {{ ref('source') }}
+```
 
 ### Column Drift
 - **table, streaming_table**: Compares existing column names and data types with expected columns from the SELECT query. Raises an error if columns are added, removed, renamed, or if data types change. Column reordering is allowed (order doesn't matter for Kafka-backed tables).

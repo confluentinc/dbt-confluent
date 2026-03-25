@@ -110,7 +110,7 @@ See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 - **No transactions**: Flink SQL is non-transactional.
 - **No snapshots**: Flink SQL lacks the batch operations (MERGE, UPDATE) required by dbt snapshots.
 - **No incremental**: dbt's batch-incremental semantics does not map to Flink's continuous processing model. Use `streaming_table` instead.
-- **Drift detection for WITH options**: Schema drift detection only verifies that user-specified `WITH` options exist with correct values. It cannot detect when options are removed from the config (because connectors may add default options that cannot be distinguished from user-specified ones). Use `--full-refresh` to change or remove WITH options. See [Materializations](MATERIALIZATIONS.md#schema-drift-detection) for details.
+- **Drift detection for WITH options**: Schema drift detection only verifies that user-specified `WITH` options exist with correct values. It cannot detect when options are removed from the config (because connectors may add default options that cannot be distinguished from user-specified ones). Use `--full-refresh` to change or remove WITH options. Drift detection can be disabled per-model with `config(on_schema_change='ignore')`. See [Materializations](MATERIALIZATIONS.md#schema-drift-detection) for details.
 
 ## Development
 

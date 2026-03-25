@@ -4,6 +4,7 @@ When a table already exists and --full-refresh is not set, the adapter should:
 - Skip re-creation if the table matches the model definition
 - Raise an error if there's column drift (name changes, additions, removals)
 - Raise an error if there's WITH options drift
+- Allow skipping drift detection with on_schema_change='ignore'
 """
 
 import pytest
@@ -473,3 +474,132 @@ class TestStreamingSourceOptionsDrift(ConfluentFixtures):
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_TYPE_CHANGE)
         result = run_dbt(["run"], expect_pass=False)
         assert_result_has_status(result, "my_source", "error")
+
+
+# -- on_schema_change='ignore' tests --
+
+TABLE_MODEL_IGNORE_DRIFT = """
+{{ config(
+    materialized='table',
+    on_schema_change='ignore'
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+TABLE_MODEL_IGNORE_DRIFT_CHANGED = """
+{{ config(
+    materialized='table',
+    on_schema_change='ignore'
+) }}
+select order_id, price from {{ ref('source_for_drift') }}
+"""
+
+STREAMING_TABLE_MODEL_IGNORE_DRIFT = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+    on_schema_change='ignore'
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+STREAMING_TABLE_MODEL_IGNORE_DRIFT_CHANGED = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+    on_schema_change='ignore'
+) }}
+select order_id, price from {{ ref('source_for_drift') }}
+"""
+
+
+class TestIgnoreSchemaDrift(ConfluentFixtures):
+    """When on_schema_change='ignore', drift should not be detected or cause errors."""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {
+            "models": {"+schema": unique_schema},
+        }
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "my_table.sql": TABLE_MODEL_IGNORE_DRIFT,
+            "my_streaming_table.sql": STREAMING_TABLE_MODEL_IGNORE_DRIFT,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists my_table")
+        project.run_sql("drop table if exists my_streaming_table")
+
+    def test_table_with_column_drift_ignored(self, project):
+        """With on_schema_change='ignore', column drift should not cause an error."""
+        set_model_file(project, relation(project, "my_table"), TABLE_MODEL_IGNORE_DRIFT_CHANGED)
+        result = run_dbt(["run"])
+        # Both models should succeed (skip)
+        assert len(result) == 3  # source + my_table + my_streaming_table
+        for r in result:
+            assert r.status.name == "Success"
+        # my_table should have been skipped
+        my_table_result = get_result_by_name(result, "my_table")
+        assert my_table_result.message == "SKIP"
+
+    def test_streaming_table_with_options_drift_ignored(self, project):
+        """With on_schema_change='ignore', WITH options drift should not cause an error."""
+        set_model_file(
+            project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_IGNORE_DRIFT_CHANGED
+        )
+        result = run_dbt(["run"])
+        # All models should succeed (skip)
+        assert len(result) == 3
+        for r in result:
+            assert r.status.name == "Success"
+        # my_streaming_table should have been skipped
+        streaming_result = get_result_by_name(result, "my_streaming_table")
+        assert streaming_result.message == "SKIP"
+
+
+class TestInvalidOnSchemaChange(ConfluentFixtures):
+    """Invalid on_schema_change values should raise a clear error."""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {
+            "models": {"+schema": unique_schema},
+        }
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "my_table.sql": """
+{{ config(
+    materialized='table',
+    on_schema_change='append_new_columns'
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+""",
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists my_table")
+
+    def test_invalid_on_schema_change_value(self, project):
+        """Invalid on_schema_change value should raise an error."""
+        result = run_dbt(["run"], expect_pass=False)
+        my_table_result = get_result_by_name(result, "my_table")
+        assert my_table_result is not None
+        assert my_table_result.status.name == "Error"
+        assert "Invalid value for on_schema_change" in my_table_result.message
+        assert "append_new_columns" in my_table_result.message
+        assert "Expected 'ignore' or 'fail'" in my_table_result.message

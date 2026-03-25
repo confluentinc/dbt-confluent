@@ -1,7 +1,7 @@
 {% macro skip_or_drop_existing(existing_relation, target_relation, has_select_query=true) %}
   {# If the relation already exists, either drop it (on --full-refresh) or skip.
      Returns true if the caller should skip (relation exists and no full refresh).
-     Before skipping, checks for schema drift and raises an error if detected.
+     Before skipping, checks for schema drift according to on_schema_change config.
      has_select_query: true if the model SQL is a SELECT (table, streaming_table),
                        false if it's column definitions (streaming_source). #}
   {% if existing_relation %}
@@ -9,8 +9,16 @@
       {{ drop_relation_if_exists(existing_relation) }}
       {{ return(false) }}
     {% else %}
-      {{ check_for_schema_drift(existing_relation, has_select_query) }}
-      {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
+      {% set on_schema_change = config.get('on_schema_change', 'fail') %}
+      {% if on_schema_change == 'ignore' %}
+        {{ log("Relation " ~ existing_relation ~ " already exists. Skipping without drift check (on_schema_change='ignore').", info=True) }}
+      {% elif on_schema_change == 'fail' %}
+        {{ check_for_schema_drift(existing_relation, has_select_query) }}
+        {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
+      {% else %}
+        {% set msg = "Invalid value for on_schema_change ('%s'). Expected 'ignore' or 'fail'." % on_schema_change %}
+        {% do exceptions.raise_compiler_error(msg) %}
+      {% endif %}
       {{ return(true) }}
     {% endif %}
   {% endif %}
