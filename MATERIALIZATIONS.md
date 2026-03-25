@@ -16,12 +16,12 @@ When a table already exists and `--full-refresh` is not specified, the adapter p
 
 ### Configuration
 
-Control drift detection behavior with the `on_schema_change` config:
+Control drift detection behavior with the `on_schema_drift` config:
 
 ```sql
 {{ config(
     materialized='table',
-    on_schema_change='fail'  -- 'fail' (default) or 'ignore'
+    on_schema_drift='fail'  -- 'fail' (default) or 'ignore'
 ) }}
 ```
 
@@ -34,7 +34,7 @@ Control drift detection behavior with the `on_schema_change` config:
 -- Disable drift detection for a specific model
 {{ config(
     materialized='streaming_table',
-    on_schema_change='ignore'
+    on_schema_drift='ignore'
 ) }}
 select * from {{ ref('source') }}
 ```

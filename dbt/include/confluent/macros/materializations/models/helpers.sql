@@ -1,7 +1,7 @@
 {% macro skip_or_drop_existing(existing_relation, target_relation, has_select_query=true) %}
   {# If the relation already exists, either drop it (on --full-refresh) or skip.
      Returns true if the caller should skip (relation exists and no full refresh).
-     Before skipping, checks for schema drift according to on_schema_change config.
+     Before skipping, checks for schema drift according to on_schema_drift config.
      has_select_query: true if the model SQL is a SELECT (table, streaming_table),
                        false if it's column definitions (streaming_source). #}
   {% if existing_relation %}
@@ -9,14 +9,14 @@
       {{ drop_relation_if_exists(existing_relation) }}
       {{ return(false) }}
     {% else %}
-      {% set on_schema_change = config.get('on_schema_change', 'fail') %}
-      {% if on_schema_change == 'ignore' %}
-        {{ log("Relation " ~ existing_relation ~ " already exists. Skipping without drift check (on_schema_change='ignore').", info=True) }}
-      {% elif on_schema_change == 'fail' %}
+      {% set on_schema_drift = config.get('on_schema_drift', 'fail') %}
+      {% if on_schema_drift == 'ignore' %}
+        {{ log("Relation " ~ existing_relation ~ " already exists. Skipping without drift check (on_schema_drift='ignore').", info=True) }}
+      {% elif on_schema_drift == 'fail' %}
         {{ check_for_schema_drift(existing_relation, has_select_query) }}
         {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
       {% else %}
-        {% set msg = "Invalid value for on_schema_change ('%s'). Expected 'ignore' or 'fail'." % on_schema_change %}
+        {% set msg = "Invalid value for on_schema_drift ('%s'). Expected 'ignore' or 'fail'." % on_schema_drift %}
         {% do exceptions.raise_compiler_error(msg) %}
       {% endif %}
       {{ return(true) }}
@@ -127,13 +127,18 @@
      Returns a list of dicts with column_name and data_type. #}
 
   {# Create a unique temp table name #}
-  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ (modules.uuid.uuid4().hex) %}
+  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier %}
   {% set temp_relation = adapter.Relation.create(
     database=this.database,
     schema=this.schema,
     identifier=temp_table_name,
     type='table'
   ) %}
+
+  {# Drop any leftover temp table from a previous failed run #}
+  {% call statement('drop_temp_table_pre') %}
+    DROP TABLE IF EXISTS {{ temp_relation }}
+  {% endcall %}
 
   {# Create temp table from the query #}
   {% call statement('create_temp_table') %}
@@ -162,13 +167,18 @@
      Returns a list of dicts with column_name and data_type. #}
 
   {# Create a unique temp table name #}
-  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ (modules.uuid.uuid4().hex) %}
+  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier %}
   {% set temp_relation = adapter.Relation.create(
     database=this.database,
     schema=this.schema,
     identifier=temp_table_name,
     type='table'
   ) %}
+
+  {# Drop any leftover temp table from a previous failed run #}
+  {% call statement('drop_temp_table_pre') %}
+    DROP TABLE IF EXISTS {{ temp_relation }}
+  {% endcall %}
 
   {# Create temp table from column definitions (without connector) #}
   {% call statement('create_temp_table') %}
