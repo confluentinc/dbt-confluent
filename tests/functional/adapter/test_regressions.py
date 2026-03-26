@@ -5,7 +5,6 @@ import pytest
 from dbt.tests.util import run_dbt
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
-
 # Test for issue with window functions producing NOT NULL constraints
 # in FULL_DATA_TYPE which break CAST expressions in get_empty_schema_sql
 

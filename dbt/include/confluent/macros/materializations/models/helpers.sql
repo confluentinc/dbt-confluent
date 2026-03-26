@@ -30,75 +30,28 @@
   {# Compare the existing table's columns and WITH options against what the model
      would produce. Raises a compilation error if there is any drift. #}
 
-  {# -- Column comparison -- #}
   {% set existing_columns = get_existing_columns(existing_relation) %}
 
-  {# Determine expected columns based on model type #}
-  {% set expected_columns = none %}
   {% if has_select_query %}
     {% set expected_columns = get_expected_columns_from_query(sql) %}
   {% else %}
-    {# For streaming_source, use column definitions from the model SQL #}
-    {% set expected_columns = get_expected_columns_from_definition(sql) %}
+    {# For streaming_source, parse column definitions in Python (no temp table needed) #}
+    {% set expected_columns = adapter.parse_column_definitions(sql) %}
   {% endif %}
 
-  {% if expected_columns is not none %}
-    {# Build maps for both name and type comparison #}
-    {% set existing_col_map = {} %}
-    {% for col in existing_columns %}
-      {% do existing_col_map.update({col.column_name | lower: col.data_type | upper}) %}
-    {% endfor %}
-
-    {% set expected_col_map = {} %}
-    {% for col in expected_columns %}
-      {% do expected_col_map.update({col.column_name | lower: col.data_type | upper}) %}
-    {% endfor %}
-
-    {# Check if column names match #}
-    {% set existing_col_names = existing_col_map.keys() | sort %}
-    {% set expected_col_names = expected_col_map.keys() | sort %}
-
-    {% if existing_col_names != expected_col_names %}
-      {% set msg %}
-        Schema drift detected for '{{ existing_relation }}'.
-        Existing columns: {{ existing_col_names }}
-        Expected columns: {{ expected_col_names }}
-        Use --full-refresh to recreate the table.
-      {% endset %}
-      {% do exceptions.raise_compiler_error(msg) %}
-    {% endif %}
-
-    {# Check if data types match for each column #}
-    {% for col_name, expected_type in expected_col_map.items() %}
-      {% set existing_type = existing_col_map.get(col_name) %}
-      {% if existing_type != expected_type %}
-        {% set msg %}
-          Schema drift detected for '{{ existing_relation }}'.
-          Column '{{ col_name }}' type mismatch: existing='{{ existing_type }}', expected='{{ expected_type }}'.
-          Use --full-refresh to recreate the table.
-        {% endset %}
-        {% do exceptions.raise_compiler_error(msg) %}
-      {% endif %}
-    {% endfor %}
-  {% endif %}
-
-  {# -- WITH options comparison -- #}
-  {# Only verify that user-specified options exist with correct values.
-     Allow additional options (connector defaults, system-generated) to exist. #}
   {% set expected_with = config.get('with', {}) %}
+  {% set existing_options = {} %}
   {% if expected_with %}
     {% set existing_options = get_existing_table_options(existing_relation) %}
-    {% for key, value in expected_with.items() %}
-      {% if existing_options.get(key) != value %}
-        {% set msg %}
-          Table options drift detected for '{{ existing_relation }}'.
-          Option '{{ key }}': existing='{{ existing_options.get(key, "<not set>") }}', expected='{{ value }}'.
-          Use --full-refresh to recreate the table.
-        {% endset %}
-        {% do exceptions.raise_compiler_error(msg) %}
-      {% endif %}
-    {% endfor %}
   {% endif %}
+
+  {% do adapter.check_schema_drift(
+    existing_relation | string,
+    existing_columns,
+    expected_columns,
+    expected_with,
+    existing_options
+  ) %}
 {% endmacro %}
 
 
@@ -146,43 +99,6 @@
     SELECT * FROM (
       {{ model_sql }}
     ) WHERE FALSE
-  {% endcall %}
-
-  {# Query INFORMATION_SCHEMA for column names and types #}
-  {% set expected_columns = get_existing_columns(temp_relation) %}
-
-  {# Drop the temp table #}
-  {% call statement('drop_temp_table') %}
-    DROP TABLE IF EXISTS {{ temp_relation }}
-  {% endcall %}
-
-  {{ return(expected_columns) }}
-{% endmacro %}
-
-
-{% macro get_expected_columns_from_definition(column_definitions) %}
-  {# Get the columns from streaming_source column definitions by creating a temp table.
-     The SQL column definitions are the source of truth, so we create a temporary table
-     to let Flink parse the schema, then query INFORMATION_SCHEMA for normalized types.
-     Returns a list of dicts with column_name and data_type. #}
-
-  {# Create a unique temp table name #}
-  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier %}
-  {% set temp_relation = adapter.Relation.create(
-    database=this.database,
-    schema=this.schema,
-    identifier=temp_table_name,
-    type='table'
-  ) %}
-
-  {# Drop any leftover temp table from a previous failed run #}
-  {% call statement('drop_temp_table_pre') %}
-    DROP TABLE IF EXISTS {{ temp_relation }}
-  {% endcall %}
-
-  {# Create temp table from column definitions (without connector) #}
-  {% call statement('create_temp_table') %}
-    CREATE TABLE {{ temp_relation }} ( {{ column_definitions }} )
   {% endcall %}
 
   {# Query INFORMATION_SCHEMA for column names and types #}
