@@ -35,8 +35,9 @@
   {% if has_select_query %}
     {% set expected_columns = get_expected_columns_from_query(sql) %}
   {% else %}
-    {# For streaming_source, parse column definitions in Python (no temp table needed) #}
-    {% set expected_columns = adapter.parse_column_definitions(sql) %}
+    {# For streaming_source, create a temp table from column definitions to let
+       Flink validate and normalize the types, then query INFORMATION_SCHEMA. #}
+    {% set expected_columns = get_expected_columns_from_definition(sql) %}
   {% endif %}
 
   {% set expected_with = config.get('with', {}) %}
@@ -99,6 +100,43 @@
     SELECT * FROM (
       {{ model_sql }}
     ) WHERE FALSE
+  {% endcall %}
+
+  {# Query INFORMATION_SCHEMA for column names and types #}
+  {% set expected_columns = get_existing_columns(temp_relation) %}
+
+  {# Drop the temp table #}
+  {% call statement('drop_temp_table') %}
+    DROP TABLE IF EXISTS {{ temp_relation }}
+  {% endcall %}
+
+  {{ return(expected_columns) }}
+{% endmacro %}
+
+
+{% macro get_expected_columns_from_definition(column_definitions) %}
+  {# Get the columns from streaming_source column definitions by creating a temp table.
+     The SQL column definitions are the source of truth, so we create a temporary table
+     to let Flink parse and validate the schema, then query INFORMATION_SCHEMA for
+     normalized types.  Returns an agate Table with column_name and data_type. #}
+
+  {# Create a unique temp table name #}
+  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier %}
+  {% set temp_relation = adapter.Relation.create(
+    database=this.database,
+    schema=this.schema,
+    identifier=temp_table_name,
+    type='table'
+  ) %}
+
+  {# Drop any leftover temp table from a previous failed run #}
+  {% call statement('drop_temp_table_pre') %}
+    DROP TABLE IF EXISTS {{ temp_relation }}
+  {% endcall %}
+
+  {# Create temp table from column definitions (without connector) #}
+  {% call statement('create_temp_table') %}
+    CREATE TABLE {{ temp_relation }} ( {{ column_definitions }} )
   {% endcall %}
 
   {# Query INFORMATION_SCHEMA for column names and types #}

@@ -291,84 +291,20 @@ class ConfluentAdapter(SQLAdapter):
 
         return {"ctes": ctes, "main_sql": main_sql}
 
-    # Flink SQL type aliases — map shorthand names to what INFORMATION_SCHEMA
-    # reports in FULL_DATA_TYPE.  Order matters: longer prefixes first so that
-    # e.g. "DOUBLE PRECISION" is matched before "DOUBLE".
-    # Reference: https://docs.confluent.io/cloud/current/flink/reference/datatypes.html
-    _TYPE_ALIASES: list[tuple[str, str]] = [
-        ("STRING", "VARCHAR(2147483647)"),      # datatypes.html#varchar-string
-        ("BYTES", "VARBINARY(2147483647)"),      # datatypes.html#bytes-varbinary
-        ("INTEGER", "INT"),                      # datatypes.html#int
-        ("DOUBLE PRECISION", "DOUBLE"),          # datatypes.html#double
-    ]
-
     @staticmethod
     def _normalize_type(type_str: str) -> str:
         """Normalize a SQL type string for comparison.
 
-        Uppercases, collapses whitespace, normalizes bracket/comma spacing,
-        and resolves Flink SQL type aliases (e.g. STRING → VARCHAR(2147483647))
-        to match what INFORMATION_SCHEMA.FULL_DATA_TYPE reports.
+        Uppercases, collapses whitespace, and normalizes bracket/comma spacing
+        so that e.g. 'DECIMAL(10,2)' and 'DECIMAL(10, 2)' compare equal.
         """
         s = " ".join(type_str.upper().split())
-        # Normalize parenthesized and angle-bracket parameters.
         s = re.sub(r"\s*\(\s*", "(", s)
         s = re.sub(r"\s*\)", ")", s)
         s = re.sub(r"\s*<\s*", "<", s)
         s = re.sub(r"\s*>", ">", s)
         s = re.sub(r"\s*,\s*", ", ", s)
-        # Resolve type aliases to canonical INFORMATION_SCHEMA form.
-        for alias, canonical in ConfluentAdapter._TYPE_ALIASES:
-            if s == alias:
-                s = canonical
-                break
         return s
-
-    @available
-    def parse_column_definitions(self, sql: str) -> list[dict[str, str]]:
-        """Parse streaming_source column definitions from raw SQL.
-
-        Extracts column name and data type from backtick-quoted column
-        definitions.  Skips WATERMARK and PRIMARY KEY clauses.
-
-        Returns list of dicts: [{'column_name': ..., 'data_type': ...}]
-        """
-        # Split by commas at bracket-depth 0 to handle types like
-        # DECIMAL(10, 2) and MAP<STRING, INT>.
-        parts: list[str] = []
-        depth = 0
-        current: list[str] = []
-        for ch in sql:
-            if ch in "(<":
-                depth += 1
-                current.append(ch)
-            elif ch in ")>":
-                depth -= 1
-                current.append(ch)
-            elif ch == "," and depth == 0:
-                parts.append("".join(current).strip())
-                current = []
-            else:
-                current.append(ch)
-        tail = "".join(current).strip()
-        if tail:
-            parts.append(tail)
-
-        col_re = re.compile(r"^`([^`]+)`\s+(.+)$", re.IGNORECASE | re.DOTALL)
-        columns: list[dict[str, str]] = []
-        for part in parts:
-            upper = part.lstrip().upper()
-            if upper.startswith("WATERMARK") or upper.startswith("PRIMARY"):
-                continue
-            m = col_re.match(part)
-            if m:
-                columns.append(
-                    {
-                        "column_name": m.group(1),
-                        "data_type": self._normalize_type(m.group(2)),
-                    }
-                )
-        return columns
 
     @available
     def check_schema_drift(

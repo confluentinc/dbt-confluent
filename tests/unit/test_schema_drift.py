@@ -27,7 +27,7 @@ class TestNormalizeType:
         assert ConfluentAdapter._normalize_type("timestamp(3)") == "TIMESTAMP(3)"
 
     def test_collapses_internal_whitespace(self):
-        assert ConfluentAdapter._normalize_type("DOUBLE   PRECISION") == "DOUBLE"
+        assert ConfluentAdapter._normalize_type("DOUBLE   PRECISION") == "DOUBLE PRECISION"
 
     def test_array_angle_brackets(self):
         assert ConfluentAdapter._normalize_type("ARRAY< INT >") == "ARRAY<INT>"
@@ -38,122 +38,6 @@ class TestNormalizeType:
     def test_row_angle_brackets(self):
         assert ConfluentAdapter._normalize_type("ROW< name STRING, age INT >") == "ROW<NAME STRING, AGE INT>"
 
-    def test_alias_string(self):
-        assert ConfluentAdapter._normalize_type("STRING") == "VARCHAR(2147483647)"
-
-    def test_alias_bytes(self):
-        assert ConfluentAdapter._normalize_type("BYTES") == "VARBINARY(2147483647)"
-
-    def test_alias_integer(self):
-        assert ConfluentAdapter._normalize_type("INTEGER") == "INT"
-
-    def test_alias_double_precision(self):
-        assert ConfluentAdapter._normalize_type("DOUBLE PRECISION") == "DOUBLE"
-
-    def test_alias_not_applied_to_parameterized(self):
-        """STRING alias should only match the bare keyword, not VARCHAR(n)."""
-        assert ConfluentAdapter._normalize_type("VARCHAR(100)") == "VARCHAR(100)"
-
-
-# ---------------------------------------------------------------------------
-# parse_column_definitions
-# ---------------------------------------------------------------------------
-
-class TestParseColumnDefinitions:
-    """Test the SQL column definition parser."""
-
-    @pytest.fixture
-    def adapter(self):
-        """Minimal adapter instance — only need the method, not a real connection."""
-        return ConfluentAdapter.__new__(ConfluentAdapter)
-
-    def test_basic_columns(self, adapter):
-        sql = "`id` BIGINT,\n`value` STRING"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [
-            {"column_name": "id", "data_type": "BIGINT"},
-            {"column_name": "value", "data_type": "VARCHAR(2147483647)"},
-        ]
-
-    def test_parameterized_type(self, adapter):
-        sql = "`price` DECIMAL(10, 2)"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [{"column_name": "price", "data_type": "DECIMAL(10, 2)"}]
-
-    def test_timestamp_precision(self, adapter):
-        sql = "`ts` TIMESTAMP(3)"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [{"column_name": "ts", "data_type": "TIMESTAMP(3)"}]
-
-    def test_skips_watermark(self, adapter):
-        sql = "`ts` TIMESTAMP(3),\nWATERMARK FOR ts AS ts - INTERVAL '5' SECOND"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [{"column_name": "ts", "data_type": "TIMESTAMP(3)"}]
-
-    def test_skips_primary_key(self, adapter):
-        sql = "`id` BIGINT,\nPRIMARY KEY(`id`) NOT ENFORCED"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [{"column_name": "id", "data_type": "BIGINT"}]
-
-    def test_full_source_for_drift(self, adapter):
-        """Parse the full SOURCE_FOR_DRIFT fixture used in functional tests."""
-        sql = (
-            "`order_id` BIGINT,\n"
-            "`price` DECIMAL(10, 2),\n"
-            "`order_time` TIMESTAMP(3),\n"
-            "WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND,\n"
-            "PRIMARY KEY(`order_id`) NOT ENFORCED"
-        )
-        result = adapter.parse_column_definitions(sql)
-        assert result == [
-            {"column_name": "order_id", "data_type": "BIGINT"},
-            {"column_name": "price", "data_type": "DECIMAL(10, 2)"},
-            {"column_name": "order_time", "data_type": "TIMESTAMP(3)"},
-        ]
-
-    def test_single_column_no_comma(self, adapter):
-        sql = "`id` BIGINT"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [{"column_name": "id", "data_type": "BIGINT"}]
-
-    def test_normalizes_types(self, adapter):
-        sql = "`price` decimal(10,2)"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [{"column_name": "price", "data_type": "DECIMAL(10, 2)"}]
-
-    def test_array_type(self, adapter):
-        sql = "`tags` ARRAY<STRING>"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [{"column_name": "tags", "data_type": "ARRAY<STRING>"}]
-
-    def test_map_type(self, adapter):
-        sql = "`data` MAP<STRING, INT>, `id` BIGINT"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [
-            {"column_name": "data", "data_type": "MAP<STRING, INT>"},
-            {"column_name": "id", "data_type": "BIGINT"},
-        ]
-
-    def test_row_type(self, adapter):
-        sql = "`customer` ROW<name STRING, age INT>, `id` BIGINT"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [
-            {"column_name": "customer", "data_type": "ROW<NAME STRING, AGE INT>"},
-            {"column_name": "id", "data_type": "BIGINT"},
-        ]
-
-    def test_multiword_type(self, adapter):
-        sql = "`ts` TIMESTAMP(3) WITH LOCAL TIME ZONE"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [{"column_name": "ts", "data_type": "TIMESTAMP(3) WITH LOCAL TIME ZONE"}]
-
-    def test_nested_collection_type(self, adapter):
-        sql = "`matrix` ARRAY<ARRAY<INT>>, `id` BIGINT"
-        result = adapter.parse_column_definitions(sql)
-        assert result == [
-            {"column_name": "matrix", "data_type": "ARRAY<ARRAY<INT>>"},
-            {"column_name": "id", "data_type": "BIGINT"},
-        ]
 
 
 # ---------------------------------------------------------------------------
