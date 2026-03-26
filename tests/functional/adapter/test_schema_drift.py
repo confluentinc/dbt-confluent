@@ -25,11 +25,14 @@ def get_result_by_name(results, name):
     return None
 
 
-def assert_result_has_status(results, name, expected_status):
-    """Assert that a specific result has the expected status."""
+def assert_drift_error(results, name):
+    """Assert that a specific result failed with a drift detection error."""
     result = get_result_by_name(results, name)
     assert result is not None, f"{name} not found in results"
-    assert result.status == expected_status, f"{name} expected status '{expected_status}' but got '{result.status}'"
+    assert result.status == "error", f"{name} expected status 'error' but got '{result.status}'"
+    assert "drift detected" in result.message.lower(), (
+        f"{name} error was not a drift error: {result.message}"
+    )
 
 # -- Table (CTAS) models --
 
@@ -281,17 +284,17 @@ class TestTableColumnDrift(ConfluentFixtures):
     def test_extra_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_table", "error")
+        assert_drift_error(result, "my_table")
 
     def test_removed_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_REMOVED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_table", "error")
+        assert_drift_error(result, "my_table")
 
     def test_renamed_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_RENAMED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_table", "error")
+        assert_drift_error(result, "my_table")
 
     def test_reordered_columns_not_detected(self, project):
         """Column reordering is not considered drift — order doesn't matter for Kafka tables."""
@@ -315,7 +318,7 @@ class TestTableColumnDrift(ConfluentFixtures):
         """Changing column data types should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_TYPE_CHANGE)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_table", "error")
+        assert_drift_error(result, "my_table")
 
 
 class TestStreamingTableIdempotent(ConfluentFixtures):
@@ -381,18 +384,18 @@ class TestStreamingTableOptionsDrift(ConfluentFixtures):
     def test_changed_options_detected(self, project):
         set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_DIFFERENT_OPTIONS)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_streaming_table", "error")
+        assert_drift_error(result, "my_streaming_table")
 
     def test_column_drift_detected(self, project):
         set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_EXTRA_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_streaming_table", "error")
+        assert_drift_error(result, "my_streaming_table")
 
     def test_type_change_detected(self, project):
         """Changing column data types should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_TYPE_CHANGE)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_streaming_table", "error")
+        assert_drift_error(result, "my_streaming_table")
 
 
 class TestStreamingSourceIdempotent(ConfluentFixtures):
@@ -449,31 +452,31 @@ class TestStreamingSourceOptionsDrift(ConfluentFixtures):
     def test_changed_options_detected(self, project):
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_DIFFERENT_OPTIONS)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_source", "error")
+        assert_drift_error(result, "my_source")
 
     def test_extra_column_detected(self, project):
         """Adding a column should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_source", "error")
+        assert_drift_error(result, "my_source")
 
     def test_removed_column_detected(self, project):
         """Removing a column should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_REMOVED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_source", "error")
+        assert_drift_error(result, "my_source")
 
     def test_renamed_column_detected(self, project):
         """Renaming a column should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_RENAMED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_source", "error")
+        assert_drift_error(result, "my_source")
 
     def test_type_change_detected(self, project):
         """Changing column data types should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_TYPE_CHANGE)
         result = run_dbt(["run"], expect_pass=False)
-        assert_result_has_status(result, "my_source", "error")
+        assert_drift_error(result, "my_source")
 
 
 # -- on_schema_drift='ignore' tests --
