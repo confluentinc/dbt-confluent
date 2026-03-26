@@ -221,8 +221,17 @@ STREAMING_SOURCE_MODEL_TYPE_CHANGE = """
 """
 
 
-class TestTableIdempotent(ConfluentFixtures):
-    """A table model should be idempotent: two consecutive runs without --full-refresh should succeed."""
+# ---------------------------------------------------------------------------
+# Table (CTAS) drift tests
+# ---------------------------------------------------------------------------
+
+class TestTableSchemaDrift(ConfluentFixtures):
+    """Table schema drift detection tests.
+
+    Creates source_for_drift + my_table once, then runs drift checks against
+    the unchanged table.  Drift-error tests don't modify the table, so they
+    can all share the same class-scoped setup.
+    """
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -240,7 +249,6 @@ class TestTableIdempotent(ConfluentFixtures):
 
     @pytest.fixture(scope="class", autouse=True)
     def setup_and_teardown(self, project):
-        # First run with --full-refresh to create everything
         run_dbt(["run", "--full-refresh"])
         yield
         project.run_sql("drop table if exists source_for_drift")
@@ -248,38 +256,11 @@ class TestTableIdempotent(ConfluentFixtures):
 
     def test_second_run_skips(self, project):
         """Second run without --full-refresh should skip, not fail."""
+        set_model_file(project, relation(project, "my_table"), TABLE_MODEL)
         results = run_dbt(["run"])
         assert len(results) == 2
-        # Verify both models were skipped
         for r in results:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-
-
-class TestTableColumnDrift(ConfluentFixtures):
-    """Changing columns in a table model should raise an error without --full-refresh."""
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return {
-            "models": {"+schema": unique_schema},
-            "seeds": {"+schema": unique_schema},
-        }
-
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {
-            "source_for_drift.sql": SOURCE_FOR_DRIFT,
-            "my_table.sql": TABLE_MODEL,
-        }
-
-    @pytest.fixture(autouse=True)
-    def setup_and_teardown(self, project):
-        # Reset model file before each test in case a previous test modified it
-        set_model_file(project, relation(project, "my_table"), TABLE_MODEL)
-        run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql("drop table if exists source_for_drift")
-        project.run_sql("drop table if exists my_table")
 
     def test_extra_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
@@ -301,18 +282,8 @@ class TestTableColumnDrift(ConfluentFixtures):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_REORDERED_COLUMNS)
         result = run_dbt(["run"])
         assert len(result) == 2
-        # Verify both models were skipped (no drift detected)
         for r in result:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-
-    def test_full_refresh_fixes_drift(self, project):
-        """After detecting drift, --full-refresh should succeed."""
-        set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
-        result = run_dbt(["run", "--full-refresh"])
-        assert len(result) == 2
-        # Verify both models succeeded
-        for r in result:
-            assert r.status.name == "Success", f"{r.node.name} failed: {r.status}"
 
     def test_type_change_detected(self, project):
         """Changing column data types should raise an error without --full-refresh."""
@@ -321,8 +292,53 @@ class TestTableColumnDrift(ConfluentFixtures):
         assert_drift_error(result, "my_table")
 
 
-class TestStreamingTableIdempotent(ConfluentFixtures):
-    """A streaming_table model should be idempotent."""
+class TestTableFullRefreshFixesDrift(ConfluentFixtures):
+    """After detecting drift, --full-refresh should succeed.
+
+    Separated because --full-refresh recreates the table with a different
+    schema, which would invalidate other drift tests sharing the same setup.
+    """
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {
+            "models": {"+schema": unique_schema},
+            "seeds": {"+schema": unique_schema},
+        }
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "my_table.sql": TABLE_MODEL,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists my_table")
+
+    def test_full_refresh_fixes_drift(self, project):
+        """After detecting drift, --full-refresh should succeed."""
+        set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
+        result = run_dbt(["run", "--full-refresh"])
+        assert len(result) == 2
+        for r in result:
+            assert r.status.name == "Success", f"{r.node.name} failed: {r.status}"
+
+
+# ---------------------------------------------------------------------------
+# Streaming table drift tests
+# ---------------------------------------------------------------------------
+
+class TestStreamingTableSchemaDrift(ConfluentFixtures):
+    """Streaming table schema and options drift detection tests.
+
+    Creates source_for_drift + my_streaming_table once, then runs drift
+    checks.  Drift-error tests don't modify the table.
+    """
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -347,39 +363,11 @@ class TestStreamingTableIdempotent(ConfluentFixtures):
         project.run_sql("drop table if exists my_streaming_table")
 
     def test_second_run_skips(self, project):
+        set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL)
         results = run_dbt(["run"])
         assert len(results) == 2
-        # Verify both models were skipped
         for r in results:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-
-
-class TestStreamingTableOptionsDrift(ConfluentFixtures):
-    """Changing WITH options in a streaming_table should raise an error."""
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return {
-            "models": {"+schema": unique_schema},
-            "seeds": {"+schema": unique_schema},
-        }
-
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {
-            "source_for_drift.sql": SOURCE_FOR_DRIFT,
-            "my_streaming_table.sql": STREAMING_TABLE_MODEL,
-            "models.yml": STREAMING_TABLE_MODELS_YML,
-        }
-
-    @pytest.fixture(autouse=True)
-    def setup_and_teardown(self, project):
-        # Reset model file before each test in case a previous test modified it
-        set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL)
-        run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql("drop table if exists source_for_drift")
-        project.run_sql("drop table if exists my_streaming_table")
 
     def test_changed_options_detected(self, project):
         set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_DIFFERENT_OPTIONS)
@@ -398,8 +386,16 @@ class TestStreamingTableOptionsDrift(ConfluentFixtures):
         assert_drift_error(result, "my_streaming_table")
 
 
-class TestStreamingSourceIdempotent(ConfluentFixtures):
-    """A streaming_source model should be idempotent."""
+# ---------------------------------------------------------------------------
+# Streaming source drift tests
+# ---------------------------------------------------------------------------
+
+class TestStreamingSourceSchemaDrift(ConfluentFixtures):
+    """Streaming source schema and options drift detection tests.
+
+    Creates my_source once, then runs drift checks.  Drift-error tests
+    don't modify the table.
+    """
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -421,33 +417,10 @@ class TestStreamingSourceIdempotent(ConfluentFixtures):
         project.run_sql("drop table if exists my_source")
 
     def test_second_run_skips(self, project):
+        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL)
         results = run_dbt(["run"])
         assert len(results) == 1
-        # Verify the model was skipped
         assert results[0].message == "SKIP", f"{results[0].node.name} was not skipped (message: {results[0].message})"
-
-
-class TestStreamingSourceOptionsDrift(ConfluentFixtures):
-    """Changing WITH options or columns in a streaming_source should raise an error."""
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return {
-            "models": {"+schema": unique_schema},
-            "seeds": {"+schema": unique_schema},
-        }
-
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {
-            "my_source.sql": STREAMING_SOURCE_MODEL,
-        }
-
-    @pytest.fixture(autouse=True)
-    def setup_and_teardown(self, project):
-        run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql("drop table if exists my_source")
 
     def test_changed_options_detected(self, project):
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_DIFFERENT_OPTIONS)
@@ -479,7 +452,9 @@ class TestStreamingSourceOptionsDrift(ConfluentFixtures):
         assert_drift_error(result, "my_source")
 
 
-# -- on_schema_drift='ignore' tests --
+# ---------------------------------------------------------------------------
+# on_schema_drift='ignore' tests
+# ---------------------------------------------------------------------------
 
 TABLE_MODEL_IGNORE_DRIFT = """
 {{ config(

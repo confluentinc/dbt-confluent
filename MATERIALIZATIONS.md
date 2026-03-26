@@ -61,6 +61,23 @@ config(with={})
 
 If you need to change or remove WITH options, use `--full-refresh` to drop and recreate the table.
 
+### Query Logic Changes
+
+Schema drift detection only inspects **column names, data types, and WITH options** — it does not detect changes to the query logic itself. If you modify how a column is computed without changing its name or type, the adapter will see no drift and skip the model.
+
+**Example of undetected change**:
+```sql
+-- Initial model
+select order_id, round(price, 2) as price from {{ ref('source') }}
+
+-- Changed to (different rounding)
+select order_id, round(price, 4) as price from {{ ref('source') }}
+
+-- Result: Column name and type are unchanged, so dbt will skip (no error)
+```
+
+This is an inherent limitation — `INFORMATION_SCHEMA` only stores schema metadata, not the query that produced the table. If you change query logic, use `--full-refresh` to recreate the table.
+
 ### When Drift is Detected
 If drift is detected, the run will fail with a compilation error. Use `--full-refresh` to drop and recreate the table with the new schema or options.
 
