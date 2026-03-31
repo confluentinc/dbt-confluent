@@ -29,10 +29,13 @@ def assert_drift_error(results, name):
     """Assert that a specific result failed with a drift detection error."""
     result = get_result_by_name(results, name)
     assert result is not None, f"{name} not found in results"
-    assert result.status == "error", f"{name} expected status 'error' but got '{result.status}'"
+    assert result.status.name == "Error", (
+        f"{name} expected status 'Error' but got '{result.status.name}'"
+    )
     assert "drift detected" in result.message.lower(), (
         f"{name} error was not a drift error: {result.message}"
     )
+
 
 # -- Table (CTAS) models --
 
@@ -225,6 +228,7 @@ STREAMING_SOURCE_MODEL_TYPE_CHANGE = """
 # Table (CTAS) drift tests
 # ---------------------------------------------------------------------------
 
+
 class TestTableSchemaDrift(ConfluentFixtures):
     """Table schema drift detection tests.
 
@@ -333,6 +337,7 @@ class TestTableFullRefreshFixesDrift(ConfluentFixtures):
 # Streaming table drift tests
 # ---------------------------------------------------------------------------
 
+
 class TestStreamingTableSchemaDrift(ConfluentFixtures):
     """Streaming table schema and options drift detection tests.
 
@@ -370,18 +375,26 @@ class TestStreamingTableSchemaDrift(ConfluentFixtures):
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
 
     def test_changed_options_detected(self, project):
-        set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_DIFFERENT_OPTIONS)
+        set_model_file(
+            project,
+            relation(project, "my_streaming_table"),
+            STREAMING_TABLE_MODEL_DIFFERENT_OPTIONS,
+        )
         result = run_dbt(["run"], expect_pass=False)
         assert_drift_error(result, "my_streaming_table")
 
     def test_column_drift_detected(self, project):
-        set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_EXTRA_COLUMN)
+        set_model_file(
+            project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_EXTRA_COLUMN
+        )
         result = run_dbt(["run"], expect_pass=False)
         assert_drift_error(result, "my_streaming_table")
 
     def test_type_change_detected(self, project):
         """Changing column data types should raise an error without --full-refresh."""
-        set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_TYPE_CHANGE)
+        set_model_file(
+            project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_TYPE_CHANGE
+        )
         result = run_dbt(["run"], expect_pass=False)
         assert_drift_error(result, "my_streaming_table")
 
@@ -389,6 +402,7 @@ class TestStreamingTableSchemaDrift(ConfluentFixtures):
 # ---------------------------------------------------------------------------
 # Streaming source drift tests
 # ---------------------------------------------------------------------------
+
 
 class TestStreamingSourceSchemaDrift(ConfluentFixtures):
     """Streaming source schema and options drift detection tests.
@@ -420,28 +434,38 @@ class TestStreamingSourceSchemaDrift(ConfluentFixtures):
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL)
         results = run_dbt(["run"])
         assert len(results) == 1
-        assert results[0].message == "SKIP", f"{results[0].node.name} was not skipped (message: {results[0].message})"
+        assert results[0].message == "SKIP", (
+            f"{results[0].node.name} was not skipped (message: {results[0].message})"
+        )
 
     def test_changed_options_detected(self, project):
-        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_DIFFERENT_OPTIONS)
+        set_model_file(
+            project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_DIFFERENT_OPTIONS
+        )
         result = run_dbt(["run"], expect_pass=False)
         assert_drift_error(result, "my_source")
 
     def test_extra_column_detected(self, project):
         """Adding a column should raise an error without --full-refresh."""
-        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN)
+        set_model_file(
+            project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN
+        )
         result = run_dbt(["run"], expect_pass=False)
         assert_drift_error(result, "my_source")
 
     def test_removed_column_detected(self, project):
         """Removing a column should raise an error without --full-refresh."""
-        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_REMOVED_COLUMN)
+        set_model_file(
+            project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_REMOVED_COLUMN
+        )
         result = run_dbt(["run"], expect_pass=False)
         assert_drift_error(result, "my_source")
 
     def test_renamed_column_detected(self, project):
         """Renaming a column should raise an error without --full-refresh."""
-        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_RENAMED_COLUMN)
+        set_model_file(
+            project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_RENAMED_COLUMN
+        )
         result = run_dbt(["run"], expect_pass=False)
         assert_drift_error(result, "my_source")
 
@@ -532,7 +556,9 @@ class TestIgnoreSchemaDrift(ConfluentFixtures):
     def test_streaming_table_with_options_drift_ignored(self, project):
         """With on_schema_drift='ignore', WITH options drift should not cause an error."""
         set_model_file(
-            project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_IGNORE_DRIFT_CHANGED
+            project,
+            relation(project, "my_streaming_table"),
+            STREAMING_TABLE_MODEL_IGNORE_DRIFT_CHANGED,
         )
         result = run_dbt(["run"])
         # All models should succeed (skip)

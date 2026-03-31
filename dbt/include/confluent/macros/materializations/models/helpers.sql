@@ -80,19 +80,14 @@
      and querying its schema from INFORMATION_SCHEMA. This gives us accurate data types.
      Returns a list of dicts with column_name and data_type. #}
 
-  {# Create a unique temp table name #}
-  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier %}
+  {# Use invocation_id to avoid collisions with user tables or concurrent runs #}
+  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier ~ '_' ~ invocation_id | replace('-', '') %}
   {% set temp_relation = adapter.Relation.create(
     database=this.database,
     schema=this.schema,
     identifier=temp_table_name,
     type='table'
   ) %}
-
-  {# Drop any leftover temp table from a previous failed run #}
-  {% call statement('drop_temp_table_pre') %}
-    DROP TABLE IF EXISTS {{ temp_relation }}
-  {% endcall %}
 
   {# Create temp table from the query #}
   {% call statement('create_temp_table') %}
@@ -120,19 +115,14 @@
      to let Flink parse and validate the schema, then query INFORMATION_SCHEMA for
      normalized types.  Returns an agate Table with column_name and data_type. #}
 
-  {# Create a unique temp table name #}
-  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier %}
+  {# Use invocation_id to avoid collisions with user tables or concurrent runs #}
+  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier ~ '_' ~ invocation_id | replace('-', '') %}
   {% set temp_relation = adapter.Relation.create(
     database=this.database,
     schema=this.schema,
     identifier=temp_table_name,
     type='table'
   ) %}
-
-  {# Drop any leftover temp table from a previous failed run #}
-  {% call statement('drop_temp_table_pre') %}
-    DROP TABLE IF EXISTS {{ temp_relation }}
-  {% endcall %}
 
   {# Create temp table from column definitions (without connector) #}
   {% call statement('create_temp_table') %}

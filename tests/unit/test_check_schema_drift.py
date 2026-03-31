@@ -7,42 +7,9 @@ from dbt_common.exceptions import CompilationError
 from dbt.adapters.confluent.impl import ConfluentAdapter
 
 # ---------------------------------------------------------------------------
-# _normalize_type
-# ---------------------------------------------------------------------------
-
-class TestNormalizeType:
-    def test_simple_type(self):
-        assert ConfluentAdapter._normalize_type("bigint") == "BIGINT"
-
-    def test_parameterized_type(self):
-        assert ConfluentAdapter._normalize_type("DECIMAL(10, 2)") == "DECIMAL(10, 2)"
-
-    def test_no_space_after_comma(self):
-        assert ConfluentAdapter._normalize_type("DECIMAL(10,2)") == "DECIMAL(10, 2)"
-
-    def test_extra_spaces(self):
-        assert ConfluentAdapter._normalize_type("  decimal( 10 , 2 )  ") == "DECIMAL(10, 2)"
-
-    def test_timestamp_precision(self):
-        assert ConfluentAdapter._normalize_type("timestamp(3)") == "TIMESTAMP(3)"
-
-    def test_collapses_internal_whitespace(self):
-        assert ConfluentAdapter._normalize_type("DOUBLE   PRECISION") == "DOUBLE PRECISION"
-
-    def test_array_angle_brackets(self):
-        assert ConfluentAdapter._normalize_type("ARRAY< INT >") == "ARRAY<INT>"
-
-    def test_map_angle_brackets(self):
-        assert ConfluentAdapter._normalize_type("map< string,int >") == "MAP<STRING, INT>"
-
-    def test_row_angle_brackets(self):
-        assert ConfluentAdapter._normalize_type("ROW< name STRING, age INT >") == "ROW<NAME STRING, AGE INT>"
-
-
-
-# ---------------------------------------------------------------------------
 # check_schema_drift
 # ---------------------------------------------------------------------------
+
 
 def _make_agate_table(rows):
     """Create an agate.Table with column_name and data_type columns."""
@@ -99,22 +66,23 @@ class TestCheckSchemaDrift:
         expected = _make_agate_table([("b", "STRING"), ("a", "BIGINT")])
         adapter.check_schema_drift("t", existing, expected, {}, {})
 
-    def test_case_insensitive_names(self, adapter):
+    def test_case_sensitive_names(self, adapter):
+        """Flink allows distinct columns differing only by case (when backtick-quoted).
+        Both sides come from INFORMATION_SCHEMA which preserves declared casing,
+        so a case difference is real drift."""
         existing = _make_agate_table([("ID", "BIGINT")])
         expected = _make_agate_table([("id", "BIGINT")])
-        adapter.check_schema_drift("t", existing, expected, {}, {})
-
-    def test_type_normalization(self, adapter):
-        existing = _make_agate_table([("price", "DECIMAL(10, 2)")])
-        expected = [{"column_name": "price", "data_type": "decimal(10,2)"}]
-        adapter.check_schema_drift("t", existing, expected, {}, {})
+        with pytest.raises(CompilationError, match="drift detected"):
+            adapter.check_schema_drift("t", existing, expected, {}, {})
 
     def test_options_drift_detected(self, adapter):
         existing = _make_agate_table([("id", "BIGINT")])
         expected = _make_agate_table([("id", "BIGINT")])
         with pytest.raises(CompilationError, match="drift detected"):
             adapter.check_schema_drift(
-                "t", existing, expected,
+                "t",
+                existing,
+                expected,
                 expected_with={"changelog.mode": "append"},
                 existing_options={"changelog.mode": "upsert"},
             )
@@ -124,7 +92,9 @@ class TestCheckSchemaDrift:
         expected = _make_agate_table([("id", "BIGINT")])
         with pytest.raises(CompilationError, match="drift detected"):
             adapter.check_schema_drift(
-                "t", existing, expected,
+                "t",
+                existing,
+                expected,
                 expected_with={"changelog.mode": "append"},
                 existing_options={},
             )
@@ -134,7 +104,9 @@ class TestCheckSchemaDrift:
         existing = _make_agate_table([("id", "BIGINT")])
         expected = _make_agate_table([("id", "BIGINT")])
         adapter.check_schema_drift(
-            "t", existing, expected,
+            "t",
+            existing,
+            expected,
             expected_with={"changelog.mode": "upsert"},
             existing_options={"changelog.mode": "upsert", "connector": "faker"},
         )
@@ -144,7 +116,22 @@ class TestCheckSchemaDrift:
         existing = _make_agate_table([("id", "BIGINT")])
         expected = _make_agate_table([("id", "BIGINT")])
         adapter.check_schema_drift(
-            "t", existing, expected,
+            "t",
+            existing,
+            expected,
             expected_with={},
             existing_options={"anything": "here"},
+        )
+
+    def test_options_non_string_value_coerced(self, adapter):
+        """Config values (int, bool) are coerced to str before comparing with I_S strings."""
+        existing = _make_agate_table([("id", "BIGINT")])
+        expected = _make_agate_table([("id", "BIGINT")])
+        # No drift: int 1 should match string "1"
+        adapter.check_schema_drift(
+            "t",
+            existing,
+            expected,
+            expected_with={"rows-per-second": 1},
+            existing_options={"rows-per-second": "1"},
         )

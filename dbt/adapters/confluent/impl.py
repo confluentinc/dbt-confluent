@@ -291,21 +291,6 @@ class ConfluentAdapter(SQLAdapter):
 
         return {"ctes": ctes, "main_sql": main_sql}
 
-    @staticmethod
-    def _normalize_type(type_str: str) -> str:
-        """Normalize a SQL type string for comparison.
-
-        Uppercases, collapses whitespace, and normalizes bracket/comma spacing
-        so that e.g. 'DECIMAL(10,2)' and 'DECIMAL(10, 2)' compare equal.
-        """
-        s = " ".join(type_str.upper().split())
-        s = re.sub(r"\s*\(\s*", "(", s)
-        s = re.sub(r"\s*\)", ")", s)
-        s = re.sub(r"\s*<\s*", "<", s)
-        s = re.sub(r"\s*>", ">", s)
-        s = re.sub(r"\s*,\s*", ", ", s)
-        return s
-
     @available
     def check_schema_drift(
         self,
@@ -318,21 +303,15 @@ class ConfluentAdapter(SQLAdapter):
         """Compare existing vs expected schema and raise CompilationError on drift.
 
         existing_columns: agate.Table from INFORMATION_SCHEMA query
-        expected_columns: agate.Table (from CTAS temp table) or list[dict] (from parse_column_definitions)
+        expected_columns: agate.Table from INFORMATION_SCHEMA query (via temp table)
         expected_with: config(with={...}) dict
         existing_options: dict from INFORMATION_SCHEMA.TABLE_OPTIONS
         """
-
-        def _col_map(columns) -> dict[str, str]:
-            result = {}
-            for col in columns:
-                name = col["column_name"].lower()
-                dtype = self._normalize_type(col["data_type"])
-                result[name] = dtype
-            return result
-
-        existing_map = _col_map(existing_columns)
-        expected_map = _col_map(expected_columns)
+        # No type normalization: both existing and expected columns come from
+        # INFORMATION_SCHEMA.COLUMNS queries, so types are already in Flink's
+        # canonical form.
+        existing_map = {col["column_name"]: col["data_type"] for col in existing_columns}
+        expected_map = {col["column_name"]: col["data_type"] for col in expected_columns}
 
         existing_names = sorted(existing_map)
         expected_names = sorted(expected_map)
@@ -356,11 +335,11 @@ class ConfluentAdapter(SQLAdapter):
 
         for key, value in expected_with.items():
             existing_value = existing_options.get(key)
-            if existing_value != value:
+            if existing_value != str(value):
                 raise CompilationError(
                     f"Table options drift detected for '{relation_name}'.\n"
                     f"Option '{key}': "
-                    f"existing='{existing_value or '<not set>'}', expected='{value}'.\n"
+                    f"existing='{existing_value or '<not set>'}', expected='{str(value)}'.\n"
                     f"Use --full-refresh to recreate the table."
                 )
 

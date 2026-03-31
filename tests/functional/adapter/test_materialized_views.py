@@ -19,4 +19,4 @@ class TestMaterializedViewNotSupported(ConfluentFixtures):
     def test_materialized_view_raises_error(self, project):
         result = run_dbt(["run"], expect_pass=False)
         assert len(result) == 1
-        assert result[0].status == "error"
+        assert result[0].status.name == "Error"
