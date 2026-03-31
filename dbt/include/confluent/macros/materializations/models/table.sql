@@ -4,8 +4,12 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  -- Drop the existing relation if it already exists and full refresh is set
-  {{ drop_if_full_refresh(existing_relation) }}
+  {% if skip_or_drop_existing(existing_relation, target_relation) %}
+    {# dbt requires a 'main' statement result even when skipping #}
+    {% call noop_statement('main', 'SKIP') %}{% endcall %}
+    {{ run_hooks(post_hooks, inside_transaction=False) }}
+    {{ return({'relations': [target_relation]}) }}
+  {% endif %}
 
   -- `BEGIN` happens here:
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
