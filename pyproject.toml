@@ -56,7 +56,7 @@ Repository = "https://github.com/confluentinc/dbt-confluent"
 confluent = "dbt.adapters.confluent"
 
 [tool.pytest.ini_options]
-testpaths = ["tests/functional"]
+testpaths = ["tests/functional", "tests/unit"]
 addopts = "-v --color=yes"
 env_files = ["test.env"]
 
