@@ -15,10 +15,13 @@
   -- any assumption from the framework
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  -- If user asks for full refresh, we drop any pre existing relation.
-  -- Otherwise, we fail, because we can't alter a table.
-  -- TODO: We can actually alter the options, so we should allow that at least.
-  {{ drop_if_full_refresh(existing_relation) }}
+  -- TODO: Support altering table options without full refresh (ALTER TABLE ... SET).
+  {% if skip_or_drop_existing(existing_relation, target_relation) %}
+    {# dbt requires a 'main' statement result even when skipping #}
+    {% call noop_statement('main', 'SKIP') %}{% endcall %}
+    {{ run_hooks(post_hooks, inside_transaction=False) }}
+    {{ return({'relations': [target_relation]}) }}
+  {% endif %}
 
   -- See comment above about calling hooks
   {{ run_hooks(pre_hooks, inside_transaction=True) }}

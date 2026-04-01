@@ -291,6 +291,63 @@ class ConfluentAdapter(SQLAdapter):
 
         return {"ctes": ctes, "main_sql": main_sql}
 
+    @available
+    def generate_schema_check_temp_name(self, identifier: str, invocation_id: str) -> str:
+        """Generate a unique temporary table name for schema drift checks."""
+        return "__dbt_tmp_schema_check_" + identifier + "_" + invocation_id.replace("-", "")
+
+    @available
+    def check_schema_drift(
+        self,
+        relation_name: str,
+        existing_columns,
+        expected_columns,
+        expected_with: dict[str, str],
+        existing_options: dict[str, str],
+    ) -> None:
+        """Compare existing vs expected schema and raise CompilationError on drift.
+
+        existing_columns: agate.Table from INFORMATION_SCHEMA query
+        expected_columns: agate.Table from INFORMATION_SCHEMA query (via temp table)
+        expected_with: config(with={...}) dict
+        existing_options: dict from INFORMATION_SCHEMA.TABLE_OPTIONS
+        """
+        # No type normalization: both existing and expected columns come from
+        # INFORMATION_SCHEMA.COLUMNS queries, so types are already in Flink's
+        # canonical form.
+        existing_map = {col["column_name"]: col["data_type"] for col in existing_columns}
+        expected_map = {col["column_name"]: col["data_type"] for col in expected_columns}
+
+        existing_names = sorted(existing_map)
+        expected_names = sorted(expected_map)
+
+        if existing_names != expected_names:
+            raise CompilationError(
+                f"Schema drift detected for '{relation_name}'.\n"
+                f"Existing columns: {existing_names}\n"
+                f"Expected columns: {expected_names}\n"
+                f"Use --full-refresh to recreate the table."
+            )
+
+        for col_name in expected_map:
+            if existing_map[col_name] != expected_map[col_name]:
+                raise CompilationError(
+                    f"Schema drift detected for '{relation_name}'.\n"
+                    f"Column '{col_name}' type mismatch: "
+                    f"existing='{existing_map[col_name]}', expected='{expected_map[col_name]}'.\n"
+                    f"Use --full-refresh to recreate the table."
+                )
+
+        for key, value in expected_with.items():
+            existing_value = existing_options.get(key)
+            if existing_value != str(value):
+                raise CompilationError(
+                    f"Table options drift detected for '{relation_name}'.\n"
+                    f"Option '{key}': "
+                    f"existing='{existing_value or '<not set>'}', expected='{str(value)}'.\n"
+                    f"Use --full-refresh to recreate the table."
+                )
+
     def run_sql_for_tests(self, sql, fetch, conn):
         cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
         try:

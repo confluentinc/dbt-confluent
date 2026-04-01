@@ -4,7 +4,6 @@ import pytest
 
 from dbt.adapters.base.relation import BaseRelation
 from dbt.adapters.contracts.relation import RelationType
-from dbt.tests.adapter.materialized_view import files
 from dbt.tests.util import (
     assert_message_in_logs,
     get_model_file,
