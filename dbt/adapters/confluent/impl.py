@@ -292,6 +292,11 @@ class ConfluentAdapter(SQLAdapter):
         return {"ctes": ctes, "main_sql": main_sql}
 
     @available
+    def generate_schema_check_temp_name(self, identifier: str, invocation_id: str) -> str:
+        """Generate a unique temporary table name for schema drift checks."""
+        return "__dbt_tmp_schema_check_" + identifier + "_" + invocation_id.replace("-", "")
+
+    @available
     def check_schema_drift(
         self,
         relation_name: str,

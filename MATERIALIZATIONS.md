@@ -14,6 +14,8 @@
 
 When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation.
 
+To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>_<invocation_id>`) and queries `INFORMATION_SCHEMA.COLUMNS` for its column names and data types. For `table` and `streaming_table`, this temp table is created from the model's SELECT query; for `streaming_source`, it is created from the model's column definitions (without the connector). The temp table is dropped immediately after the schema is read.
+
 ### Configuration
 
 Control drift detection behavior with the `on_schema_drift` config:

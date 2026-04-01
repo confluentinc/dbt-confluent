@@ -80,8 +80,7 @@
      and querying its schema from INFORMATION_SCHEMA. This gives us accurate data types.
      Returns a list of dicts with column_name and data_type. #}
 
-  {# Use invocation_id to avoid collisions with user tables or concurrent runs #}
-  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier ~ '_' ~ invocation_id | replace('-', '') %}
+  {% set temp_table_name = adapter.generate_schema_check_temp_name(this.identifier, invocation_id) %}
   {% set temp_relation = adapter.Relation.create(
     database=this.database,
     schema=this.schema,
@@ -115,8 +114,7 @@
      to let Flink parse and validate the schema, then query INFORMATION_SCHEMA for
      normalized types.  Returns an agate Table with column_name and data_type. #}
 
-  {# Use invocation_id to avoid collisions with user tables or concurrent runs #}
-  {% set temp_table_name = '__dbt_tmp_schema_check_' ~ this.identifier ~ '_' ~ invocation_id | replace('-', '') %}
+  {% set temp_table_name = adapter.generate_schema_check_temp_name(this.identifier, invocation_id) %}
   {% set temp_relation = adapter.Relation.create(
     database=this.database,
     schema=this.schema,
