@@ -101,6 +101,13 @@ path = "dbt/adapters/confluent/__version__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["dbt"]
 
+[tool.uv]
+# Never upgrade to packages that have been published for less than 10 days.
+# It's a lazy mitigation to supply chain attacks, that relies on the hope
+# that someone else catches issues before we upgrade.
+# Won't make us completely safe, but could save us a headache or two.
+exclude-newer = "10 days"
+
 [tool.towncrier]
 directory = "changes"
 filename = "CHANGELOG.md"
