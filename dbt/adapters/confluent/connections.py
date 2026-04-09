@@ -59,7 +59,7 @@ class ConfluentCredentials(Credentials):
     cloud_region: str | None = None
     endpoint: str | None = None
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
-    statement_name_prefix: str = "dbt-confluent-"
+    statement_name_prefix: str = "dbt-"
     statement_label: str = "dbt-confluent"
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}
@@ -116,12 +116,15 @@ class ConfluentConnectionManager(SQLConnectionManager):
         limit: int | None = None,
         execution_mode: str | None = None,
         hidden: bool = False,
+        statement_name: str | None = None,
     ) -> tuple[AdapterResponse, "agate.Table"]:
-        """This is customized so we can pass execution_mode and hidden down the chain."""
+        """This is customized so we can pass execution_mode, hidden and statement_name down the chain."""
         from dbt_common.clients.agate_helper import empty_table
 
         sql = self._add_query_comment(sql)
-        _, cursor = self.add_query(sql, auto_begin, execution_mode=execution_mode, hidden=hidden)
+        _, cursor = self.add_query(
+            sql, auto_begin, execution_mode=execution_mode, statement_name=statement_name, hidden=hidden
+        )
         response = self.get_response(cursor)
         if fetch:
             table = self.get_result_from_cursor(cursor, limit)
@@ -140,11 +143,15 @@ class ConfluentConnectionManager(SQLConnectionManager):
         retry_limit: int = 5,
         execution_mode: str | None = None,
         hidden: bool = False,
+        statement_name: str | None = None,
     ) -> tuple[Connection, Any]:
         """
         Copied from upstream (in SqlConnectionManager) with handling of cursor's
-        execution_mode. ExecutionMode can be specified at the project level in credentials,
-        or as a node info in config blocks.
+        execution_mode, hidden label and statement_name. ExecutionMode can be specified at
+        the project level in credentials, or as a node info in config blocks.
+
+        statement_name: if provided, used as the Flink statement name (deterministic).
+        If None, a UUID-based name is generated (for metadata/schema queries).
         """
 
         def _execute_query_with_retry(
@@ -189,10 +196,8 @@ class ConfluentConnectionManager(SQLConnectionManager):
                     )
                 time.sleep(backoff)
 
-                # Generate a new statement name for the retry since the
-                # previous one may have been deleted by ComputePoolExhaustedError.
-                prefix = connection.credentials.statement_name_prefix
-                retry_statement_name = f"{prefix}{uuid.uuid4()}" if statement_name else None
+                # Reuse the same statement name on retry. ComputePoolExhaustedError
+                # cleans up the failed statement, so the name is available for reuse.
                 return _execute_query_with_retry(
                     cursor=cursor,
                     sql=sql,
@@ -200,8 +205,8 @@ class ConfluentConnectionManager(SQLConnectionManager):
                     retryable_exceptions=retryable_exceptions,
                     retry_limit=retry_limit,
                     attempt=attempt + 1,
-                    statement_name=retry_statement_name,
                     statement_labels=statement_labels,
+                    statement_name=statement_name,
                 )
 
         connection = self.get_thread_connection()
@@ -237,10 +242,15 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 resolved_mode = ExecutionMode(connection.credentials.execution_mode)
 
             prefix = connection.credentials.statement_name_prefix
-            statement_name = f"{prefix}{uuid.uuid4()}"
             labels = [connection.credentials.statement_label]
             if hidden:
                 labels.append(HIDDEN_LABEL)
+
+            # Use deterministic name if provided, otherwise fall back to UUID
+            if statement_name is None:
+                prefix = connection.credentials.statement_name_prefix
+                statement_name = f"{prefix}{uuid.uuid4()}"
+
             cursor = connection.handle.cursor(mode=resolved_mode)
             _execute_query_with_retry(
                 cursor=cursor,

@@ -30,9 +30,9 @@ prompts:
     type: "string"
     default: 'streaming_query'
   statement_name_prefix:
-    hint: "A prefix to prepend to each statement name"
+    hint: "Prefix for statement names (project name is appended automatically)"
     type: "string"
-    default: "dbt-confluent-"
+    default: "dbt-"
   statement_label:
     hint: "A user label applied to all statements"
     type: "string"

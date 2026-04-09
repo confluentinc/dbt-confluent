@@ -11,7 +11,7 @@
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   -- build model
-  {% call statement('main') -%}
+  {% call statement('main', statement_name=get_statement_name()) -%}
     {{ get_create_view_as_sql(target_relation, sql) }}
   {%- endcall %}
 

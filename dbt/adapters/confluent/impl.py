@@ -13,6 +13,7 @@ from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.sql import SQLAdapter
 
+from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,7 @@ class ConfluentAdapter(SQLAdapter):
         limit: int | None = None,
         execution_mode: str | None = None,
         hidden: bool = False,
+        statement_name: str | None = None,
     ) -> tuple[AdapterResponse, "agate.Table"]:
         return self.connections.execute(
             sql=sql,
@@ -115,7 +117,28 @@ class ConfluentAdapter(SQLAdapter):
             limit=limit,
             execution_mode=execution_mode,
             hidden=hidden,
+            statement_name=statement_name,
         )
+
+    @available
+    def get_statement_name(
+        self,
+        model_name: str,
+        project_name: str,
+        suffix: str = "",
+        statement_name_override: str | None = None,
+    ) -> str:
+        """Build a deterministic, sanitized Flink statement name.
+
+        Called from Jinja macros via adapter.get_statement_name().
+        Returns the final name ready for the Flink API.
+        """
+        if statement_name_override:
+            name = f"{statement_name_override}{suffix}"
+        else:
+            prefix = self.config.credentials.statement_name_prefix
+            name = f"{prefix}{project_name}-{model_name}{suffix}"
+        return sanitize_statement_name(name)
 
     @classmethod
     def convert_text_type(cls, agate_table: agate.Table, col_idx: int) -> str:
