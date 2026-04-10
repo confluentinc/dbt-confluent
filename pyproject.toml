@@ -35,12 +35,16 @@ dependencies = [
   "confluent-sql~=0.1",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
+  "towncrier>=25.8.0",
+  {include-group = "lint"},
+  {include-group = "test"}
+]
+lint = [
   "ruff>=0.8.0",
   "mypy>=1.13.0",
   "pre-commit>=4.0.0",
-  "ipdb>=0.13.0",
 ]
 test = [
   "pytest>=8.4.2",
@@ -96,3 +100,10 @@ path = "dbt/adapters/confluent/__version__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["dbt"]
+
+[tool.towncrier]
+directory = "changes"
+filename = "CHANGELOG.md"
+package = "dbt-confluent"
+title_format = "{name} {version} ({project_date})"
+issue_format = "[#{issue}](https://github.com/confluentinc/dbt-confluent/issues/{issue})"
