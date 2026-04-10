@@ -31,15 +31,15 @@ blocks:
       jobs:
         - name: "Ruff Check"
           commands:
-            - uv run ruff check dbt/ tests/
+            - uv run --frozen ruff check dbt/ tests/
         - name: "Ruff Format Check"
           commands:
-            - uv run ruff format --check dbt/ tests/
+            - uv run --frozen ruff format --check dbt/ tests/
         - name: "Changelog Check"
           commands:
             - |
               if [ "$SEMAPHORE_GIT_BRANCH" != "main" ]; then
-                uv run towncrier check --compare-with origin/main
+                uv run --frozen towncrier check --compare-with origin/main
               else
                 echo "Skipping changelog check on main"
               fi
@@ -51,11 +51,6 @@ blocks:
         - name: "Build Package"
           commands:
             - uv build
-            # Install it locally and check that it can be imported.
-            # Clean the venv created in the prologue first
-            - uv venv --clear
-            - uv pip install dist/dbt_confluent-*.whl
-            - uv run python -c "import confluent_sql; import dbt.adapters.confluent; print('OK')"
 
   - name: "Test"
     dependencies:

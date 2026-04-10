@@ -104,7 +104,6 @@ packages = ["dbt"]
 [tool.towncrier]
 directory = "changes"
 filename = "CHANGELOG.md"
-package = "dbt-confluent"
 title_format = "{name} {version} ({project_date})"
 issue_format = "[#{issue}](https://github.com/confluentinc/dbt-confluent/issues/{issue})"
 
