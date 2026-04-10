@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import confluent_sql
-from confluent_sql import Cursor
-from confluent_sql.exceptions import ComputePoolExhaustedError
+from confluent_sql import HIDDEN_LABEL, Cursor
+from confluent_sql.exceptions import ComputePoolExhaustedError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.events.functions import fire_event
@@ -51,12 +51,13 @@ class ConfluentCredentials(Credentials):
     """
 
     # Add credentials members here, like:
-    cloud_provider: str
-    cloud_region: str
     compute_pool_id: str
     organization_id: str
     flink_api_key: str
     flink_api_secret: str
+    cloud_provider: str | None = None
+    cloud_region: str | None = None
+    endpoint: str | None = None
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
     statement_name_prefix: str = "dbt-confluent-"
     statement_label: str = "dbt-confluent"
@@ -80,7 +81,11 @@ class ConfluentCredentials(Credentials):
         """
         List of keys to display in the `dbt debug` output.
         """
-        return ("organization_id", "database", "schema")
+        keys = ("organization_id", "database", "schema")
+        if self.endpoint:
+            return (*keys, "endpoint")
+        else:
+            return (*keys, "cloud_provider", "cloud_region")
 
 
 class ConfluentConnectionManager(SQLConnectionManager):
@@ -107,12 +112,13 @@ class ConfluentConnectionManager(SQLConnectionManager):
         fetch: bool = False,
         limit: int | None = None,
         execution_mode: str | None = None,
+        hidden: bool = False,
     ) -> tuple[AdapterResponse, "agate.Table"]:
-        """This is customized so we can pass execution_mode down the chain."""
+        """This is customized so we can pass execution_mode and hidden down the chain."""
         from dbt_common.clients.agate_helper import empty_table
 
         sql = self._add_query_comment(sql)
-        _, cursor = self.add_query(sql, auto_begin, execution_mode=execution_mode)
+        _, cursor = self.add_query(sql, auto_begin, execution_mode=execution_mode, hidden=hidden)
         response = self.get_response(cursor)
         if fetch:
             table = self.get_result_from_cursor(cursor, limit)
@@ -130,6 +136,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         retryable_exceptions: tuple[type[Exception], ...] = (ComputePoolExhaustedError,),
         retry_limit: int = 5,
         execution_mode: str | None = None,
+        hidden: bool = False,
     ) -> tuple[Connection, Any]:
         """
         Copied from upstream (in SqlConnectionManager) with handling of cursor's
@@ -145,7 +152,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
             retry_limit: int,
             attempt: int,
             statement_name: str | None = None,
-            statement_label: str | None = None,
+            statement_labels: list[str] | None = None,
         ):
             """
             A success sees the try exit cleanly and avoid any recursive
@@ -153,7 +160,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
             """
             try:
                 cursor.execute(
-                    sql, bindings, statement_name=statement_name, statement_label=statement_label
+                    sql, bindings, statement_name=statement_name, statement_labels=statement_labels
                 )
             except retryable_exceptions as e:
                 # Cease retries and fail when limit is hit.
@@ -191,7 +198,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                     retry_limit=retry_limit,
                     attempt=attempt + 1,
                     statement_name=retry_statement_name,
-                    statement_label=statement_label,
+                    statement_labels=statement_labels,
                 )
 
         connection = self.get_thread_connection()
@@ -228,7 +235,9 @@ class ConfluentConnectionManager(SQLConnectionManager):
 
             prefix = connection.credentials.statement_name_prefix
             statement_name = f"{prefix}{uuid.uuid4()}"
-            label = connection.credentials.statement_label
+            labels = [connection.credentials.statement_label]
+            if hidden:
+                labels.append(HIDDEN_LABEL)
             cursor = connection.handle.cursor(mode=resolved_mode)
             _execute_query_with_retry(
                 cursor=cursor,
@@ -238,7 +247,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 retry_limit=retry_limit,
                 attempt=1,
                 statement_name=statement_name,
-                statement_label=label,
+                statement_labels=labels,
             )
 
             result = self.get_response(cursor)
@@ -262,6 +271,10 @@ class ConfluentConnectionManager(SQLConnectionManager):
         """
         try:
             yield
+        except StatementNotFoundError as e:
+            msg = f"Statement '{e.statement_name}' not found for '{sql}': {e}"
+            logger.debug(msg)
+            raise DbtDatabaseError(msg) from e
         except confluent_sql.Error as e:
             # TODO: Use logger, or fire a dbt event? Or both?
             msg = f"confluent_sql error for '{sql}': {e}"
@@ -292,12 +305,13 @@ class ConfluentConnectionManager(SQLConnectionManager):
             handle = confluent_sql.connect(
                 flink_api_key=credentials.flink_api_key,
                 flink_api_secret=credentials.flink_api_secret,
-                environment=credentials.database,
+                environment_id=credentials.database,
                 compute_pool_id=credentials.compute_pool_id,
                 organization_id=credentials.organization_id,
                 cloud_provider=credentials.cloud_provider,
                 cloud_region=credentials.cloud_region,
-                dbname=credentials.schema,
+                endpoint=credentials.endpoint,
+                database=credentials.schema,
                 http_user_agent=user_agent,
             )
             connection.state = "open"

@@ -1,12 +1,17 @@
 fixed:
   type: confluent
 prompts:
-  cloud_provider:
-    hint: "eg: 'aws'"
-    default: "aws"
-  cloud_region:
-    hint: "eg: us-west-1"
-    default: "us-west-1"
+  _choose_backend_url:
+    "Use cloud_provider and cloud_region":
+      cloud_provider:
+        hint: "eg: 'aws'"
+        default: "aws"
+      cloud_region:
+        hint: "eg: us-west-1"
+        default: "us-west-1"
+    "Use a custom endpoint":
+      endpoint:
+        hint: "eg: https://flink.us-east-2.aws.private.confluent.cloud"
   organization_id:
     hint: "eg: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
   compute_pool_id:
