@@ -75,7 +75,10 @@ class ConfluentCredentials(Credentials):
         Hashed and included in anonymous telemetry to track adapter adoption.
         Pick a field that can uniquely identify one team/organization building with this adapter
         """
-        return f"{self.cloud_provider}-{self.cloud_region}-{self.organization_id}"
+        if self.endpoint:
+            return self.endpoint
+        else:
+            return f"{self.cloud_provider}-{self.cloud_region}-{self.organization_id}"
 
     def _connection_keys(self):
         """
