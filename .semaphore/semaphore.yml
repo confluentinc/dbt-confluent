@@ -22,7 +22,7 @@ global_job_config:
       - . vault-setup
       - git submodule update --init
       - curl -LsSf https://astral.sh/uv/install.sh | sh
-      - uv sync --extra dev --extra test
+      - uv sync --dev
 
 blocks:
   - name: "Lint"
@@ -35,6 +35,14 @@ blocks:
         - name: "Ruff Format Check"
           commands:
             - uv run ruff format --check dbt/ tests/
+        - name: "Changelog Check"
+          commands:
+            - |
+              if [ "$SEMAPHORE_GIT_BRANCH" != "main" ]; then
+                uv run towncrier check --compare-with origin/main
+              else
+                echo "Skipping changelog check on main"
+              fi
 
   - name: "Build"
     dependencies: []
