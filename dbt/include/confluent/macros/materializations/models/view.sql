@@ -4,7 +4,8 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  -- drop the relation if it exists already in the database
+  -- delete existing statement and drop the relation if it exists already
+  {{ delete_statement_if_exists(get_statement_name()) }}
   {{ drop_relation_if_exists(existing_relation) }}
 
   -- `BEGIN` happens here:

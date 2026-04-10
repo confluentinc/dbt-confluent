@@ -140,6 +140,42 @@ class ConfluentAdapter(SQLAdapter):
             name = f"{prefix}{project_name}-{model_name}{suffix}"
         return sanitize_statement_name(name)
 
+    @available
+    def delete_statement(self, statement_name: str) -> None:
+        """Delete a Flink statement by name and wait for deletion to complete.
+
+        Deletion of RUNNING statements is async (the job must stop first),
+        so we poll until the statement is gone (404).
+        No-op if the statement doesn't already exist.
+        """
+        import time
+
+        from confluent_sql.exceptions import StatementNotFoundError
+
+        conn = self.connections.get_thread_connection()
+        handle = conn.handle
+
+        # Send the delete request (no-op on 404).
+        handle.delete_statement(statement_name)
+
+        # Poll until the statement is actually gone, with exponential backoff.
+        max_wait = 60
+        waited = 0
+        attempt = 1
+        while waited < max_wait:
+            try:
+                handle.get_statement(statement_name)
+            except StatementNotFoundError:
+                return  # Successfully deleted
+            backoff = min(2**attempt, 15)
+            time.sleep(backoff)
+            waited += backoff
+            attempt += 1
+
+        logger.warning(
+            "Statement '%s' still exists after %ds — proceeding anyway", statement_name, max_wait
+        )
+
     @classmethod
     def convert_text_type(cls, agate_table: agate.Table, col_idx: int) -> str:
         return "STRING"
