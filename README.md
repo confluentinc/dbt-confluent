@@ -117,8 +117,10 @@ See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 ```bash
 git clone https://github.com/confluentinc/dbt-confluent
 cd dbt-confluent
-uv sync --extra dev --extra test
+uv sync --dev
 ```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for changelog and contribution guidelines.
 
 ### Code quality
 

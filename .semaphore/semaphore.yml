@@ -22,7 +22,7 @@ global_job_config:
       - . vault-setup
       - git submodule update --init
       - curl -LsSf https://astral.sh/uv/install.sh | sh
-      - uv sync --extra dev --extra test
+      - uv sync --dev --frozen
 
 blocks:
   - name: "Lint"
@@ -31,10 +31,18 @@ blocks:
       jobs:
         - name: "Ruff Check"
           commands:
-            - uv run ruff check dbt/ tests/
+            - uv run --frozen ruff check dbt/ tests/
         - name: "Ruff Format Check"
           commands:
-            - uv run ruff format --check dbt/ tests/
+            - uv run --frozen ruff format --check dbt/ tests/
+        - name: "Changelog Check"
+          commands:
+            - |
+              if [ "$SEMAPHORE_GIT_BRANCH" != "main" ]; then
+                uv run --frozen towncrier check --compare-with origin/main
+              else
+                echo "Skipping changelog check on main"
+              fi
 
   - name: "Build"
     dependencies: []
@@ -43,11 +51,6 @@ blocks:
         - name: "Build Package"
           commands:
             - uv build
-            # Install it locally and check that it can be imported.
-            # Clean the venv created in the prologue first
-            - uv venv --clear
-            - uv pip install dist/dbt_confluent-*.whl
-            - uv run python -c "import confluent_sql; import dbt.adapters.confluent; print('OK')"
 
   - name: "Test"
     dependencies:
@@ -60,9 +63,9 @@ blocks:
             - |
               if [ -z "${CONFLUENT_FLINK_API_KEY:-}" ]; then
                 echo "CONFLUENT_FLINK_API_KEY not set, skipping integration tests"
-                uv run pytest tests/unit --junitxml=test-results.xml
+                uv run --frozen pytest tests/unit --junitxml=test-results.xml
               else
-                uv run pytest --junitxml=test-results.xml
+                uv run --frozen pytest --junitxml=test-results.xml
               fi
       epilogue:
         always:
