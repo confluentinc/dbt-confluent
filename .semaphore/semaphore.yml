@@ -53,9 +53,7 @@ blocks:
             - uv build
 
   - name: "Test"
-    dependencies:
-      - "Lint"
-      - "Build"
+    dependencies: []
     task:
       jobs:
         - name: "Run Tests"

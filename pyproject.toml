@@ -59,6 +59,19 @@ Repository = "https://github.com/confluentinc/dbt-confluent"
 [project.entry-points."dbt.adapters"]
 confluent = "dbt.adapters.confluent"
 
+[tool.uv]
+# Never upgrade to packages that have been published for less than 10 days.
+# It's a lazy mitigation to supply chain attacks, that relies on the hope
+# that someone else catches issues before we upgrade.
+# Won't make us completely safe, but could save us a headache or two.
+exclude-newer = "10 days"
+# But we exclude our own confluent-sql from this rule. The docs indicate
+# that we can set a package to false here to exempt it from the global
+# exclude-newer: https://docs.astral.sh/uv/reference/settings/#exclude-newer-package
+# We also need to exclude hatchling because the packages on pypi do not have an
+# upload date set, so uv sync fails.
+exclude-newer-package = { confluent-sql = false, hatchling = false }
+
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
 addopts = "-v --color=yes"
