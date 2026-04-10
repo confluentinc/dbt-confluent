@@ -58,7 +58,7 @@
 
 {% macro get_existing_columns(relation) %}
   {# Fetch column name and type from INFORMATION_SCHEMA.COLUMNS for the given relation. #}
-  {% call statement('get_existing_columns', fetch_result=True) %}
+  {% call statement('get_existing_columns', fetch_result=True, hidden=True) %}
     SELECT
       COLUMN_NAME as column_name,
       FULL_DATA_TYPE as data_type
@@ -89,7 +89,7 @@
   ) %}
 
   {# Create temp table from the query #}
-  {% call statement('create_temp_table') %}
+  {% call statement('create_temp_table', hidden=True) %}
     CREATE TABLE {{ temp_relation }} AS
     SELECT * FROM (
       {{ model_sql }}
@@ -100,7 +100,7 @@
   {% set expected_columns = get_existing_columns(temp_relation) %}
 
   {# Drop the temp table #}
-  {% call statement('drop_temp_table') %}
+  {% call statement('drop_temp_table', hidden=True) %}
     DROP TABLE IF EXISTS {{ temp_relation }}
   {% endcall %}
 
@@ -123,7 +123,7 @@
   ) %}
 
   {# Create temp table from column definitions (without connector) #}
-  {% call statement('create_temp_table') %}
+  {% call statement('create_temp_table', hidden=True) %}
     CREATE TABLE {{ temp_relation }} ( {{ column_definitions }} )
   {% endcall %}
 
@@ -131,7 +131,7 @@
   {% set expected_columns = get_existing_columns(temp_relation) %}
 
   {# Drop the temp table #}
-  {% call statement('drop_temp_table') %}
+  {% call statement('drop_temp_table', hidden=True) %}
     DROP TABLE IF EXISTS {{ temp_relation }}
   {% endcall %}
 
@@ -142,7 +142,7 @@
 {% macro get_existing_table_options(relation) %}
   {# Fetch WITH options from INFORMATION_SCHEMA.TABLE_OPTIONS for the given relation.
      Returns a dict of {option_key: option_value}. #}
-  {% call statement('get_existing_table_options', fetch_result=True) %}
+  {% call statement('get_existing_table_options', fetch_result=True, hidden=True) %}
     SELECT
       OPTION_KEY,
       OPTION_VALUE
