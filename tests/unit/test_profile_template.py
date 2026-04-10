@@ -3,14 +3,11 @@ from unittest import mock
 
 import click
 import yaml
+
 from dbt.task.init import InitTask
 
 PROFILE_TEMPLATE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "dbt"
-    / "include"
-    / "confluent"
-    / "profile_template.yml"
+    Path(__file__).resolve().parents[2] / "dbt" / "include" / "confluent" / "profile_template.yml"
 )
 
 
@@ -38,19 +35,19 @@ class TestProfileTemplate:
         """Choosing 'Use cloud_provider and cloud_region' prompts for provider and region."""
         template = load_profile_template()
         prompt_responses = [
-            1,                  # _choose_backend_url: "Use cloud_provider and cloud_region"
-            "aws",              # cloud_provider
-            "us-west-1",        # cloud_region
-            "org-123",          # organization_id
-            "lfcp-abc",         # compute_pool_id
-            "env-xyz",          # environment_id
-            "my_db",            # dbname
-            "my-key",           # flink_api_key
-            "my-secret",        # flink_api_secret
+            1,  # _choose_backend_url: "Use cloud_provider and cloud_region"
+            "aws",  # cloud_provider
+            "us-west-1",  # cloud_region
+            "org-123",  # organization_id
+            "lfcp-abc",  # compute_pool_id
+            "env-xyz",  # environment_id
+            "my_db",  # dbname
+            "my-key",  # flink_api_key
+            "my-secret",  # flink_api_secret
             "streaming_query",  # execution_mode
-            "dbt-confluent-",   # statement_name_prefix
-            "dbt-confluent",    # statement_label
-            1,                  # threads
+            "dbt-confluent-",  # statement_name_prefix
+            "dbt-confluent",  # statement_label
+            1,  # threads
         ]
 
         target = _run_generate_target(template["prompts"], prompt_responses)
@@ -64,18 +61,18 @@ class TestProfileTemplate:
         template = load_profile_template()
         endpoint_url = "https://flink.us-east-2.aws.private.confluent.cloud"
         prompt_responses = [
-            2,                  # _choose_backend_url: "Use a custom endpoint"
-            endpoint_url,       # endpoint
-            "org-123",          # organization_id
-            "lfcp-abc",         # compute_pool_id
-            "env-xyz",          # environment_id
-            "my_db",            # dbname
-            "my-key",           # flink_api_key
-            "my-secret",        # flink_api_secret
+            2,  # _choose_backend_url: "Use a custom endpoint"
+            endpoint_url,  # endpoint
+            "org-123",  # organization_id
+            "lfcp-abc",  # compute_pool_id
+            "env-xyz",  # environment_id
+            "my_db",  # dbname
+            "my-key",  # flink_api_key
+            "my-secret",  # flink_api_secret
             "streaming_query",  # execution_mode
-            "dbt-confluent-",   # statement_name_prefix
-            "dbt-confluent",    # statement_label
-            1,                  # threads
+            "dbt-confluent-",  # statement_name_prefix
+            "dbt-confluent",  # statement_label
+            1,  # threads
         ]
 
         target = _run_generate_target(template["prompts"], prompt_responses)
