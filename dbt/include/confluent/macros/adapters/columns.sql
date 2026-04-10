@@ -1,5 +1,5 @@
 {% macro confluent__get_columns_in_relation(relation) -%}
-  {% call statement('get_columns_in_relation', fetch_result=True) %}
+  {% call statement('get_columns_in_relation', fetch_result=True, hidden=True) %}
     SELECT
       COLUMN_NAME as column_name,
       FULL_DATA_TYPE as data_type,
