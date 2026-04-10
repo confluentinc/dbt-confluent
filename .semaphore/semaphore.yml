@@ -53,6 +53,7 @@ blocks:
             - uv build
 
   - name: "Test"
+    dependencies: []
     task:
       jobs:
         - name: "Run Tests"
