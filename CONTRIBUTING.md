@@ -34,13 +34,15 @@ Added support for temporal table joins in streaming_table materialization.
 
 | Type | Section in changelog | When to use |
 |---|---|---|
+| `breaking` | Breaking Changes | Breaking changes that aren't covered by other types |
 | `feature` | Features | New functionality |
 | `bugfix` | Bugfixes | Bug fixes |
 | `doc` | Improved Documentation | Documentation-only changes |
 | `removal` | Deprecations and Removals | Removed or deprecated features |
-| `misc` | Misc | Trivial changes (CI, refactors, dependency bumps) |
+| `misc` | Misc | Minor changes worth noting (refactors, dependency bumps) |
+| `trivial` | *(not shown)* | Changes that don't need a changelog entry (CI, typo fixes) |
 
-For changes that don't warrant a detailed description, use `misc` with a brief one-liner.
+Use `trivial` when a change doesn't need to appear in the changelog at all — the fragment must still exist to pass CI, but its content won't be rendered.
 
 ### Previewing the changelog
 

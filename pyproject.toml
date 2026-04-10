@@ -107,3 +107,38 @@ filename = "CHANGELOG.md"
 package = "dbt-confluent"
 title_format = "{name} {version} ({project_date})"
 issue_format = "[#{issue}](https://github.com/confluentinc/dbt-confluent/issues/{issue})"
+
+[[tool.towncrier.type]]
+directory = "breaking"
+name = "Breaking Changes"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "feature"
+name = "Features"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "bugfix"
+name = "Bugfixes"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "doc"
+name = "Improved Documentation"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removal"
+name = "Deprecations and Removals"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "misc"
+name = "Misc"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "trivial"
+name = ""
+showcontent = false
