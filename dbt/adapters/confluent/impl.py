@@ -106,6 +106,7 @@ class ConfluentAdapter(SQLAdapter):
         fetch: bool = False,
         limit: int | None = None,
         execution_mode: str | None = None,
+        hidden: bool = False,
     ) -> tuple[AdapterResponse, "agate.Table"]:
         return self.connections.execute(
             sql=sql,
@@ -113,6 +114,7 @@ class ConfluentAdapter(SQLAdapter):
             fetch=fetch,
             limit=limit,
             execution_mode=execution_mode,
+            hidden=hidden,
         )
 
     @classmethod
