@@ -38,8 +38,8 @@ blocks:
         - name: "Changelog Check"
           commands:
             - |
-              if [ "$SEMAPHORE_GIT_BRANCH" != "main" ]; then
-                uv run --frozen towncrier check --compare-with origin/main
+              if [ "$SEMAPHORE_GIT_WORKING_BRANCH" != "main" ]; then
+                uv run --frozen towncrier check
               else
                 echo "Skipping changelog check on main"
               fi
@@ -53,9 +53,7 @@ blocks:
             - uv build
 
   - name: "Test"
-    dependencies:
-      - "Lint"
-      - "Build"
+    dependencies: []
     task:
       jobs:
         - name: "Run Tests"
