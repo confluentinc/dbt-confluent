@@ -1,6 +1,7 @@
 from textwrap import dedent
 
 import pytest
+from confluent_sql.exceptions import StatementNotFoundError
 
 from dbt.tests.util import relation_from_name, run_dbt
 from tests.functional.adapter.fixtures import ConfluentFixtures
@@ -48,6 +49,12 @@ models:
 
 
 class TestStreamingTable(ConfluentFixtures):
+    NAME = "streaming"
+
+    @pytest.fixture(scope="class")
+    def run_dbt_results(self, project):
+        return run_dbt(["run"])
+
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {
@@ -57,15 +64,26 @@ class TestStreamingTable(ConfluentFixtures):
         }
 
     @pytest.fixture(autouse=True)
-    def custom_clean_up(self, project):
+    def clean_up(self, project, dbt_profile_data):
+        """Override base clean_up so statements survive across tests in this class."""
         yield
-        project.run_sql("drop table if exists my_streaming_source")
-        project.run_sql("drop table if exists my_streaming_table")
 
-    def test_materialized_source(self, project):
-        results = run_dbt(["run"])
-        assert results[0].node.name == "my_streaming_source"
-        assert results[1].node.name == "my_streaming_table"
+    @pytest.fixture(autouse=True, scope="class")
+    def class_clean_up(self, project, dbt_profile_data):
+        """Delete statements and tables once after all tests in the class."""
+        yield
+        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+        with project.adapter.connection_named("cleanup"):
+            conn = project.adapter.connections.get_thread_connection()
+            for stmt in conn.handle.list_statements(label=label):
+                print(f"Deleting: {stmt.name}")
+                project.adapter.delete_statement(stmt.name)
+        project.run_sql("drop table if exists my_streaming_table")
+        project.run_sql("drop table if exists my_streaming_source")
+
+    def test_materialized_source(self, project, run_dbt_results):
+        assert run_dbt_results[0].node.name == "my_streaming_source"
+        assert run_dbt_results[1].node.name == "my_streaming_table"
         relation = relation_from_name(project.adapter, "my_streaming_table")
         result = project.run_sql(f"select * from {relation}", fetch="one")
         assert len(result[0]) == 3
@@ -73,3 +91,24 @@ class TestStreamingTable(ConfluentFixtures):
         catalog = run_dbt(["docs", "generate"])
         assert len(catalog.nodes) == 2
         assert len(catalog.sources) == 0
+
+    def test_deterministic_statement_names(self, project, run_dbt_results):
+        """After dbt run, the long-running streaming INSERT statement should
+        exist with a deterministic name derived from project and model names.
+
+        Only the streaming_table INSERT is guaranteed to still be RUNNING;
+        the DDL statement and the streaming_source statement complete
+        immediately and may be auto-cleaned by Flink before we check."""
+        adapter = project.adapter
+        name = adapter.get_statement_name(
+            model_name="my_streaming_table",
+            project_name=self.NAME,
+        )
+
+        with adapter.connection_named("check_statements"):
+            conn = adapter.connections.get_thread_connection()
+            try:
+                stmt = conn.handle.get_statement(name)
+            except StatementNotFoundError:
+                pytest.fail(f"Expected Flink statement '{name}' to exist but it was not found")
+            assert stmt is not None, f"Statement '{name}' should exist"
