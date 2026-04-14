@@ -33,6 +33,12 @@
       {% endif %}
       {{ return(true) }}
     {% endif %}
+  {% else %}
+    {# No relation exists, but orphaned Flink statements may linger if the table
+       was dropped without deleting its statements (e.g. external cleanup).
+       Delete them so the materialization can create fresh ones. #}
+    {{ delete_statement_if_exists(get_statement_name()) }}
+    {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
   {% endif %}
   {{ return(false) }}
 {% endmacro %}
