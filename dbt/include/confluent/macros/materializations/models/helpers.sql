@@ -2,7 +2,6 @@
   {# Delete an existing Flink statement by name so we can re-create it.
      No-op if the statement doesn't exist (confluent-sql handles 404). #}
   {% if execute %}
-    {{ log("Deleting existing statement: " ~ statement_name, info=True) }}
     {% do adapter.delete_statement(statement_name) %}
   {% endif %}
 {% endmacro %}

@@ -15,6 +15,10 @@ class TestSanitizeStatementName:
     def test_lowercased(self):
         assert sanitize_statement_name("dbt-MyProject-Model") == "dbt-myproject-model"
 
+    def test_only_hyphens_raises(self):
+        with pytest.raises(ValueError, match="at least one alphanumeric"):
+            sanitize_statement_name("-------")
+
     def test_underscores_replaced_with_hash(self):
         result = sanitize_statement_name("dbt-proj-my_model")
         assert "_" not in result

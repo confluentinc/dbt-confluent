@@ -34,6 +34,11 @@ def sanitize_statement_name(name: str) -> str:
     # Strip leading hyphens — name must start with alphanumeric
     sanitized = sanitized.lstrip("-")
 
+    if not sanitized or not sanitized[0].isalnum():
+        raise ValueError(
+            f"Statement name must contain at least one alphanumeric character: '{original}'"
+        )
+
     if len(sanitized) > MAX_STATEMENT_NAME_LENGTH:
         hash_suffix = hashlib.md5(original.encode()).hexdigest()[:6]
         max_base = MAX_STATEMENT_NAME_LENGTH - 1 - len(hash_suffix)  # 1 for '-'

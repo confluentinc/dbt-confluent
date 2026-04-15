@@ -90,7 +90,6 @@ class TestStreamingTable(ConfluentFixtures):
         with project.adapter.connection_named("cleanup"):
             conn = project.adapter.connections.get_thread_connection()
             for stmt in conn.handle.list_statements(label=label):
-                print(f"Deleting: {stmt.name}")
                 project.adapter.delete_statement(stmt.name)
         project.run_sql("drop table if exists my_custom_named_table")
         project.run_sql("drop table if exists my_streaming_table")

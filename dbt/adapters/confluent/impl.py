@@ -156,19 +156,26 @@ class ConfluentAdapter(SQLAdapter):
         # Send the delete request (no-op on 404).
         handle.delete_statement(statement_name)
 
-        # Poll until the statement is actually gone, with exponential backoff.
+        # Check if the statement is already gone after the delete request.
+        try:
+            handle.get_statement(statement_name)
+        except StatementNotFoundError:
+            return  # Already gone (either deleted instantly or never existed)
+
+        # Statement still exists — it's being stopped. Poll until gone.
+        logger.info("Waiting for statement '%s' to be deleted...", statement_name)
         max_wait = 60
         waited = 0
         attempt = 1
         while waited < max_wait:
-            try:
-                handle.get_statement(statement_name)
-            except StatementNotFoundError:
-                return  # Successfully deleted
             backoff = min(2**attempt, 15)
             time.sleep(backoff)
             waited += backoff
             attempt += 1
+            try:
+                handle.get_statement(statement_name)
+            except StatementNotFoundError:
+                return  # Successfully deleted
 
         raise DbtDatabaseError(
             f"Statement '{statement_name}' still exists after {max_wait}s. "
