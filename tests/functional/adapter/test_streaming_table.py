@@ -98,7 +98,11 @@ class TestStreamingTable(ConfluentFixtures):
 
     def test_materialized_source(self, project, run_dbt_results):
         result_names = {r.node.name for r in run_dbt_results}
-        assert {"my_streaming_source", "my_streaming_table", "my_custom_named_table"} == result_names
+        assert {
+            "my_streaming_source",
+            "my_streaming_table",
+            "my_custom_named_table",
+        } == result_names
         relation = relation_from_name(project.adapter, "my_streaming_table")
         result = project.run_sql(f"select * from {relation}", fetch="one")
         assert len(result[0]) == 3
