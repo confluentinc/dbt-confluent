@@ -249,7 +249,6 @@ class ConfluentConnectionManager(SQLConnectionManager):
             else:
                 resolved_mode = ExecutionMode(connection.credentials.execution_mode)
 
-            prefix = connection.credentials.statement_name_prefix
             labels = [connection.credentials.statement_label]
             if hidden:
                 labels.append(HIDDEN_LABEL)

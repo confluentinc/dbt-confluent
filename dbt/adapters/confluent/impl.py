@@ -1,8 +1,10 @@
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 
 import agate
+from confluent_sql.exceptions import StatementNotFoundError
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
@@ -148,10 +150,6 @@ class ConfluentAdapter(SQLAdapter):
         so we poll until the statement is gone (404).
         No-op if the statement doesn't already exist.
         """
-        import time
-
-        from confluent_sql.exceptions import StatementNotFoundError
-
         conn = self.connections.get_thread_connection()
         handle = conn.handle
 

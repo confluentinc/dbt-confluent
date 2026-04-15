@@ -84,7 +84,7 @@ class TestSanitizeStatementName:
             sanitize_statement_name("")
 
     def test_spaces_replaced(self):
-        result = sanitize_statement_name("dbt-my-model")
+        result = sanitize_statement_name("dbt-my model")
         assert " " not in result
 
     def test_realistic_name(self):
