@@ -172,8 +172,9 @@ class ConfluentAdapter(SQLAdapter):
             waited += backoff
             attempt += 1
 
-        logger.warning(
-            "Statement '%s' still exists after %ds — proceeding anyway", statement_name, max_wait
+        raise DbtDatabaseError(
+            f"Statement '{statement_name}' still exists after {max_wait}s. "
+            f"Flink may still be stopping the job. Re-run or use `dbt retry`."
         )
 
     @classmethod

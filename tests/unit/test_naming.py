@@ -1,11 +1,10 @@
-"""Unit tests for statement name sanitization and validation."""
+"""Unit tests for statement name sanitization."""
 
 import pytest
 
 from dbt.adapters.confluent.naming import (
     MAX_STATEMENT_NAME_LENGTH,
     sanitize_statement_name,
-    validate_statement_name,
 )
 
 
@@ -20,7 +19,7 @@ class TestSanitizeStatementName:
         result = sanitize_statement_name("dbt-proj-my_model")
         assert "_" not in result
         assert result.startswith("dbt-proj-my-model-")
-        assert len(result.split("-")[-1]) == 4  # 4-char hash
+        assert len(result.split("-")[-1]) == 6  # 6-char hash
 
     def test_dots_replaced_with_hash(self):
         result = sanitize_statement_name("dbt-proj-my.model")
@@ -80,9 +79,9 @@ class TestSanitizeStatementName:
         result = sanitize_statement_name(name)
         assert len(result) <= MAX_STATEMENT_NAME_LENGTH
 
-    def test_empty_string(self):
-        result = sanitize_statement_name("")
-        assert result == ""
+    def test_empty_string_raises(self):
+        with pytest.raises(ValueError, match="cannot be empty"):
+            sanitize_statement_name("")
 
     def test_spaces_replaced(self):
         result = sanitize_statement_name("dbt-my-model")
@@ -98,39 +97,3 @@ class TestSanitizeStatementName:
     def test_suffix_preserved(self):
         result = sanitize_statement_name("dbt-myproject-mymodel-ddl")
         assert result == "dbt-myproject-mymodel-ddl"
-
-
-class TestValidateStatementName:
-    def test_valid_name(self):
-        validate_statement_name("dbt-myproject-my-model")
-
-    def test_empty_name_raises(self):
-        with pytest.raises(ValueError, match="cannot be empty"):
-            validate_statement_name("")
-
-    def test_too_long_raises(self):
-        with pytest.raises(ValueError, match="exceeds"):
-            validate_statement_name("a" * (MAX_STATEMENT_NAME_LENGTH + 1))
-
-    def test_exactly_max_valid(self):
-        validate_statement_name("a" * MAX_STATEMENT_NAME_LENGTH)
-
-    def test_uppercase_raises(self):
-        with pytest.raises(ValueError, match="lowercase"):
-            validate_statement_name("dbt-Model")
-
-    def test_underscore_raises(self):
-        with pytest.raises(ValueError, match="lowercase"):
-            validate_statement_name("dbt-my_model")
-
-    def test_dots_raises(self):
-        with pytest.raises(ValueError, match="lowercase"):
-            validate_statement_name("dbt.model")
-
-    def test_leading_hyphen_raises(self):
-        with pytest.raises(ValueError, match="start with an alphanumeric"):
-            validate_statement_name("-dbt-model")
-
-    def test_spaces_raises(self):
-        with pytest.raises(ValueError, match="lowercase"):
-            validate_statement_name("dbt model")

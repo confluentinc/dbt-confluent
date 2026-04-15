@@ -2,7 +2,6 @@ import hashlib
 import re
 
 MAX_STATEMENT_NAME_LENGTH = 100
-_VALID_CHARS_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _ILLEGAL_CHARS_RE = re.compile(r"[^a-z0-9-]")
 
 
@@ -17,17 +16,19 @@ def sanitize_statement_name(name: str) -> str:
     This function:
     - Lowercases the input
     - Replaces characters not in [a-z0-9-] (including underscores) with '-'
-    - If any replacement occurred, appends a 4-char hash of the original
+    - If any replacement occurred, appends a 6-char hash of the original
       to avoid collisions (e.g. 'a_b' and 'a.b' won't clash)
     - Strips leading hyphens (name must start with alphanumeric)
     - Truncates to 100 chars with a 6-char hash suffix if needed
     """
+    if not name:
+        raise ValueError("Statement name cannot be empty")
     original = name
     name = name.lower()
     sanitized = _ILLEGAL_CHARS_RE.sub("-", name)
 
     if sanitized != name:
-        short_hash = hashlib.md5(original.encode()).hexdigest()[:4]
+        short_hash = hashlib.md5(original.encode()).hexdigest()[:6]
         sanitized = f"{sanitized}-{short_hash}"
 
     # Strip leading hyphens — name must start with alphanumeric
@@ -39,21 +40,3 @@ def sanitize_statement_name(name: str) -> str:
         sanitized = f"{sanitized[:max_base]}-{hash_suffix}"
 
     return sanitized
-
-
-def validate_statement_name(name: str) -> None:
-    """Validate a statement name against Flink constraints.
-
-    Raises ValueError if the name is invalid.
-    """
-    if not name:
-        raise ValueError("Statement name cannot be empty")
-    if len(name) > MAX_STATEMENT_NAME_LENGTH:
-        raise ValueError(
-            f"Statement name exceeds {MAX_STATEMENT_NAME_LENGTH} char limit: '{name}'"
-        )
-    if not _VALID_CHARS_RE.match(name):
-        raise ValueError(
-            f"Statement name must contain only lowercase alphanumeric characters "
-            f"and hyphens, and start with an alphanumeric character: '{name}'"
-        )

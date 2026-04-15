@@ -123,7 +123,11 @@ class ConfluentConnectionManager(SQLConnectionManager):
 
         sql = self._add_query_comment(sql)
         _, cursor = self.add_query(
-            sql, auto_begin, execution_mode=execution_mode, statement_name=statement_name, hidden=hidden
+            sql,
+            auto_begin,
+            execution_mode=execution_mode,
+            statement_name=statement_name,
+            hidden=hidden,
         )
         response = self.get_response(cursor)
         if fetch:
