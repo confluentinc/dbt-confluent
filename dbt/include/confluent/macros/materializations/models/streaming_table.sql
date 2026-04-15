@@ -26,8 +26,9 @@
   -- See comment above about calling hooks
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
-  -- First, create the table.
-  {% call statement('main', execution_mode="streaming_ddl") -%}
+  -- First, create the table (transient DDL — gets '-ddl' suffix).
+  {% call statement('main', execution_mode="streaming_ddl",
+                    statement_name=get_statement_name('-ddl')) -%}
     create table {{ target_relation }}
     {{ get_assert_columns_equivalent(sql) }}
     {{ get_table_columns_and_constraints() }}
@@ -40,8 +41,9 @@
     {% endif %}
   {%- endcall -%}
 
-  -- Then insert data into it:
-  {%- call statement('insert', execution_mode="streaming_query") -%}
+  -- Then insert data into it (long-running — gets primary name).
+  {%- call statement('insert', execution_mode="streaming_query",
+                     statement_name=get_statement_name()) -%}
     INSERT INTO {{ target_relation }} {{ sql }}
   {%- endcall -%}
 

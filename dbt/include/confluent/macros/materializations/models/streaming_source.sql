@@ -27,8 +27,9 @@
   -- See comment above about calling hooks
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
-  -- Create the table
-  {% call statement('main', execution_mode="streaming_ddl") -%}
+  -- Create the connector-backed table (long-running — gets primary name).
+  {% call statement('main', execution_mode="streaming_ddl",
+                    statement_name=get_statement_name()) -%}
     CREATE TABLE {{ target_relation }}
     ( {{ sql }})
     WITH (

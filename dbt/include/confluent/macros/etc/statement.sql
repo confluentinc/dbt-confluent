@@ -1,6 +1,7 @@
 -- This macro is customized so we can add a `limit` at call site to call `fetchmany(limit)`
 -- rather than `fetchall`, and also to get the `execution_mode` from the config, so that
--- we can instantiate a different cursor in `adapter.execute`
+-- we can instantiate a different cursor in `adapter.execute`.
+-- `statement_name` allows materializations to pass a deterministic Flink statement name.
 {%- macro statement(
   name=None,
   fetch_result=False,
@@ -8,7 +9,8 @@
   language='sql',
   limit=None,
   execution_mode=None,
-  hidden=False
+  hidden=False,
+  statement_name=None
 ) -%}
   {%- if execute: -%}
     {%- set compiled_code = caller() -%}
@@ -21,7 +23,7 @@
       {% if not execution_mode %}
         {% set execution_mode = config.get("execution_mode", None) %}
       {% endif %}
-      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode, limit=limit, hidden=hidden) -%}
+      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode, limit=limit, hidden=hidden, statement_name=statement_name) -%}
     {%- elif language == 'python' -%}
       {%- set res = submit_python_job(model, compiled_code) -%}
       {#-- TODO: What should table be for python models? --#}
@@ -36,3 +38,17 @@
 
   {%- endif -%}
 {%- endmacro %}
+
+
+{#-- Helper macro to derive a deterministic statement name from model context.
+     Calls the Python adapter method for sanitization/validation.
+     Pass a suffix (e.g. '-ddl') for secondary statements. --#}
+{%- macro get_statement_name(suffix='') -%}
+  {%- set custom_name = config.get('statement_name', none) -%}
+  {{ adapter.get_statement_name(
+       model_name=model.name,
+       project_name=project_name,
+       suffix=suffix,
+       statement_name_override=custom_name
+  ) | trim }}
+{%- endmacro -%}
