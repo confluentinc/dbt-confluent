@@ -172,7 +172,7 @@ class ConfluentAdapter(SQLAdapter):
 
         raise DbtDatabaseError(
             f"Statement '{statement_name}' still exists after {max_wait}s. "
-            f"Flink may still be stopping the job. Re-run or use `dbt retry`."
+            f"Flink may still be stopping the job."
         )
 
     @classmethod
