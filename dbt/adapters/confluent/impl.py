@@ -1,8 +1,10 @@
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 
 import agate
+from confluent_sql.exceptions import StatementNotFoundError
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
@@ -13,6 +15,7 @@ from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.sql import SQLAdapter
 
+from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
 logger = logging.getLogger(__name__)
@@ -107,6 +110,7 @@ class ConfluentAdapter(SQLAdapter):
         limit: int | None = None,
         execution_mode: str | None = None,
         hidden: bool = False,
+        statement_name: str | None = None,
     ) -> tuple[AdapterResponse, "agate.Table"]:
         return self.connections.execute(
             sql=sql,
@@ -115,6 +119,60 @@ class ConfluentAdapter(SQLAdapter):
             limit=limit,
             execution_mode=execution_mode,
             hidden=hidden,
+            statement_name=statement_name,
+        )
+
+    @available
+    def get_statement_name(
+        self,
+        model_name: str,
+        project_name: str,
+        suffix: str = "",
+        statement_name_override: str | None = None,
+    ) -> str:
+        """Build a deterministic, sanitized Flink statement name.
+
+        Called from Jinja macros via adapter.get_statement_name().
+        Returns the final name ready for the Flink API.
+        """
+        if statement_name_override:
+            name = f"{statement_name_override}{suffix}"
+        else:
+            prefix = self.config.credentials.statement_name_prefix
+            name = f"{prefix}{project_name}-{model_name}{suffix}"
+        return sanitize_statement_name(name)
+
+    @available
+    def delete_statement(self, statement_name: str) -> None:
+        """Delete a Flink statement by name and wait for deletion to complete.
+
+        Deletion of RUNNING statements is async (the job must stop first),
+        so we poll until the statement is gone (404).
+        No-op if the statement doesn't already exist.
+        """
+        conn = self.connections.get_thread_connection()
+        handle = conn.handle
+
+        # Send the delete request (no-op on 404).
+        handle.delete_statement(statement_name)
+
+        # Poll until the statement is actually gone, with exponential backoff.
+        max_wait = 60
+        waited = 0
+        attempt = 1
+        while waited < max_wait:
+            try:
+                handle.get_statement(statement_name)
+            except StatementNotFoundError:
+                return  # Successfully deleted
+            backoff = min(2**attempt, 15)
+            time.sleep(backoff)
+            waited += backoff
+            attempt += 1
+
+        raise DbtDatabaseError(
+            f"Statement '{statement_name}' still exists after {max_wait}s. "
+            f"Flink may still be stopping the job."
         )
 
     @classmethod
