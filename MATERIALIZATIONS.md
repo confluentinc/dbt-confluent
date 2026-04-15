@@ -83,6 +83,36 @@ This is an inherent limitation — `INFORMATION_SCHEMA` only stores schema metad
 ### When Drift is Detected
 If drift is detected, the run will fail with a compilation error. Use `--full-refresh` to drop and recreate the table with the new schema or options.
 
+## Deterministic Statement Names
+
+Each materialization creates Flink statements with deterministic names derived from the dbt project and model names:
+
+```
+{prefix}{project_name}-{model_name}
+```
+
+The default prefix is `dbt-`. For `streaming_table`, which creates two statements (a DDL and an INSERT), the DDL gets a `-ddl` suffix: `dbt-{project}-{model}-ddl`.
+
+### Flink Naming Constraints
+
+Flink statement names must contain only lowercase alphanumeric characters and hyphens, start with an alphanumeric character, and be at most 100 characters long. The adapter sanitizes names automatically:
+
+- Illegal characters (including underscores) are replaced with hyphens
+- A 6-char MD5 hash suffix is appended when characters are replaced, to avoid collisions (e.g. `my_model` and `my.model` produce different names)
+- Names exceeding 100 characters are truncated with a 6-char hash suffix
+
+### Custom Statement Names
+
+Override the generated name with the `statement_name` config:
+
+```sql
+{{ config(materialized='streaming_table', statement_name='my-custom-name') }}
+```
+
+### Statement Lifecycle
+
+On `--full-refresh`, the adapter deletes existing statements before dropping and recreating the table. When no relation exists, orphaned statements are also cleaned up. This enables idempotent re-runs and crash recovery.
+
 ## Not Supported
 
 | Materialization | Reason |
