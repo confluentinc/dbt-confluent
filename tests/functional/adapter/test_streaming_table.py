@@ -1,5 +1,3 @@
-from textwrap import dedent
-
 import pytest
 from confluent_sql.exceptions import StatementNotFoundError
 
@@ -31,6 +29,15 @@ WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND,
 PRIMARY KEY(`order_id`) NOT ENFORCED
 """
 
+MY_CUSTOM_NAMED_TABLE = """
+{{ config(
+    materialized='streaming_table',
+    statement_name='my-custom-insert',
+    with={'changelog.mode': 'append'},
+) }}
+select order_id, price from {{ ref('my_streaming_source') }}
+"""
+
 MODELS_YML = """
 models:
   - name: my_streaming_table
@@ -45,6 +52,12 @@ models:
         data_type: decimal(10,2)
       - name: order_time
         data_type: timestamp(3)
+  - name: my_custom_named_table
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: price
+        data_type: decimal(10,2)
 """
 
 
@@ -60,6 +73,7 @@ class TestStreamingTable(ConfluentFixtures):
         yield {
             "my_streaming_source.sql": MY_STREAMING_SOURCE,
             "my_streaming_table.sql": MY_STREAMING_TABLE,
+            "my_custom_named_table.sql": MY_CUSTOM_NAMED_TABLE,
             "models.yml": MODELS_YML,
         }
 
@@ -78,18 +92,19 @@ class TestStreamingTable(ConfluentFixtures):
             for stmt in conn.handle.list_statements(label=label):
                 print(f"Deleting: {stmt.name}")
                 project.adapter.delete_statement(stmt.name)
+        project.run_sql("drop table if exists my_custom_named_table")
         project.run_sql("drop table if exists my_streaming_table")
         project.run_sql("drop table if exists my_streaming_source")
 
     def test_materialized_source(self, project, run_dbt_results):
-        assert run_dbt_results[0].node.name == "my_streaming_source"
-        assert run_dbt_results[1].node.name == "my_streaming_table"
+        result_names = {r.node.name for r in run_dbt_results}
+        assert {"my_streaming_source", "my_streaming_table", "my_custom_named_table"} == result_names
         relation = relation_from_name(project.adapter, "my_streaming_table")
         result = project.run_sql(f"select * from {relation}", fetch="one")
         assert len(result[0]) == 3
 
         catalog = run_dbt(["docs", "generate"])
-        assert len(catalog.nodes) == 2
+        assert len(catalog.nodes) == 3
         assert len(catalog.sources) == 0
 
     def test_deterministic_statement_names(self, project, run_dbt_results):
@@ -112,3 +127,25 @@ class TestStreamingTable(ConfluentFixtures):
             except StatementNotFoundError:
                 pytest.fail(f"Expected Flink statement '{name}' to exist but it was not found")
             assert stmt is not None, f"Statement '{name}' should exist"
+
+    def test_custom_statement_name(self, project, run_dbt_results):
+        """Verify that config(statement_name='...') overrides the default naming.
+
+        my_custom_named_table uses statement_name='my-custom-insert', so
+        its long-running INSERT statement should exist under that name."""
+        adapter = project.adapter
+        expected_name = adapter.get_statement_name(
+            model_name="my_custom_named_table",
+            project_name=self.NAME,
+            statement_name_override="my-custom-insert",
+        )
+
+        with adapter.connection_named("check_custom"):
+            conn = adapter.connections.get_thread_connection()
+            try:
+                stmt = conn.handle.get_statement(expected_name)
+            except StatementNotFoundError:
+                pytest.fail(
+                    f"Expected statement '{expected_name}' from config override, but not found"
+                )
+            assert stmt is not None
