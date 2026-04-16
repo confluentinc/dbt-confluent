@@ -73,4 +73,6 @@ class ConfluentFixtures:
         with project.adapter.connection_named("cleanup"):
             conn = project.adapter.connections.get_thread_connection()
             for statement in conn.handle.list_statements(label=label):
-                conn.handle.delete_statement(statement)
+                # Use the adapter helper which polls until deletion completes,
+                # because deleting RUNNING statements is async.
+                project.adapter.delete_statement(statement.name)

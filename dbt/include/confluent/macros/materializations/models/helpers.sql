@@ -1,3 +1,12 @@
+{% macro delete_statement_if_exists(statement_name) %}
+  {# Delete an existing Flink statement by name so we can re-create it.
+     No-op if the statement doesn't exist (confluent-sql handles 404). #}
+  {% if execute %}
+    {% do adapter.delete_statement(statement_name) %}
+  {% endif %}
+{% endmacro %}
+
+
 {% macro skip_or_drop_existing(existing_relation, target_relation, has_select_query=true) %}
   {# If the relation already exists, either drop it (on --full-refresh) or skip.
      Returns true if the caller should skip (relation exists and no full refresh).
@@ -6,6 +15,8 @@
                        false if it's column definitions (streaming_source). #}
   {% if existing_relation %}
     {% if should_full_refresh() %}
+      {{ delete_statement_if_exists(get_statement_name()) }}
+      {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
       {{ drop_relation_if_exists(existing_relation) }}
       {{ return(false) }}
     {% else %}
@@ -21,6 +32,12 @@
       {% endif %}
       {{ return(true) }}
     {% endif %}
+  {% else %}
+    {# No relation exists, but orphaned Flink statements may linger if the table
+       was dropped without deleting its statements (e.g. external cleanup).
+       Delete them so the materialization can create fresh ones. #}
+    {{ delete_statement_if_exists(get_statement_name()) }}
+    {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
   {% endif %}
   {{ return(false) }}
 {% endmacro %}

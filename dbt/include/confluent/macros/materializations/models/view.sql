@@ -4,14 +4,15 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  -- drop the relation if it exists already in the database
+  -- delete existing statement and drop the relation if it exists already
+  {{ delete_statement_if_exists(get_statement_name()) }}
   {{ drop_relation_if_exists(existing_relation) }}
 
   -- `BEGIN` happens here:
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   -- build model
-  {% call statement('main') -%}
+  {% call statement('main', statement_name=get_statement_name()) -%}
     {{ get_create_view_as_sql(target_relation, sql) }}
   {%- endcall %}
 
