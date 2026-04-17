@@ -101,3 +101,14 @@ class TestSanitizeStatementName:
     def test_suffix_preserved(self):
         result = sanitize_statement_name("dbt-myproject-mymodel-ddl")
         assert result == "dbt-myproject-mymodel-ddl"
+
+    def test_truncation_with_illegal_chars_has_single_hash(self):
+        """A name with both illegal chars and overflow should get exactly one
+        trailing hash, not two stacked hashes from sanitization + truncation."""
+        long_name = "dbt-" + "a_b" * 50
+        result = sanitize_statement_name(long_name)
+        # Exactly one 6-char hex segment at the end, prefixed by a single '-'.
+        base, _, tail = result.rpartition("-")
+        assert tail == "e9f598"
+        # The hash should not appear anywhere in the base.
+        assert "e9f598" not in base

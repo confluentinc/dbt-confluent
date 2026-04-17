@@ -178,7 +178,7 @@ class ConfluentAdapter(SQLAdapter):
                 return  # Successfully deleted
 
         raise DbtDatabaseError(
-            f"Statement '{statement_name}' still exists after {max_wait}s. "
+            f"Statement '{statement_name}' still exists after {waited}s. "
             f"Flink may still be stopping the job."
         )
 
