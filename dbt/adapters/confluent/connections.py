@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import confluent_sql
-import httpx
 from confluent_sql import HIDDEN_LABEL, Cursor
 from confluent_sql.exceptions import ComputePoolExhaustedError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
@@ -144,10 +143,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         auto_begin: bool = True,
         bindings: Any | None = None,
         abridge_sql_log: bool = False,
-        retryable_exceptions: tuple[type[Exception], ...] = (
-            ComputePoolExhaustedError,
-            httpx.TimeoutException,
-        ),
+        retryable_exceptions: tuple[type[Exception], ...] = (ComputePoolExhaustedError,),
         retry_limit: int = 5,
         execution_mode: str | None = None,
         hidden: bool = False,
