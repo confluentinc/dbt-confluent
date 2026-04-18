@@ -21,8 +21,8 @@ global_job_config:
       - checkout
       - . vault-setup
       - git submodule update --init
-      - curl -LsSf https://astral.sh/uv/install.sh | sh
-      - uv sync --extra dev --extra test
+      - curl -LsSf https://astral.sh/uv/0.11.7/install.sh | sh
+      - uv sync --extra dev --extra test --frozen
 
 blocks:
   - name: "Lint"
