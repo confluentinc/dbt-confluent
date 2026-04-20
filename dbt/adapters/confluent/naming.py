@@ -26,7 +26,7 @@ def sanitize_statement_name(name: str) -> str:
     original = name
     name = name.lower()
     sanitized = _ILLEGAL_CHARS_RE.sub("-", name)
-    needs_hash = sanitized != name or len(sanitized) > MAX_STATEMENT_NAME_LENGTH
+    replaced_illegal = sanitized != name
 
     # Strip leading hyphens — name must start with alphanumeric
     sanitized = sanitized.lstrip("-")
@@ -35,6 +35,8 @@ def sanitize_statement_name(name: str) -> str:
         raise ValueError(
             f"Statement name must contain at least one alphanumeric character: '{original}'"
         )
+
+    needs_hash = replaced_illegal or len(sanitized) > MAX_STATEMENT_NAME_LENGTH
 
     if needs_hash:
         hash_suffix = hashlib.md5(original.encode()).hexdigest()[:6]
