@@ -384,6 +384,8 @@ class ConfluentAdapter(SQLAdapter):
         expected_columns,
         expected_with: dict[str, str],
         existing_options: dict[str, str],
+        expected_distribution: dict | None = None,
+        existing_distribution: dict | None = None,
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
@@ -391,6 +393,9 @@ class ConfluentAdapter(SQLAdapter):
         expected_columns: agate.Table from INFORMATION_SCHEMA query (via temp table)
         expected_with: config(with={...}) dict
         existing_options: dict from INFORMATION_SCHEMA.TABLE_OPTIONS
+        expected_distribution: config(distributed_by={...}) dict, or None if unset
+        existing_distribution: dict from get_existing_distribution() macro, or
+            None if the table is not bucketed
         """
         # No type normalization: both existing and expected columns come from
         # INFORMATION_SCHEMA.COLUMNS queries, so types are already in Flink's
@@ -427,6 +432,63 @@ class ConfluentAdapter(SQLAdapter):
                     f"existing='{existing_value or '<not set>'}', expected='{str(value)}'.\n"
                     f"Use --full-refresh to recreate the table."
                 )
+
+        self._check_distribution_drift(relation_name, expected_distribution, existing_distribution)
+
+    @staticmethod
+    def _check_distribution_drift(
+        relation_name: str,
+        expected: dict | None,
+        existing: dict | None,
+    ) -> None:
+        """Raise CompilationError if the table's DISTRIBUTED BY clause has drifted.
+
+        Compares the user-specified `distributed_by` config against the existing
+        table's distribution (queried from INFORMATION_SCHEMA). Detects:
+        - distribution added (config set, table not bucketed)
+        - distribution removed (config unset, table bucketed)
+        - column list changes (including reordering — order matters for HASH)
+        - bucket count changes
+        Algorithm is not compared: Flink only supports HASH today.
+        """
+        if expected is None and existing is None:
+            return
+
+        msg = (
+            f"Distribution drift detected for '{relation_name}'.\n"
+            "Use --full-refresh to recreate the table."
+        )
+
+        if expected is None:
+            raise CompilationError(
+                f"{msg}\n"
+                f"Existing distribution: HASH({', '.join(existing['columns'])}) "
+                f"INTO {existing['buckets']} BUCKETS\n"
+                f"Expected: no distribution"
+            )
+        if existing is None:
+            expected_str = f"HASH({', '.join(expected['columns'])})"
+            if expected.get("buckets"):
+                expected_str += f" INTO {expected['buckets']} BUCKETS"
+            raise CompilationError(
+                f"{msg}\nExisting: no distribution\nExpected distribution: {expected_str}"
+            )
+
+        expected_cols = list(expected["columns"])
+        if existing["columns"] != expected_cols:
+            raise CompilationError(
+                f"{msg}\n"
+                f"Existing columns: {existing['columns']}\n"
+                f"Expected columns: {expected_cols}"
+            )
+
+        expected_buckets = expected.get("buckets")
+        if expected_buckets is not None and existing["buckets"] != expected_buckets:
+            raise CompilationError(
+                f"{msg}\n"
+                f"Existing buckets: {existing['buckets']}\n"
+                f"Expected buckets: {expected_buckets}"
+            )
 
     def run_sql_for_tests(self, sql, fetch, conn):
         cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
