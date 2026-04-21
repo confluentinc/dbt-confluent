@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 import agate
 from confluent_sql.exceptions import StatementNotFoundError
+from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
@@ -100,6 +101,18 @@ class ConfluentAdapter(SQLAdapter):
         Returns canonical date func
         """
         return "CURRENT_TIMESTAMP"
+
+    @classmethod
+    def render_model_constraint(cls, constraint: ModelLevelConstraint) -> str | None:
+        # Flink expects `PRIMARY KEY (cols) NOT ENFORCED`, but the base adapter
+        # renders the expression before the column list (`PRIMARY KEY NOT ENFORCED (cols)`),
+        # which Flink rejects with a parse error.
+        if constraint.type == ConstraintType.primary_key:
+            prefix = f"constraint {constraint.name} " if constraint.name else ""
+            column_list = ", ".join(constraint.columns)
+            expression = f" {constraint.expression}" if constraint.expression else ""
+            return f"{prefix}primary key ({column_list}){expression}"
+        return super().render_model_constraint(constraint)
 
     @available.parse(_parse_callback_empty_table)
     def execute(

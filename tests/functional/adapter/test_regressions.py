@@ -117,3 +117,79 @@ class TestWindowFunctionConstraintsInDataType(ConfluentFixtures):
         assert "constraint keyword in the data_type field" in window_table_result.message
         assert "cannot appear in data type definitions" in window_table_result.message
         assert "constraints" in window_table_result.message.lower()
+
+
+# Regression for #31 — model-level (multi-column) PRIMARY KEY constraints used to
+# render as `primary key NOT ENFORCED (col1, col2)`, which Flink rejects.
+# Flink requires `PRIMARY KEY (col1, col2) NOT ENFORCED`.
+PK_SOURCE = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+        'changelog.mode': 'append',
+    }
+) }}
+order_id BIGINT NOT NULL,
+customer_id BIGINT NOT NULL,
+price DECIMAL(10, 2),
+order_time TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
+"""
+
+PK_STREAMING_TABLE = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+) }}
+select order_id, customer_id, price from {{ ref('pk_source') }}
+"""
+
+PK_MODELS_YML = """
+models:
+  - name: pk_streaming_table
+    constraints:
+      - type: primary_key
+        columns: [order_id, customer_id]
+        expression: "NOT ENFORCED"
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: customer_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: price
+        data_type: decimal(10,2)
+"""
+
+
+class TestModelLevelPrimaryKey(ConfluentFixtures):
+    """Regression test for #31: a model-level PRIMARY KEY constraint with
+    multiple columns must render with the column list immediately after
+    `PRIMARY KEY` and the expression (`NOT ENFORCED`) at the end. Otherwise
+    Flink rejects the CREATE TABLE statement with a parse error."""
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "pk_source.sql": PK_SOURCE,
+            "pk_streaming_table.sql": PK_STREAMING_TABLE,
+            "models.yml": PK_MODELS_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        yield
+        project.run_sql("drop table if exists pk_streaming_table")
+        project.run_sql("drop table if exists pk_source")
+
+    def test_model_level_primary_key_renders_correctly(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results), (
+            "dbt run failed — model-level PRIMARY KEY likely rendered in the wrong order"
+        )
