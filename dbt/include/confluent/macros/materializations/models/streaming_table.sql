@@ -32,6 +32,7 @@
     create table {{ target_relation }}
     {{ get_assert_columns_equivalent(sql) }}
     {{ get_table_columns_and_constraints() }}
+    {{ get_distributed_by_clause() }}
     {% if with_options %}
     WITH (
       {%- for key, value in with_options.items() -%}

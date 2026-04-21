@@ -193,3 +193,76 @@ class TestModelLevelPrimaryKey(ConfluentFixtures):
         assert all(r.status == "success" for r in results), (
             "dbt run failed — model-level PRIMARY KEY likely rendered in the wrong order"
         )
+
+
+# Regression for #34 — Flink's `DISTRIBUTED BY HASH(col) INTO N BUCKETS` clause
+# belongs between the column list and the WITH clause. Triage confirmed there
+# is no way to express it through the existing API (a custom model-level
+# constraint renders inside the column parens, which Flink rejects). This test
+# pins the new `distributed_by` config that solves the gap.
+DIST_SOURCE = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+        'changelog.mode': 'append',
+    }
+) }}
+order_id BIGINT NOT NULL,
+price DECIMAL(10, 2),
+order_time TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
+"""
+
+DIST_STREAMING_TABLE = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+    distributed_by={'columns': ['order_id'], 'buckets': 4},
+) }}
+select order_id, price from {{ ref('dist_source') }}
+"""
+
+DIST_MODELS_YML = """
+models:
+  - name: dist_streaming_table
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: price
+        data_type: decimal(10,2)
+"""
+
+
+class TestDistributedByHash(ConfluentFixtures):
+    """Regression for #34: a `distributed_by` config on a streaming_table must
+    emit `DISTRIBUTED BY HASH(...) INTO N BUCKETS` between the column list
+    and the WITH clause, so Flink applies the requested distribution."""
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "dist_source.sql": DIST_SOURCE,
+            "dist_streaming_table.sql": DIST_STREAMING_TABLE,
+            "models.yml": DIST_MODELS_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        yield
+        project.run_sql("drop table if exists dist_streaming_table")
+        project.run_sql("drop table if exists dist_source")
+
+    def test_distributed_by_hash_clause_in_ddl(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results), "dbt run failed"
+
+        ddl_rows = project.run_sql(
+            "SHOW CREATE TABLE dist_streaming_table", fetch="all"
+        )
+        ddl = ddl_rows[0][0]
+        assert "DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS" in ddl, (
+            f"DISTRIBUTED BY clause missing or malformed in created table DDL:\n{ddl}"
+        )
