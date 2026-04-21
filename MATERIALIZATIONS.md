@@ -10,6 +10,32 @@
 | `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | `ephemeral` | Standard dbt CTE-based query fragment, not materialized in Flink. |
 
+## Distributed By
+
+Confluent Flink lets you control how a table's rows are distributed across Kafka partitions with a `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause in the `CREATE TABLE` DDL. The adapter exposes this through a `distributed_by` config on `table`, `streaming_table`, and `streaming_source` models:
+
+```sql
+{{ config(
+    materialized='streaming_table',
+    distributed_by={'columns': ['order_id'], 'buckets': 4}
+) }}
+select order_id, customer_id, price from {{ ref('orders') }}
+```
+
+This renders as:
+
+```sql
+CREATE TABLE `orders_by_id` (...)
+DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS
+WITH (...)
+```
+
+**Fields**:
+- `columns` (required) - list of column names used to compute the hash
+- `buckets` (optional) - number of buckets; omit to let Confluent Cloud choose
+
+Flink only supports the `HASH` distribution strategy today, so the adapter always emits `HASH(...)`. See the [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html#distributed-by-clause) for details.
+
 ## Schema Drift Detection
 
 When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation.
