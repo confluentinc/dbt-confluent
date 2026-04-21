@@ -1,13 +1,34 @@
+{% macro validate_distributed_by_config() %}
+  {# Validate the `distributed_by` config and return the user's dict (or none).
+     Reused by both the renderer and the drift checker so they fail consistently
+     before either reads any field beyond `columns` / `buckets`. #}
+  {%- set dist = config.get('distributed_by') -%}
+  {%- if dist is none -%}
+    {{ return(none) }}
+  {%- endif -%}
+  {%- if dist is not mapping -%}
+    {% do exceptions.raise_compiler_error("'distributed_by' config must be a mapping with a non-empty 'columns' list") %}
+  {%- endif -%}
+  {%- set columns = dist.get('columns') -%}
+  {%- if columns is string or columns is not sequence or not columns -%}
+    {% do exceptions.raise_compiler_error("'distributed_by' config requires a non-empty 'columns' list") %}
+  {%- endif -%}
+  {%- for col in columns -%}
+    {%- if col is not string or not col -%}
+      {% do exceptions.raise_compiler_error("'distributed_by.columns' must contain only non-empty strings") %}
+    {%- endif -%}
+  {%- endfor -%}
+  {{ return(dist) }}
+{% endmacro %}
+
+
 {% macro get_distributed_by_clause() %}
   {# Render `DISTRIBUTED BY HASH(col1, ...) [INTO N BUCKETS]` from the
      `distributed_by` config, or nothing if the config is unset.
      Flink only supports the HASH strategy today. #}
-  {%- set dist = config.get('distributed_by') -%}
-  {%- if dist -%}
+  {%- set dist = validate_distributed_by_config() -%}
+  {%- if dist is not none -%}
     {%- set columns = dist.get('columns') -%}
-    {%- if not columns -%}
-      {% do exceptions.raise_compiler_error("'distributed_by' config requires a non-empty 'columns' list") %}
-    {%- endif -%}
     {%- set buckets = dist.get('buckets') -%}
     DISTRIBUTED BY HASH({% for col in columns %}`{{ col }}`{%- if not loop.last %}, {% endif -%}{% endfor %})
     {%- if buckets %} INTO {{ buckets }} BUCKETS{% endif -%}
@@ -80,12 +101,17 @@
     {% set existing_options = get_existing_table_options(existing_relation) %}
   {% endif %}
 
+  {% set expected_distribution = validate_distributed_by_config() %}
+  {% set existing_distribution = get_existing_distribution(existing_relation) %}
+
   {% do adapter.check_schema_drift(
     existing_relation | string,
     existing_columns,
     expected_columns,
     expected_with,
-    existing_options
+    existing_options,
+    expected_distribution,
+    existing_distribution
   ) %}
 {% endmacro %}
 
@@ -170,6 +196,69 @@
   {% endcall %}
 
   {{ return(expected_columns) }}
+{% endmacro %}
+
+
+{% macro get_existing_distribution(relation) %}
+  {# Fetch the existing DISTRIBUTED BY config for the relation, or none if the
+     table is not bucketed. Confluent only supports the HASH algorithm today,
+     and exposes distribution via INFORMATION_SCHEMA:
+     - TABLES.IS_DISTRIBUTED, DISTRIBUTION_ALGORITHM, DISTRIBUTION_BUCKETS
+     - COLUMNS.DISTRIBUTION_ORDINAL_POSITION (NULL when not part of the key)
+     Returns a dict with `algorithm`, `buckets`, and `columns` (an ordered list
+     of column names by ordinal position), or none if the table has no
+     distribution. #}
+  {% call statement('get_existing_distribution_table', fetch_result=True, hidden=True) %}
+    SELECT
+      IS_DISTRIBUTED,
+      DISTRIBUTION_ALGORITHM,
+      DISTRIBUTION_BUCKETS
+    FROM
+      INFORMATION_SCHEMA.`TABLES`
+    WHERE
+      TABLE_CATALOG_ID = '{{ relation.database }}'
+      AND TABLE_SCHEMA = '{{ relation.schema }}'
+      AND TABLE_NAME = '{{ relation.identifier }}'
+  {% endcall %}
+  {% set algorithm = none %}
+  {% set buckets = none %}
+  {% set is_distributed = false %}
+  {% for row in load_result('get_existing_distribution_table').table %}
+    {% if row['IS_DISTRIBUTED'] == 'YES' %}
+      {% set is_distributed = true %}
+      {% set algorithm = row['DISTRIBUTION_ALGORITHM'] %}
+      {% set buckets = row['DISTRIBUTION_BUCKETS'] %}
+    {% endif %}
+  {% endfor %}
+  {% if not is_distributed %}
+    {{ return(none) }}
+  {% endif %}
+
+  {% call statement('get_existing_distribution_columns', fetch_result=True, hidden=True) %}
+    SELECT
+      COLUMN_NAME,
+      DISTRIBUTION_ORDINAL_POSITION
+    FROM
+      INFORMATION_SCHEMA.`COLUMNS`
+    WHERE
+      TABLE_CATALOG_ID = '{{ relation.database }}'
+      AND TABLE_SCHEMA = '{{ relation.schema }}'
+      AND TABLE_NAME = '{{ relation.identifier }}'
+      AND DISTRIBUTION_ORDINAL_POSITION IS NOT NULL
+  {% endcall %}
+  {% set positioned = {} %}
+  {% for row in load_result('get_existing_distribution_columns').table %}
+    {% do positioned.update({row['DISTRIBUTION_ORDINAL_POSITION']: row['COLUMN_NAME']}) %}
+  {% endfor %}
+  {% set ordered_columns = [] %}
+  {% for pos in positioned.keys() | sort %}
+    {% do ordered_columns.append(positioned[pos]) %}
+  {% endfor %}
+  {{ return({
+    'algorithm': algorithm,
+    'buckets': buckets,
+    'columns': ordered_columns,
+  }) }}
 {% endmacro %}
 
 
