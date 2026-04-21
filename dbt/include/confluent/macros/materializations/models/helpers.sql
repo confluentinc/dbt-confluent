@@ -1,3 +1,20 @@
+{% macro get_distributed_by_clause() %}
+  {# Render `DISTRIBUTED BY HASH(col1, ...) [INTO N BUCKETS]` from the
+     `distributed_by` config, or nothing if the config is unset.
+     Flink only supports the HASH strategy today. #}
+  {%- set dist = config.get('distributed_by') -%}
+  {%- if dist -%}
+    {%- set columns = dist.get('columns') -%}
+    {%- if not columns -%}
+      {% do exceptions.raise_compiler_error("'distributed_by' config requires a non-empty 'columns' list") %}
+    {%- endif -%}
+    {%- set buckets = dist.get('buckets') -%}
+    DISTRIBUTED BY HASH({% for col in columns %}`{{ col }}`{%- if not loop.last %}, {% endif -%}{% endfor %})
+    {%- if buckets %} INTO {{ buckets }} BUCKETS{% endif -%}
+  {%- endif -%}
+{% endmacro %}
+
+
 {% macro delete_statement_if_exists(statement_name) %}
   {# Delete an existing Flink statement by name so we can re-create it.
      No-op if the statement doesn't exist (confluent-sql handles 404). #}
