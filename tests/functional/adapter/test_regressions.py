@@ -259,10 +259,104 @@ class TestDistributedByHash(ConfluentFixtures):
         results = run_dbt(["run"])
         assert all(r.status == "success" for r in results), "dbt run failed"
 
-        ddl_rows = project.run_sql(
-            "SHOW CREATE TABLE dist_streaming_table", fetch="all"
-        )
+        ddl_rows = project.run_sql("SHOW CREATE TABLE dist_streaming_table", fetch="all")
         ddl = ddl_rows[0][0]
         assert "DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS" in ddl, (
+            f"DISTRIBUTED BY clause missing or malformed in created table DDL:\n{ddl}"
+        )
+
+
+# Same regression as #34, but covering the CTAS `table` materialization path.
+DIST_TABLE_MODEL = """
+{{ config(
+    materialized='table',
+    distributed_by={'columns': ['order_id'], 'buckets': 2},
+) }}
+select order_id, price from {{ ref('dist_source') }}
+"""
+
+DIST_TABLE_MODELS_YML = """
+models:
+  - name: dist_table
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: price
+        data_type: decimal(10,2)
+"""
+
+
+class TestDistributedByHashOnTable(ConfluentFixtures):
+    """Regression for #34: a `distributed_by` config on a `table` (CTAS) must
+    emit `DISTRIBUTED BY HASH(...) INTO N BUCKETS` between the column list
+    and the AS clause."""
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "dist_source.sql": DIST_SOURCE,
+            "dist_table.sql": DIST_TABLE_MODEL,
+            "models.yml": DIST_TABLE_MODELS_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        yield
+        project.run_sql("drop table if exists dist_table")
+        project.run_sql("drop table if exists dist_source")
+
+    def test_distributed_by_hash_clause_in_table_ddl(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results), "dbt run failed"
+
+        ddl_rows = project.run_sql("SHOW CREATE TABLE dist_table", fetch="all")
+        ddl = ddl_rows[0][0]
+        assert "DISTRIBUTED BY HASH(`order_id`) INTO 2 BUCKETS" in ddl, (
+            f"DISTRIBUTED BY clause missing or malformed in created table DDL:\n{ddl}"
+        )
+
+
+# Same regression as #34, but covering the `streaming_source` materialization.
+DIST_SOURCE_WITH_DIST = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+        'changelog.mode': 'append',
+    },
+    distributed_by={'columns': ['order_id'], 'buckets': 3},
+) }}
+order_id BIGINT NOT NULL,
+price DECIMAL(10, 2),
+order_time TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
+"""
+
+
+class TestDistributedByHashOnStreamingSource(ConfluentFixtures):
+    """Regression for #34: a `distributed_by` config on a `streaming_source`
+    must emit `DISTRIBUTED BY HASH(...) INTO N BUCKETS` between the column
+    definitions and the WITH clause of the CREATE TABLE."""
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "dist_source_distributed.sql": DIST_SOURCE_WITH_DIST,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        yield
+        project.run_sql("drop table if exists dist_source_distributed")
+
+    def test_distributed_by_hash_clause_in_streaming_source_ddl(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results), "dbt run failed"
+
+        ddl_rows = project.run_sql("SHOW CREATE TABLE dist_source_distributed", fetch="all")
+        ddl = ddl_rows[0][0]
+        assert "DISTRIBUTED BY HASH(`order_id`) INTO 3 BUCKETS" in ddl, (
             f"DISTRIBUTED BY clause missing or malformed in created table DDL:\n{ddl}"
         )

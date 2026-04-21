@@ -71,6 +71,9 @@ select * from {{ ref('source') }}
 - **table, streaming_table**: Compares existing column names and data types with expected columns from the SELECT query. Raises an error if columns are added, removed, renamed, or if data types change. Column reordering is allowed (order doesn't matter for Kafka-backed tables).
 - **streaming_source**: Compares existing column names and data types with the column definitions in the model SQL. Raises an error if columns are added, removed, renamed, or if data types change. Uses a temporary table to infer schema from SQL column definitions.
 
+### Distribution Drift
+Compares existing `DISTRIBUTED BY` configuration (queried from `INFORMATION_SCHEMA.TABLES` and `INFORMATION_SCHEMA.COLUMNS`) against the model's `config(distributed_by={...})`. Raises an error if the column list, column order, or — when explicitly specified — the bucket count differ. Adding or removing the `distributed_by` config on an existing table is also flagged as drift. Bucket counts are only compared when the user specifies `buckets` in the config; otherwise Confluent's default is left untouched.
+
 ### WITH Options Drift
 Compares existing `WITH` options against the model's `config(with={...})`. Raises an error if any configured option value has changed.
 
