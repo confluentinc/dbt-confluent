@@ -32,6 +32,7 @@
                     statement_name=get_statement_name()) -%}
     CREATE TABLE {{ target_relation }}
     ( {{ sql }})
+    {{ get_distributed_by_clause() }}
     WITH (
       'connector' = '{{ connector }}'
       {%- for key, value in with_options.items() -%}
