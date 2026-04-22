@@ -4,6 +4,8 @@ When a table already exists and --full-refresh is not set, the adapter should:
 - Skip re-creation if the table matches the model definition
 - Raise an error if there's column drift (name changes, additions, removals)
 - Raise an error if there's WITH options drift
+- Raise an error if there's distributed_by drift (added, removed, columns or
+  bucket count changed)
 - Allow skipping drift detection with on_schema_drift='ignore'
 """
 
@@ -608,3 +610,115 @@ select order_id, price, order_time from {{ ref('source_for_drift') }}
         assert "Invalid value for on_schema_drift" in my_table_result.message
         assert "append_new_columns" in my_table_result.message
         assert "Expected 'ignore' or 'fail'" in my_table_result.message
+
+
+# ---------------------------------------------------------------------------
+# distributed_by drift tests
+# ---------------------------------------------------------------------------
+
+DIST_TABLE_BASELINE = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+    distributed_by={'columns': ['order_id'], 'buckets': 4},
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+DIST_TABLE_DIFFERENT_COLUMN = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+    distributed_by={'columns': ['price'], 'buckets': 4},
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+DIST_TABLE_DIFFERENT_BUCKETS = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+    distributed_by={'columns': ['order_id'], 'buckets': 8},
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+DIST_TABLE_MODELS_YML = """
+models:
+  - name: dist_drift_table
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+          - type: primary_key
+            expression: "not enforced"
+      - name: price
+        data_type: decimal(10,2)
+      - name: order_time
+        data_type: timestamp(3)
+"""
+
+
+def assert_distribution_drift_error(results, name):
+    """Assert that a specific result failed with a distribution-drift error."""
+    result = get_result_by_name(results, name)
+    assert result is not None, f"{name} not found in results"
+    assert result.status.name == "Error", (
+        f"{name} expected status 'Error' but got '{result.status.name}'"
+    )
+    assert "distribution drift detected" in result.message.lower(), (
+        f"{name} error was not a distribution drift error: {result.message}"
+    )
+
+
+class TestDistributedBySchemaDrift(ConfluentFixtures):
+    """Drift tests for the `distributed_by` config.
+
+    Creates source_for_drift + dist_drift_table once with a baseline
+    distribution, then runs drift checks against the unchanged table.
+    """
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {
+            "models": {"+schema": unique_schema},
+            "seeds": {"+schema": unique_schema},
+        }
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "dist_drift_table.sql": DIST_TABLE_BASELINE,
+            "models.yml": DIST_TABLE_MODELS_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists dist_drift_table")
+
+    def test_second_run_skips(self, project):
+        """Re-running with the same distribution should skip cleanly."""
+        set_model_file(project, relation(project, "dist_drift_table"), DIST_TABLE_BASELINE)
+        results = run_dbt(["run"])
+        assert len(results) == 2
+        for r in results:
+            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
+
+    def test_changed_columns_detected(self, project):
+        """Changing the distribution column list should raise a drift error."""
+        set_model_file(project, relation(project, "dist_drift_table"), DIST_TABLE_DIFFERENT_COLUMN)
+        result = run_dbt(["run"], expect_pass=False)
+        assert_distribution_drift_error(result, "dist_drift_table")
+
+    def test_changed_buckets_detected(self, project):
+        """Changing the bucket count should raise a drift error."""
+        set_model_file(
+            project, relation(project, "dist_drift_table"), DIST_TABLE_DIFFERENT_BUCKETS
+        )
+        result = run_dbt(["run"], expect_pass=False)
+        assert_distribution_drift_error(result, "dist_drift_table")
