@@ -1,1 +1,0 @@
-Follow-up cleanups from PR #49 review: drop redundant trailing hash in oversized sanitized statement names, report actual elapsed time on `delete_statement` timeout, and remove `httpx.TimeoutException` from retryable exceptions.
