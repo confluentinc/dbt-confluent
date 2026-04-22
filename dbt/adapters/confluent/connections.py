@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import confluent_sql
+import httpx
 from confluent_sql import HIDDEN_LABEL, Cursor
 from confluent_sql.exceptions import ComputePoolExhaustedError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
@@ -330,6 +331,14 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 database=credentials.schema,
                 http_user_agent=user_agent,
             )
+            # confluent-sql constructs its httpx.Client without a timeout,
+            # which falls back to httpx's 5s default. INFORMATION_SCHEMA
+            # queries (especially the unified UNION ALL drift catalog) routinely
+            # take longer than that on cold metadata lookups, surfacing as a
+            # "read operation timed out". Override the default until upstream
+            # exposes a configurable timeout.
+            # TODO: Switch to using proper confluent-sql option once implemented
+            handle._client.timeout = httpx.Timeout(60.0)
             connection.state = "open"
             connection.handle = handle
             return connection
