@@ -13,6 +13,7 @@
     {{ get_table_columns_and_constraints() }}
     {%- set sql = get_select_subquery(sql) %}
   {% endif %}
+  {{ get_distributed_by_clause() }}
   as (
     {{ sql }}
   );
