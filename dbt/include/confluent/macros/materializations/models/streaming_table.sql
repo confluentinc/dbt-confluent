@@ -10,6 +10,7 @@
   -- instead of:
   -- config(constraints=[{"type": "custom", "expression": "WITH ('changelog.mode' = 'append')"}])
   {%- set with_options = config.get('with', {}) -%}
+  {% do validate_distributed_by_config() %}
 
   -- Run hooks like in the original materializations, so we don't break
   -- any assumption from the framework
