@@ -443,34 +443,28 @@ class ConfluentAdapter(SQLAdapter):
             existing_columns: {column_name: data_type} for the existing table
             expected_columns: {column_name: data_type} for the temp table
             existing_options: {option_key: option_value}
-            existing_distribution: {algorithm, buckets, columns} or None
+            existing_distribution: {buckets, columns} or None
         """
-        existing_columns: dict[str, str] = {}
-        expected_columns: dict[str, str] = {}
+        columns_by_table: dict[str, dict[str, str]] = {
+            existing_identifier: {},
+            temp_identifier: {},
+        }
         existing_options: dict[str, str] = {}
         is_distributed = False
-        algorithm: str | None = None
         buckets: int | None = None
-        positioned: dict[int, str] = {}
+        positions: list[tuple[int, str]] = []
 
         for row in drift_catalog:
             section = row["section"]
             if section == "COLUMNS":
-                target = (
-                    existing_columns
-                    if row["table_name"] == existing_identifier
-                    else expected_columns
-                    if row["table_name"] == temp_identifier
-                    else None
-                )
+                target = columns_by_table.get(row["table_name"])
                 if target is None:
                     continue
                 target[row["col_name"]] = row["data_type"]
                 if row["table_name"] == existing_identifier and row["dist_position"] is not None:
-                    positioned[row["dist_position"]] = row["col_name"]
+                    positions.append((row["dist_position"], row["col_name"]))
             elif section == "TABLES" and row["is_distributed"] == "YES":
                 is_distributed = True
-                algorithm = row["dist_algorithm"]
                 buckets = row["dist_buckets"]
             elif section == "TABLE_OPTIONS":
                 existing_options[row["option_key"]] = row["option_value"]
@@ -478,11 +472,15 @@ class ConfluentAdapter(SQLAdapter):
         existing_distribution: dict | None = None
         if is_distributed:
             existing_distribution = {
-                "algorithm": algorithm,
                 "buckets": buckets,
-                "columns": [positioned[k] for k in sorted(positioned)],
+                "columns": [col for _, col in sorted(positions)],
             }
-        return existing_columns, expected_columns, existing_options, existing_distribution
+        return (
+            columns_by_table[existing_identifier],
+            columns_by_table[temp_identifier],
+            existing_options,
+            existing_distribution,
+        )
 
     @staticmethod
     def _check_column_drift(

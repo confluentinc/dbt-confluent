@@ -11,6 +11,7 @@
     {% do exceptions.raise_compiler_error(msg) %}
   {% endif %}
   {%- set with_options = config.get('with', {}) -%}
+  {% do validate_distributed_by_config() %}
 
   -- Run hooks like in the original materializations, so we don't
   -- break any assumption made by the framework.

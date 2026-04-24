@@ -1,32 +1,30 @@
 {% macro validate_distributed_by_config() %}
-  {# Validate the `distributed_by` config and return the user's dict (or none).
-     Reused by both the renderer and the drift checker so they fail consistently
-     before either reads any field beyond `columns` / `buckets`. #}
+  {# Raise a compiler error if the `distributed_by` config is malformed.
+     Called once per materialization run so downstream consumers
+     (`get_distributed_by_clause`, `check_for_schema_drift`) can read the
+     config directly without re-validating. #}
   {%- set dist = config.get('distributed_by') -%}
-  {%- if dist is none -%}
-    {{ return(none) }}
-  {%- endif -%}
-  {%- if dist is not mapping -%}
-    {% do exceptions.raise_compiler_error("'distributed_by' config must be a mapping with a non-empty 'columns' list") %}
-  {%- endif -%}
-  {%- set columns = dist.get('columns') -%}
-  {%- if columns is string or columns is not sequence or not columns -%}
-    {% do exceptions.raise_compiler_error("'distributed_by' config requires a non-empty 'columns' list") %}
+  {%- if dist is none -%}{{ return(none) }}{%- endif -%}
+  {%- set columns = (dist if dist is mapping else {}).get('columns') -%}
+  {%- if not columns or columns is string or columns is not sequence -%}
+    {% do exceptions.raise_compiler_error("'distributed_by' config must be a mapping with a non-empty 'columns' list of column names") %}
   {%- endif -%}
   {%- for col in columns -%}
     {%- if col is not string or not col -%}
       {% do exceptions.raise_compiler_error("'distributed_by.columns' must contain only non-empty strings") %}
     {%- endif -%}
   {%- endfor -%}
-  {{ return(dist) }}
 {% endmacro %}
 
 
 {% macro get_distributed_by_clause() %}
   {# Render `DISTRIBUTED BY HASH(col1, ...) [INTO N BUCKETS]` from the
      `distributed_by` config, or nothing if the config is unset.
-     Flink only supports the HASH strategy today. #}
-  {%- set dist = validate_distributed_by_config() -%}
+     Flink only supports the HASH strategy today.
+     The materialization is responsible for calling
+     `validate_distributed_by_config()` once before render — we trust the
+     config here. #}
+  {%- set dist = config.get('distributed_by') -%}
   {%- if dist is not none -%}
     {%- set columns = dist.get('columns') -%}
     {%- set buckets = dist.get('buckets') -%}
@@ -133,7 +131,7 @@
     temp_relation.identifier,
     load_result('get_drift_catalog').table,
     config.get('with', {}),
-    validate_distributed_by_config()
+    config.get('distributed_by')
   ) %}
 {% endmacro %}
 
@@ -155,7 +153,6 @@
       CAST(NULL AS STRING) AS option_key,
       CAST(NULL AS STRING) AS option_value,
       CAST(NULL AS STRING) AS is_distributed,
-      CAST(NULL AS STRING) AS dist_algorithm,
       CAST(NULL AS INT) AS dist_buckets
     FROM INFORMATION_SCHEMA.`COLUMNS`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
@@ -173,7 +170,6 @@
       CAST(NULL AS STRING) AS option_key,
       CAST(NULL AS STRING) AS option_value,
       IS_DISTRIBUTED AS is_distributed,
-      DISTRIBUTION_ALGORITHM AS dist_algorithm,
       DISTRIBUTION_BUCKETS AS dist_buckets
     FROM INFORMATION_SCHEMA.`TABLES`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
@@ -189,7 +185,6 @@
       OPTION_KEY AS option_key,
       OPTION_VALUE AS option_value,
       CAST(NULL AS STRING) AS is_distributed,
-      CAST(NULL AS STRING) AS dist_algorithm,
       CAST(NULL AS INT) AS dist_buckets
     FROM INFORMATION_SCHEMA.`TABLE_OPTIONS`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
