@@ -126,7 +126,7 @@ class TestCheckDistributionDrift:
         ConfluentAdapter._check_distribution_drift(
             "t",
             expected=None,
-            existing={"algorithm": "HASH", "buckets": 6, "columns": ["id"]},
+            existing={"buckets": 6, "columns": ["id"]},
         )
 
     def test_expected_set_existing_none_drift(self):
@@ -142,7 +142,7 @@ class TestCheckDistributionDrift:
             ConfluentAdapter._check_distribution_drift(
                 "t",
                 expected={"columns": ["id"], "buckets": 4},
-                existing={"algorithm": "HASH", "buckets": 4, "columns": ["other"]},
+                existing={"buckets": 4, "columns": ["other"]},
             )
 
     def test_column_order_drift_detected(self):
@@ -151,7 +151,7 @@ class TestCheckDistributionDrift:
             ConfluentAdapter._check_distribution_drift(
                 "t",
                 expected={"columns": ["a", "b"]},
-                existing={"algorithm": "HASH", "buckets": 4, "columns": ["b", "a"]},
+                existing={"buckets": 4, "columns": ["b", "a"]},
             )
 
     def test_bucket_drift_detected(self):
@@ -159,7 +159,7 @@ class TestCheckDistributionDrift:
             ConfluentAdapter._check_distribution_drift(
                 "t",
                 expected={"columns": ["id"], "buckets": 4},
-                existing={"algorithm": "HASH", "buckets": 6, "columns": ["id"]},
+                existing={"buckets": 6, "columns": ["id"]},
             )
 
     def test_buckets_unset_means_unchecked(self):
@@ -167,14 +167,14 @@ class TestCheckDistributionDrift:
         ConfluentAdapter._check_distribution_drift(
             "t",
             expected={"columns": ["id"]},
-            existing={"algorithm": "HASH", "buckets": 6, "columns": ["id"]},
+            existing={"buckets": 6, "columns": ["id"]},
         )
 
     def test_no_drift(self):
         ConfluentAdapter._check_distribution_drift(
             "t",
             expected={"columns": ["id"], "buckets": 4},
-            existing={"algorithm": "HASH", "buckets": 4, "columns": ["id"]},
+            existing={"buckets": 4, "columns": ["id"]},
         )
 
 
@@ -193,7 +193,6 @@ def _row(
     option_key=None,
     option_value=None,
     is_distributed=None,
-    dist_algorithm=None,
     dist_buckets=None,
 ):
     return (
@@ -205,7 +204,6 @@ def _row(
         option_key,
         option_value,
         is_distributed,
-        dist_algorithm,
         dist_buckets,
     )
 
@@ -219,7 +217,6 @@ _CATALOG_COLUMNS = [
     "option_key",
     "option_value",
     "is_distributed",
-    "dist_algorithm",
     "dist_buckets",
 ]
 
@@ -234,7 +231,6 @@ _CATALOG_TYPES = [
     agate.Text(),  # option_key
     agate.Text(),  # option_value
     agate.Text(),  # is_distributed
-    agate.Text(),  # dist_algorithm
     agate.Number(),  # dist_buckets
 ]
 
@@ -294,7 +290,6 @@ class TestPartitionDriftCatalog:
                     section="TABLES",
                     table_name="existing",
                     is_distributed="YES",
-                    dist_algorithm="HASH",
                     dist_buckets=4,
                 ),
             ]
@@ -303,7 +298,7 @@ class TestPartitionDriftCatalog:
             catalog, "existing", "temp"
         )
         # Ordering by DISTRIBUTION_ORDINAL_POSITION: b (pos=1), then a (pos=2)
-        assert distribution == {"algorithm": "HASH", "buckets": 4, "columns": ["b", "a"]}
+        assert distribution == {"buckets": 4, "columns": ["b", "a"]}
 
     def test_no_distribution_when_is_distributed_no(self):
         catalog = _make_catalog(
@@ -312,7 +307,6 @@ class TestPartitionDriftCatalog:
                     section="TABLES",
                     table_name="existing",
                     is_distributed="NO",
-                    dist_algorithm=None,
                     dist_buckets=None,
                 ),
             ]
