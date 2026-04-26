@@ -380,27 +380,90 @@ class ConfluentAdapter(SQLAdapter):
     def check_schema_drift(
         self,
         relation_name: str,
-        existing_columns,
-        expected_columns,
+        existing_identifier: str,
+        temp_identifier: str,
+        drift_catalog,
         expected_with: dict[str, str],
-        existing_options: dict[str, str],
+        expected_distribution: dict | None = None,
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
-        existing_columns: agate.Table from INFORMATION_SCHEMA query
-        expected_columns: agate.Table from INFORMATION_SCHEMA query (via temp table)
-        expected_with: config(with={...}) dict
-        existing_options: dict from INFORMATION_SCHEMA.TABLE_OPTIONS
+        drift_catalog is the agate.Table returned by `get_drift_catalog`: a
+        sparse UNION ALL with a `section` discriminator (COLUMNS, TABLES,
+        TABLE_OPTIONS) and a `table_name` discriminator that distinguishes the
+        existing relation from the temp relation in the COLUMNS section.
+        Splitting it client-side trades one round-trip for a bit of Python.
         """
-        # No type normalization: both existing and expected columns come from
-        # INFORMATION_SCHEMA.COLUMNS queries, so types are already in Flink's
-        # canonical form.
-        existing_map = {col["column_name"]: col["data_type"] for col in existing_columns}
-        expected_map = {col["column_name"]: col["data_type"] for col in expected_columns}
+        existing_columns, expected_columns, existing_options, existing_distribution = (
+            self._partition_drift_catalog(drift_catalog, existing_identifier, temp_identifier)
+        )
+        self._check_column_drift(relation_name, existing_columns, expected_columns)
+        self._check_options_drift(relation_name, expected_with, existing_options)
+        self._check_distribution_drift(relation_name, expected_distribution, existing_distribution)
 
+    @staticmethod
+    def _partition_drift_catalog(
+        drift_catalog,
+        existing_identifier: str,
+        temp_identifier: str,
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict | None]:
+        """Split the unified UNION ALL result into per-concern structures.
+
+        Returns:
+            existing_columns: {column_name: data_type} for the existing table
+            expected_columns: {column_name: data_type} for the temp table
+            existing_options: {option_key: option_value}
+            existing_distribution: {algorithm, buckets, columns} or None
+        """
+        existing_columns: dict[str, str] = {}
+        expected_columns: dict[str, str] = {}
+        existing_options: dict[str, str] = {}
+        is_distributed = False
+        algorithm: str | None = None
+        buckets: int | None = None
+        positioned: dict[int, str] = {}
+
+        for row in drift_catalog:
+            section = row["section"]
+            if section == "COLUMNS":
+                target = (
+                    existing_columns
+                    if row["table_name"] == existing_identifier
+                    else expected_columns
+                    if row["table_name"] == temp_identifier
+                    else None
+                )
+                if target is None:
+                    continue
+                target[row["col_name"]] = row["data_type"]
+                if row["table_name"] == existing_identifier and row["dist_position"] is not None:
+                    positioned[row["dist_position"]] = row["col_name"]
+            elif section == "TABLES" and row["is_distributed"] == "YES":
+                is_distributed = True
+                algorithm = row["dist_algorithm"]
+                buckets = row["dist_buckets"]
+            elif section == "TABLE_OPTIONS":
+                existing_options[row["option_key"]] = row["option_value"]
+
+        existing_distribution: dict | None = None
+        if is_distributed:
+            existing_distribution = {
+                "algorithm": algorithm,
+                "buckets": buckets,
+                "columns": [positioned[k] for k in sorted(positioned)],
+            }
+        return existing_columns, expected_columns, existing_options, existing_distribution
+
+    @staticmethod
+    def _check_column_drift(
+        relation_name: str,
+        existing_map: dict[str, str],
+        expected_map: dict[str, str],
+    ) -> None:
+        # No type normalization: both maps come from INFORMATION_SCHEMA.COLUMNS,
+        # so types are already in Flink's canonical form.
         existing_names = sorted(existing_map)
         expected_names = sorted(expected_map)
-
         if existing_names != expected_names:
             raise CompilationError(
                 f"Schema drift detected for '{relation_name}'.\n"
@@ -408,16 +471,21 @@ class ConfluentAdapter(SQLAdapter):
                 f"Expected columns: {expected_names}\n"
                 f"Use --full-refresh to recreate the table."
             )
-
-        for col_name in expected_map:
-            if existing_map[col_name] != expected_map[col_name]:
+        for col_name, expected_type in expected_map.items():
+            if existing_map[col_name] != expected_type:
                 raise CompilationError(
                     f"Schema drift detected for '{relation_name}'.\n"
                     f"Column '{col_name}' type mismatch: "
-                    f"existing='{existing_map[col_name]}', expected='{expected_map[col_name]}'.\n"
+                    f"existing='{existing_map[col_name]}', expected='{expected_type}'.\n"
                     f"Use --full-refresh to recreate the table."
                 )
 
+    @staticmethod
+    def _check_options_drift(
+        relation_name: str,
+        expected_with: dict[str, str],
+        existing_options: dict[str, str],
+    ) -> None:
         for key, value in expected_with.items():
             existing_value = existing_options.get(key)
             if existing_value != str(value):
@@ -427,6 +495,54 @@ class ConfluentAdapter(SQLAdapter):
                     f"existing='{existing_value or '<not set>'}', expected='{str(value)}'.\n"
                     f"Use --full-refresh to recreate the table."
                 )
+
+    @staticmethod
+    def _check_distribution_drift(
+        relation_name: str,
+        expected: dict | None,
+        existing: dict | None,
+    ) -> None:
+        """Raise CompilationError if the user-requested DISTRIBUTED BY has drifted.
+
+        Confluent assigns a default distribution to every Kafka-backed table
+        (typically derived from the primary key), and INFORMATION_SCHEMA does
+        not distinguish user-specified from auto-assigned distribution.  We
+        therefore mirror the WITH-options check: only verify what the user
+        explicitly requested via `config(distributed_by=...)`.  Detects column
+        and bucket-count mismatches when set; cannot detect removal because
+        the auto-assigned default would falsely trigger every run.
+        """
+        if expected is None:
+            return
+
+        msg = (
+            f"Distribution drift detected for '{relation_name}'.\n"
+            "Use --full-refresh to recreate the table."
+        )
+
+        if existing is None:
+            expected_str = f"HASH({', '.join(expected['columns'])})"
+            if expected.get("buckets"):
+                expected_str += f" INTO {expected['buckets']} BUCKETS"
+            raise CompilationError(
+                f"{msg}\nExisting: no distribution\nExpected distribution: {expected_str}"
+            )
+
+        expected_cols = list(expected["columns"])
+        if existing["columns"] != expected_cols:
+            raise CompilationError(
+                f"{msg}\n"
+                f"Existing columns: {existing['columns']}\n"
+                f"Expected columns: {expected_cols}"
+            )
+
+        expected_buckets = expected.get("buckets")
+        if expected_buckets is not None and existing["buckets"] != expected_buckets:
+            raise CompilationError(
+                f"{msg}\n"
+                f"Existing buckets: {existing['buckets']}\n"
+                f"Expected buckets: {expected_buckets}"
+            )
 
     def run_sql_for_tests(self, sql, fetch, conn):
         cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
