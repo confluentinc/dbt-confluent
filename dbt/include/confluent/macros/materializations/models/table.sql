@@ -1,6 +1,7 @@
 {% materialization table, adapter='confluent' %}
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type='table') %}
+  {% do validate_distributed_by_config() %}
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 

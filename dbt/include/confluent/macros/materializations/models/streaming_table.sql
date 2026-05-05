@@ -10,6 +10,7 @@
   -- instead of:
   -- config(constraints=[{"type": "custom", "expression": "WITH ('changelog.mode' = 'append')"}])
   {%- set with_options = config.get('with', {}) -%}
+  {% do validate_distributed_by_config() %}
 
   -- Run hooks like in the original materializations, so we don't break
   -- any assumption from the framework
@@ -32,6 +33,7 @@
     create table {{ target_relation }}
     {{ get_assert_columns_equivalent(sql) }}
     {{ get_table_columns_and_constraints() }}
+    {{ get_distributed_by_clause() }}
     {% if with_options %}
     WITH (
       {%- for key, value in with_options.items() -%}
