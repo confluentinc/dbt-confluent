@@ -129,9 +129,8 @@
   {% endcall %}
 
   {% do adapter.check_schema_drift(
-    existing_relation | string,
-    existing_relation.identifier,
-    temp_relation.identifier,
+    existing_relation,
+    temp_relation,
     load_result('get_drift_catalog').table,
     config.get('with', {}),
     config.get('distributed_by')
