@@ -15,7 +15,7 @@ import agate
 import pytest
 from dbt_common.exceptions import CompilationError
 
-from dbt.adapters.confluent.impl import ConfluentAdapter
+from dbt.adapters.confluent.impl import ConfluentAdapter, ConfluentRelation
 
 # ---------------------------------------------------------------------------
 # _check_column_drift
@@ -369,3 +369,135 @@ class TestPartitionDriftCatalog:
         )
         _, _, options, _ = ConfluentAdapter._partition_drift_catalog(catalog, "existing", "temp")
         assert options == {"changelog.mode": "upsert", "connector": "faker"}
+
+
+# ---------------------------------------------------------------------------
+# check_schema_drift (orchestrator)
+# ---------------------------------------------------------------------------
+
+
+def _relation(identifier):
+    return ConfluentRelation.create(
+        database="env-1", schema="cluster-a", identifier=identifier, type="table"
+    )
+
+
+class TestCheckSchemaDriftOrchestrator:
+    """Smoke tests for the public orchestrator. The per-concern helpers are
+    exhaustively tested above; here we confirm only that the orchestrator
+    accepts Relation objects, partitions the catalog, and dispatches to the
+    helpers in the documented order (columns → options → distribution)."""
+
+    def _full_drift_catalog(self):
+        """Catalog where every concern has drifted simultaneously."""
+        return _make_catalog(
+            [
+                # Existing table: id BIGINT, distributed by id, 4 buckets, mode=upsert
+                _row(
+                    section="COLUMNS",
+                    table_name="existing",
+                    col_name="id",
+                    data_type="BIGINT",
+                    dist_position=1,
+                ),
+                _row(
+                    section="TABLES",
+                    table_name="existing",
+                    is_distributed="YES",
+                    dist_buckets=4,
+                ),
+                _row(
+                    section="TABLE_OPTIONS",
+                    table_name="existing",
+                    option_key="changelog.mode",
+                    option_value="upsert",
+                ),
+                # Temp (expected) table: id BIGINT + extra STRING — column drift
+                _row(
+                    section="COLUMNS",
+                    table_name="temp",
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name="temp",
+                    col_name="extra",
+                    data_type="STRING",
+                ),
+            ]
+        )
+
+    def test_column_drift_fires_first(self):
+        """With column + options + distribution all drifted, the column check
+        (called first) raises and the relation's display name is in the message."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)  # bypass __init__
+        existing = _relation("my_table")
+        temp = _relation("__dbt_tmp_schema_check_my_table_abc")
+        with pytest.raises(CompilationError, match=r"drift detected for '.*my_table.*'"):
+            adapter.check_schema_drift(
+                existing,
+                temp,
+                self._full_drift_catalog(),
+                expected_with={"changelog.mode": "append"},
+                expected_distribution={"columns": ["other"], "buckets": 8},
+            )
+
+    def test_options_drift_fires_when_columns_match(self):
+        """When columns match but options drift, the options check fires."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name="existing",
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name="temp",
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="TABLE_OPTIONS",
+                    table_name="existing",
+                    option_key="changelog.mode",
+                    option_value="upsert",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError, match="options drift detected"):
+            adapter.check_schema_drift(
+                _relation("my_table"),
+                _relation("__dbt_tmp_schema_check_my_table_abc"),
+                catalog,
+                expected_with={"changelog.mode": "append"},
+            )
+
+    def test_no_drift_returns_silently(self):
+        """When nothing has drifted the orchestrator returns without raising."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name="existing",
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name="temp",
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation("my_table"),
+            _relation("__dbt_tmp_schema_check_my_table_abc"),
+            catalog,
+            expected_with={},
+        )

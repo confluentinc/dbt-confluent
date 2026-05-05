@@ -113,6 +113,22 @@ select
 from {{ ref('source_for_drift') }}
 """
 
+STREAMING_TABLE_MODEL_REMOVED_COLUMN = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+) }}
+select order_id, price from {{ ref('source_for_drift') }}
+"""
+
+STREAMING_TABLE_MODEL_RENAMED_COLUMN = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+) }}
+select order_id as id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
 STREAMING_TABLE_MODELS_YML = """
 models:
   - name: my_streaming_table
@@ -396,6 +412,26 @@ class TestStreamingTableSchemaDrift(ConfluentFixtures):
         """Changing column data types should raise an error without --full-refresh."""
         set_model_file(
             project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_TYPE_CHANGE
+        )
+        result = run_dbt(["run"], expect_pass=False)
+        assert_drift_error(result, "my_streaming_table")
+
+    def test_removed_and_renamed_columns_detected(self, project):
+        """Removing or renaming a column both raise drift errors. Bundled
+        because each variant takes the same path through the drift check
+        and a separate test would double the (slow) class fixture cost."""
+        set_model_file(
+            project,
+            relation(project, "my_streaming_table"),
+            STREAMING_TABLE_MODEL_REMOVED_COLUMN,
+        )
+        result = run_dbt(["run"], expect_pass=False)
+        assert_drift_error(result, "my_streaming_table")
+
+        set_model_file(
+            project,
+            relation(project, "my_streaming_table"),
+            STREAMING_TABLE_MODEL_RENAMED_COLUMN,
         )
         result = run_dbt(["run"], expect_pass=False)
         assert_drift_error(result, "my_streaming_table")
