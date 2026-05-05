@@ -288,6 +288,42 @@ DIST_INVALID_BACKTICK_IN_NAME = """
 select order_id, price from {{ ref('dist_source') }}
 """
 
+DIST_INVALID_BUCKETS_NEGATIVE = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+    distributed_by={'columns': ['order_id'], 'buckets': -1},
+) }}
+select order_id, price from {{ ref('dist_source') }}
+"""
+
+DIST_INVALID_BUCKETS_FLOAT = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+    distributed_by={'columns': ['order_id'], 'buckets': 1.5},
+) }}
+select order_id, price from {{ ref('dist_source') }}
+"""
+
+DIST_INVALID_BUCKETS_STRING = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+    distributed_by={'columns': ['order_id'], 'buckets': 'four'},
+) }}
+select order_id, price from {{ ref('dist_source') }}
+"""
+
+DIST_INVALID_UNKNOWN_KEY = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+    distributed_by={'columns': ['order_id'], 'strategy': 'range'},
+) }}
+select order_id, price from {{ ref('dist_source') }}
+"""
+
 
 class TestDistributedByHash(ConfluentFixtures):
     """Regression for #34: a `distributed_by` config on a streaming_table must
@@ -339,6 +375,10 @@ class TestDistributedByHash(ConfluentFixtures):
             (DIST_INVALID_STRING_COLUMNS, "non-empty 'columns' list"),
             (DIST_INVALID_NON_STRING_ENTRY, "non-empty strings"),
             (DIST_INVALID_BACKTICK_IN_NAME, "backtick"),
+            (DIST_INVALID_BUCKETS_NEGATIVE, "must be a positive integer"),
+            (DIST_INVALID_BUCKETS_FLOAT, "must be a positive integer"),
+            (DIST_INVALID_BUCKETS_STRING, "must be a positive integer"),
+            (DIST_INVALID_UNKNOWN_KEY, "unknown key 'strategy'"),
         ]
         try:
             for model_sql, expected_msg in cases:

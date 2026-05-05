@@ -17,6 +17,21 @@
       {% do exceptions.raise_compiler_error("'distributed_by.columns' must not contain backtick characters; got: " ~ col) %}
     {%- endif -%}
   {%- endfor -%}
+  {# Reject anything other than a positive integer for `buckets`. Excludes
+     booleans explicitly because `True is integer` is True in Jinja. #}
+  {%- set buckets = dist.get('buckets') -%}
+  {%- if buckets is not none -%}
+    {%- if buckets is boolean or buckets is not integer or buckets <= 0 -%}
+      {% do exceptions.raise_compiler_error("'distributed_by.buckets' must be a positive integer; got: " ~ buckets) %}
+    {%- endif -%}
+  {%- endif -%}
+  {# Reject unknown keys to surface typos like `'strategy': 'range'`. If we
+     ever add another field, update this list and the validator together. #}
+  {%- for key in dist.keys() -%}
+    {%- if key not in ['columns', 'buckets'] -%}
+      {% do exceptions.raise_compiler_error("'distributed_by' has unknown key '" ~ key ~ "'. Allowed keys: 'columns', 'buckets'") %}
+    {%- endif -%}
+  {%- endfor -%}
 {% endmacro %}
 
 

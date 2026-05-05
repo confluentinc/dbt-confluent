@@ -4,7 +4,9 @@ The public `check_schema_drift` is a thin orchestrator over four helpers:
 - `_partition_drift_catalog` splits the unified UNION ALL agate.Table into
   per-concern dicts.
 - `_check_column_drift`, `_check_options_drift`, `_check_distribution_drift`
-  raise CompilationError when their concern has drifted.
+  return a list of one-line violation strings (empty list = no drift). The
+  orchestrator collects them all and raises a single CompilationError so the
+  user sees every drift in one run instead of fixing them one at a time.
 
 We test the helpers directly rather than fabricating a unified catalog for
 every case — the orchestrator is small enough that a couple of partition
@@ -26,36 +28,51 @@ class TestCheckColumnDrift:
     def test_no_drift(self):
         existing = {"id": "BIGINT", "value": "STRING"}
         expected = {"id": "BIGINT", "value": "STRING"}
-        ConfluentAdapter._check_column_drift("t", existing, expected)
+        assert ConfluentAdapter._check_column_drift(existing, expected) == []
 
     def test_extra_column_detected(self):
         existing = {"id": "BIGINT"}
         expected = {"id": "BIGINT", "extra": "STRING"}
-        with pytest.raises(CompilationError, match="drift detected"):
-            ConfluentAdapter._check_column_drift("t", existing, expected)
+        assert ConfluentAdapter._check_column_drift(existing, expected) == [
+            "column added: 'extra'"
+        ]
 
     def test_removed_column_detected(self):
         existing = {"id": "BIGINT", "value": "STRING"}
         expected = {"id": "BIGINT"}
-        with pytest.raises(CompilationError, match="drift detected"):
-            ConfluentAdapter._check_column_drift("t", existing, expected)
+        assert ConfluentAdapter._check_column_drift(existing, expected) == [
+            "column removed: 'value'"
+        ]
 
     def test_renamed_column_detected(self):
+        """Rename surfaces as one removal + one addition."""
         existing = {"id": "BIGINT", "value": "STRING"}
         expected = {"id": "BIGINT", "name": "STRING"}
-        with pytest.raises(CompilationError, match="drift detected"):
-            ConfluentAdapter._check_column_drift("t", existing, expected)
+        assert ConfluentAdapter._check_column_drift(existing, expected) == [
+            "column added: 'name'",
+            "column removed: 'value'",
+        ]
 
     def test_type_change_detected(self):
         existing = {"id": "BIGINT"}
         expected = {"id": "INT"}
-        with pytest.raises(CompilationError, match="type mismatch"):
-            ConfluentAdapter._check_column_drift("t", existing, expected)
+        violations = ConfluentAdapter._check_column_drift(existing, expected)
+        assert violations == ["column type: 'id' existing='BIGINT', expected='INT'"]
+
+    def test_collects_all_type_mismatches(self):
+        """Multiple type changes are reported together, not just the first."""
+        existing = {"a": "BIGINT", "b": "STRING", "c": "DECIMAL(10,2)"}
+        expected = {"a": "INT", "b": "STRING", "c": "DECIMAL(10,4)"}
+        violations = ConfluentAdapter._check_column_drift(existing, expected)
+        assert violations == [
+            "column type: 'a' existing='BIGINT', expected='INT'",
+            "column type: 'c' existing='DECIMAL(10,2)', expected='DECIMAL(10,4)'",
+        ]
 
     def test_column_order_ignored(self):
         existing = {"a": "BIGINT", "b": "STRING"}
         expected = {"b": "STRING", "a": "BIGINT"}
-        ConfluentAdapter._check_column_drift("t", existing, expected)
+        assert ConfluentAdapter._check_column_drift(existing, expected) == []
 
     def test_case_sensitive_names(self):
         """Flink allows distinct columns differing only by case (when backtick-quoted).
@@ -63,8 +80,8 @@ class TestCheckColumnDrift:
         so a case difference is real drift."""
         existing = {"ID": "BIGINT"}
         expected = {"id": "BIGINT"}
-        with pytest.raises(CompilationError, match="drift detected"):
-            ConfluentAdapter._check_column_drift("t", existing, expected)
+        violations = ConfluentAdapter._check_column_drift(existing, expected)
+        assert violations == ["column added: 'id'", "column removed: 'ID'"]
 
 
 # ---------------------------------------------------------------------------
@@ -74,55 +91,70 @@ class TestCheckColumnDrift:
 
 class TestCheckOptionsDrift:
     def test_options_drift_detected(self):
-        with pytest.raises(CompilationError, match="drift detected"):
-            ConfluentAdapter._check_options_drift(
-                "t",
-                expected_with={"changelog.mode": "append"},
-                existing_options={"changelog.mode": "upsert"},
-            )
+        violations = ConfluentAdapter._check_options_drift(
+            expected_with={"changelog.mode": "append"},
+            existing_options={"changelog.mode": "upsert"},
+        )
+        assert violations == ["option: 'changelog.mode' existing='upsert', expected='append'"]
 
     def test_options_missing_detected(self):
-        with pytest.raises(CompilationError, match="drift detected"):
-            ConfluentAdapter._check_options_drift(
-                "t",
-                expected_with={"changelog.mode": "append"},
-                existing_options={},
-            )
+        violations = ConfluentAdapter._check_options_drift(
+            expected_with={"changelog.mode": "append"},
+            existing_options={},
+        )
+        assert violations == ["option: 'changelog.mode' existing='<not set>', expected='append'"]
 
     def test_extra_existing_options_allowed(self):
         """Extra options in the existing table (e.g. connector defaults) are fine."""
-        ConfluentAdapter._check_options_drift(
-            "t",
-            expected_with={"changelog.mode": "upsert"},
-            existing_options={"changelog.mode": "upsert", "connector": "faker"},
+        assert (
+            ConfluentAdapter._check_options_drift(
+                expected_with={"changelog.mode": "upsert"},
+                existing_options={"changelog.mode": "upsert", "connector": "faker"},
+            )
+            == []
         )
 
     def test_no_options_check_when_empty(self):
-        ConfluentAdapter._check_options_drift(
-            "t",
-            expected_with={},
-            existing_options={"anything": "here"},
+        assert (
+            ConfluentAdapter._check_options_drift(
+                expected_with={},
+                existing_options={"anything": "here"},
+            )
+            == []
         )
 
     def test_options_non_string_value_coerced(self):
         """Config values (int, bool) are coerced to str before comparing with I_S strings."""
         # No drift: int 1 should match string "1"
-        ConfluentAdapter._check_options_drift(
-            "t",
-            expected_with={"rows-per-second": 1},
-            existing_options={"rows-per-second": "1"},
+        assert (
+            ConfluentAdapter._check_options_drift(
+                expected_with={"rows-per-second": 1},
+                existing_options={"rows-per-second": "1"},
+            )
+            == []
         )
 
     def test_empty_string_existing_not_misreported(self):
-        """An empty-string existing value must be shown as '' in the error,
+        """An empty-string existing value must be shown as '' in the violation,
         not as <not set> (which would falsely imply the option is missing)."""
-        with pytest.raises(CompilationError, match=r"existing=''") as excinfo:
-            ConfluentAdapter._check_options_drift(
-                "t",
-                expected_with={"changelog.mode": "append"},
-                existing_options={"changelog.mode": ""},
-            )
-        assert "<not set>" not in str(excinfo.value)
+        violations = ConfluentAdapter._check_options_drift(
+            expected_with={"changelog.mode": "append"},
+            existing_options={"changelog.mode": ""},
+        )
+        assert violations == ["option: 'changelog.mode' existing='', expected='append'"]
+
+    def test_collects_all_drifted_options(self):
+        """Multiple drifted options are reported together."""
+        violations = ConfluentAdapter._check_options_drift(
+            expected_with={"changelog.mode": "append", "scan.startup.mode": "earliest"},
+            existing_options={"changelog.mode": "upsert", "scan.startup.mode": "latest"},
+        )
+        assert sorted(violations) == sorted(
+            [
+                "option: 'changelog.mode' existing='upsert', expected='append'",
+                "option: 'scan.startup.mode' existing='latest', expected='earliest'",
+            ]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -134,58 +166,72 @@ class TestCheckDistributionDrift:
     def test_unset_expected_skips_check(self):
         """Confluent assigns a default distribution to most tables, so we only
         verify what the user explicitly requested (mirrors WITH options)."""
-        ConfluentAdapter._check_distribution_drift(
-            "t",
-            expected=None,
-            existing={"buckets": 6, "columns": ["id"]},
+        assert (
+            ConfluentAdapter._check_distribution_drift(
+                expected=None,
+                existing={"buckets": 6, "columns": ["id"]},
+            )
+            == []
         )
 
     def test_expected_set_existing_none_drift(self):
-        with pytest.raises(CompilationError, match="(?i)distribution drift detected"):
-            ConfluentAdapter._check_distribution_drift(
-                "t",
-                expected={"columns": ["id"], "buckets": 4},
-                existing=None,
-            )
+        violations = ConfluentAdapter._check_distribution_drift(
+            expected={"columns": ["id"], "buckets": 4},
+            existing=None,
+        )
+        assert violations == [
+            "distribution: existing=<none>, expected={'columns': ['id'], 'buckets': 4}"
+        ]
 
     def test_column_drift_detected(self):
-        with pytest.raises(CompilationError, match="(?i)distribution drift detected"):
-            ConfluentAdapter._check_distribution_drift(
-                "t",
-                expected={"columns": ["id"], "buckets": 4},
-                existing={"buckets": 4, "columns": ["other"]},
-            )
+        violations = ConfluentAdapter._check_distribution_drift(
+            expected={"columns": ["id"], "buckets": 4},
+            existing={"buckets": 4, "columns": ["other"]},
+        )
+        assert violations == ["distribution columns: existing=['other'], expected=['id']"]
 
     def test_column_order_drift_detected(self):
         """HASH(a, b) and HASH(b, a) partition differently — order matters."""
-        with pytest.raises(CompilationError, match="(?i)distribution drift detected"):
-            ConfluentAdapter._check_distribution_drift(
-                "t",
-                expected={"columns": ["a", "b"]},
-                existing={"buckets": 4, "columns": ["b", "a"]},
-            )
+        violations = ConfluentAdapter._check_distribution_drift(
+            expected={"columns": ["a", "b"]},
+            existing={"buckets": 4, "columns": ["b", "a"]},
+        )
+        assert violations == ["distribution columns: existing=['b', 'a'], expected=['a', 'b']"]
 
     def test_bucket_drift_detected(self):
-        with pytest.raises(CompilationError, match="(?i)distribution drift detected"):
-            ConfluentAdapter._check_distribution_drift(
-                "t",
-                expected={"columns": ["id"], "buckets": 4},
-                existing={"buckets": 6, "columns": ["id"]},
-            )
+        violations = ConfluentAdapter._check_distribution_drift(
+            expected={"columns": ["id"], "buckets": 4},
+            existing={"buckets": 6, "columns": ["id"]},
+        )
+        assert violations == ["distribution buckets: existing=6, expected=4"]
 
     def test_buckets_unset_means_unchecked(self):
         """When the user omits `buckets`, Confluent's default is left untouched."""
-        ConfluentAdapter._check_distribution_drift(
-            "t",
-            expected={"columns": ["id"]},
-            existing={"buckets": 6, "columns": ["id"]},
+        assert (
+            ConfluentAdapter._check_distribution_drift(
+                expected={"columns": ["id"]},
+                existing={"buckets": 6, "columns": ["id"]},
+            )
+            == []
         )
 
+    def test_column_and_bucket_drift_collected_together(self):
+        violations = ConfluentAdapter._check_distribution_drift(
+            expected={"columns": ["a"], "buckets": 4},
+            existing={"buckets": 8, "columns": ["b"]},
+        )
+        assert violations == [
+            "distribution columns: existing=['b'], expected=['a']",
+            "distribution buckets: existing=8, expected=4",
+        ]
+
     def test_no_drift(self):
-        ConfluentAdapter._check_distribution_drift(
-            "t",
-            expected={"columns": ["id"], "buckets": 4},
-            existing={"buckets": 4, "columns": ["id"]},
+        assert (
+            ConfluentAdapter._check_distribution_drift(
+                expected={"columns": ["id"], "buckets": 4},
+                existing={"buckets": 4, "columns": ["id"]},
+            )
+            == []
         )
 
 
@@ -385,96 +431,110 @@ def _relation(identifier):
 class TestCheckSchemaDriftOrchestrator:
     """Smoke tests for the public orchestrator. The per-concern helpers are
     exhaustively tested above; here we confirm only that the orchestrator
-    accepts Relation objects, partitions the catalog, and dispatches to the
-    helpers in the documented order (columns → options → distribution)."""
+    accepts Relation objects, partitions the catalog, collects violations
+    from every helper, and raises one error containing all of them."""
 
-    def _full_drift_catalog(self):
-        """Catalog where every concern has drifted simultaneously."""
-        return _make_catalog(
+    # Catalog rows reference tables by their `INFORMATION_SCHEMA` identifier,
+    # so the catalog labels must match the relations' identifiers exactly —
+    # otherwise the COLUMNS rows go unrouted and column drift silently
+    # disappears. We use "my_table" / "tmp_my_table" consistently below.
+    EXISTING_ID = "my_table"
+    TEMP_ID = "tmp_my_table"
+
+    def test_collects_violations_from_every_concern(self):
+        """When column + options + distribution are all drifted, the single
+        raised error must mention every category — no fail-fast."""
+        catalog = _make_catalog(
             [
-                # Existing table: id BIGINT, distributed by id, 4 buckets, mode=upsert
                 _row(
                     section="COLUMNS",
-                    table_name="existing",
+                    table_name=self.EXISTING_ID,
                     col_name="id",
                     data_type="BIGINT",
                     dist_position=1,
                 ),
                 _row(
                     section="TABLES",
-                    table_name="existing",
+                    table_name=self.EXISTING_ID,
                     is_distributed="YES",
                     dist_buckets=4,
                 ),
                 _row(
                     section="TABLE_OPTIONS",
-                    table_name="existing",
+                    table_name=self.EXISTING_ID,
                     option_key="changelog.mode",
                     option_value="upsert",
                 ),
-                # Temp (expected) table: id BIGINT + extra STRING — column drift
                 _row(
                     section="COLUMNS",
-                    table_name="temp",
+                    table_name=self.TEMP_ID,
                     col_name="id",
                     data_type="BIGINT",
                 ),
                 _row(
                     section="COLUMNS",
-                    table_name="temp",
+                    table_name=self.TEMP_ID,
                     col_name="extra",
                     data_type="STRING",
                 ),
             ]
         )
-
-    def test_column_drift_fires_first(self):
-        """With column + options + distribution all drifted, the column check
-        (called first) raises and the relation's display name is in the message."""
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)  # bypass __init__
-        existing = _relation("my_table")
-        temp = _relation("__dbt_tmp_schema_check_my_table_abc")
-        with pytest.raises(CompilationError, match=r"drift detected for '.*my_table.*'"):
+        with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
-                existing,
-                temp,
-                self._full_drift_catalog(),
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                catalog,
                 expected_with={"changelog.mode": "append"},
                 expected_distribution={"columns": ["other"], "buckets": 8},
             )
+        msg = str(excinfo.value)
+        assert "Schema drift detected for" in msg
+        assert self.EXISTING_ID in msg
+        assert "column added: 'extra'" in msg
+        assert "option: 'changelog.mode'" in msg
+        assert "distribution columns:" in msg
+        assert "distribution buckets:" in msg
+        assert "Use --full-refresh" in msg
 
-    def test_options_drift_fires_when_columns_match(self):
-        """When columns match but options drift, the options check fires."""
+    def test_options_only_drift(self):
+        """When only options drift, only options-related violations appear."""
         catalog = _make_catalog(
             [
                 _row(
                     section="COLUMNS",
-                    table_name="existing",
+                    table_name=self.EXISTING_ID,
                     col_name="id",
                     data_type="BIGINT",
                 ),
                 _row(
                     section="COLUMNS",
-                    table_name="temp",
+                    table_name=self.TEMP_ID,
                     col_name="id",
                     data_type="BIGINT",
                 ),
                 _row(
                     section="TABLE_OPTIONS",
-                    table_name="existing",
+                    table_name=self.EXISTING_ID,
                     option_key="changelog.mode",
                     option_value="upsert",
                 ),
             ]
         )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
-        with pytest.raises(CompilationError, match="options drift detected"):
+        with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
-                _relation("my_table"),
-                _relation("__dbt_tmp_schema_check_my_table_abc"),
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
                 catalog,
                 expected_with={"changelog.mode": "append"},
             )
+        msg = str(excinfo.value)
+        assert "option: 'changelog.mode'" in msg
+        # No "column" or "distribution" lines should appear in the violation list
+        violation_section = msg.split("Schema drift detected for", 1)[1]
+        assert "column" not in violation_section.lower()
+        assert "distribution" not in violation_section.lower()
 
     def test_no_drift_returns_silently(self):
         """When nothing has drifted the orchestrator returns without raising."""
@@ -482,13 +542,13 @@ class TestCheckSchemaDriftOrchestrator:
             [
                 _row(
                     section="COLUMNS",
-                    table_name="existing",
+                    table_name=self.EXISTING_ID,
                     col_name="id",
                     data_type="BIGINT",
                 ),
                 _row(
                     section="COLUMNS",
-                    table_name="temp",
+                    table_name=self.TEMP_ID,
                     col_name="id",
                     data_type="BIGINT",
                 ),
@@ -496,8 +556,8 @@ class TestCheckSchemaDriftOrchestrator:
         )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         adapter.check_schema_drift(
-            _relation("my_table"),
-            _relation("__dbt_tmp_schema_check_my_table_abc"),
+            _relation(self.EXISTING_ID),
+            _relation(self.TEMP_ID),
             catalog,
             expected_with={},
         )
