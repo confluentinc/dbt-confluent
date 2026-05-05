@@ -404,8 +404,11 @@ class ConfluentAdapter(SQLAdapter):
         TABLE_OPTIONS) and a `table_name` discriminator that distinguishes the
         existing relation from the temp relation in the COLUMNS section.
         Splitting it client-side trades one round-trip for a bit of Python.
+
+        Each helper returns a list of one-line violation strings; we collect
+        them all and raise a single error so the user sees every drift in one
+        run rather than fixing them one at a time.
         """
-        relation_name = str(existing_relation)
         existing_columns, expected_columns, existing_options, existing_distribution = (
             self._partition_drift_catalog(
                 drift_catalog, existing_relation.identifier, temp_relation.identifier
@@ -422,16 +425,26 @@ class ConfluentAdapter(SQLAdapter):
         if not expected_columns:
             raise DbtDatabaseError(
                 f"Drift check could not introspect the expected schema for "
-                f"'{relation_name}': the temp table created from the model "
+                f"'{existing_relation}': the temp table created from the model "
                 f"definition returned no columns from INFORMATION_SCHEMA. "
                 f"This usually indicates a transient Confluent Cloud metadata "
                 f"propagation lag. Retry with `dbt retry`; if it persists, "
                 f"run with `--full-refresh` or file a bug."
             )
 
-        self._check_column_drift(relation_name, existing_columns, expected_columns)
-        self._check_options_drift(relation_name, expected_with, existing_options)
-        self._check_distribution_drift(relation_name, expected_distribution, existing_distribution)
+        violations: list[str] = []
+        violations.extend(self._check_column_drift(existing_columns, expected_columns))
+        violations.extend(self._check_options_drift(expected_with, existing_options))
+        violations.extend(
+            self._check_distribution_drift(expected_distribution, existing_distribution)
+        )
+        if violations:
+            bullets = "\n".join(f"  - {v}" for v in violations)
+            raise CompilationError(
+                f"Schema drift detected for {existing_relation}:\n"
+                f"{bullets}\n"
+                f"Use --full-refresh to recreate the table."
+            )
 
     @staticmethod
     def _partition_drift_catalog(
@@ -486,94 +499,80 @@ class ConfluentAdapter(SQLAdapter):
 
     @staticmethod
     def _check_column_drift(
-        relation_name: str,
         existing_map: dict[str, str],
         expected_map: dict[str, str],
-    ) -> None:
-        # No type normalization: both maps come from INFORMATION_SCHEMA.COLUMNS,
-        # so types are already in Flink's canonical form.
-        existing_names = sorted(existing_map)
-        expected_names = sorted(expected_map)
-        if existing_names != expected_names:
-            raise CompilationError(
-                f"Schema drift detected for '{relation_name}'.\n"
-                f"Existing columns: {existing_names}\n"
-                f"Expected columns: {expected_names}\n"
-                f"Use --full-refresh to recreate the table."
-            )
-        for col_name, expected_type in expected_map.items():
-            if existing_map[col_name] != expected_type:
-                raise CompilationError(
-                    f"Schema drift detected for '{relation_name}'.\n"
-                    f"Column '{col_name}' type mismatch: "
-                    f"existing='{existing_map[col_name]}', expected='{expected_type}'.\n"
-                    f"Use --full-refresh to recreate the table."
+    ) -> list[str]:
+        """Return one violation string per added/removed/type-changed column.
+
+        Both maps come from INFORMATION_SCHEMA.COLUMNS so types are already
+        in Flink's canonical form — no normalization needed. Sorted output
+        keeps error messages stable across runs.
+        """
+        violations: list[str] = []
+        existing_names = set(existing_map)
+        expected_names = set(expected_map)
+        for added in sorted(expected_names - existing_names):
+            violations.append(f"column added: '{added}'")
+        for removed in sorted(existing_names - expected_names):
+            violations.append(f"column removed: '{removed}'")
+        for col in sorted(existing_names & expected_names):
+            if existing_map[col] != expected_map[col]:
+                violations.append(
+                    f"column type: '{col}' "
+                    f"existing='{existing_map[col]}', expected='{expected_map[col]}'"
                 )
+        return violations
 
     @staticmethod
     def _check_options_drift(
-        relation_name: str,
         expected_with: dict[str, str],
         existing_options: dict[str, str],
-    ) -> None:
+    ) -> list[str]:
+        """Return one violation per WITH option whose value has drifted.
+
+        Coerces the expected value to str before comparing — `INFORMATION_SCHEMA`
+        always returns option values as strings, so an `int 1` in the model
+        config matches the existing `'1'`.
+        """
+        violations: list[str] = []
         for key, value in expected_with.items():
             existing_value = existing_options.get(key)
             if existing_value != str(value):
                 shown = existing_value if existing_value is not None else "<not set>"
-                raise CompilationError(
-                    f"Table options drift detected for '{relation_name}'.\n"
-                    f"Option '{key}': "
-                    f"existing='{shown}', expected='{str(value)}'.\n"
-                    f"Use --full-refresh to recreate the table."
-                )
+                violations.append(f"option: '{key}' existing='{shown}', expected='{str(value)}'")
+        return violations
 
     @staticmethod
     def _check_distribution_drift(
-        relation_name: str,
         expected: dict | None,
         existing: dict | None,
-    ) -> None:
-        """Raise CompilationError if the user-requested DISTRIBUTED BY has drifted.
+    ) -> list[str]:
+        """Return violations for `distributed_by` mismatches.
 
         Confluent assigns a default distribution to every Kafka-backed table
         (typically derived from the primary key), and INFORMATION_SCHEMA does
-        not distinguish user-specified from auto-assigned distribution.  We
+        not distinguish user-specified from auto-assigned distribution. We
         therefore mirror the WITH-options check: only verify what the user
-        explicitly requested via `config(distributed_by=...)`.  Detects column
+        explicitly requested via `config(distributed_by=...)`. Detects column
         and bucket-count mismatches when set; cannot detect removal because
         the auto-assigned default would falsely trigger every run.
         """
         if expected is None:
-            return
-
-        msg = (
-            f"Distribution drift detected for '{relation_name}'.\n"
-            "Use --full-refresh to recreate the table."
-        )
-
+            return []
         if existing is None:
-            expected_str = f"HASH({', '.join(expected['columns'])})"
-            if expected.get("buckets"):
-                expected_str += f" INTO {expected['buckets']} BUCKETS"
-            raise CompilationError(
-                f"{msg}\nExisting: no distribution\nExpected distribution: {expected_str}"
-            )
-
+            return [f"distribution: existing=<none>, expected={expected}"]
+        violations: list[str] = []
         expected_cols = list(expected["columns"])
         if existing["columns"] != expected_cols:
-            raise CompilationError(
-                f"{msg}\n"
-                f"Existing columns: {existing['columns']}\n"
-                f"Expected columns: {expected_cols}"
+            violations.append(
+                f"distribution columns: existing={existing['columns']}, expected={expected_cols}"
             )
-
         expected_buckets = expected.get("buckets")
         if expected_buckets is not None and existing["buckets"] != expected_buckets:
-            raise CompilationError(
-                f"{msg}\n"
-                f"Existing buckets: {existing['buckets']}\n"
-                f"Expected buckets: {expected_buckets}"
+            violations.append(
+                f"distribution buckets: existing={existing['buckets']}, expected={expected_buckets}"
             )
+        return violations
 
     def run_sql_for_tests(self, sql, fetch, conn):
         cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
