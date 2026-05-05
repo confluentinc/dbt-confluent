@@ -34,6 +34,22 @@ WITH (...)
 - `columns` (required) - list of column names used to compute the hash
 - `buckets` (optional) - number of buckets; omit to let Confluent Cloud choose
 
+**Important — column ordering**: Flink requires that the distribution columns appear at the **beginning** of the table's column schema, and in the **same order** as listed in `columns`. The adapter does not validate this (it would require parsing the model SQL) — Flink will reject the `CREATE TABLE` at submission with `Key columns must appear at the beginning of the table schema. Also, DISTRIBUTED BY key names must be in the same order as the key schema columns.`
+
+Practical implication for each materialization:
+- `table` and `streaming_table`: list the distribution columns first in the model's `SELECT`.
+- `streaming_source`: declare the distribution columns first in the column-definition list.
+
+```sql
+-- ❌ Rejected by Flink — `customer_id` is the distribution key but appears second
+{{ config(distributed_by={'columns': ['customer_id']}) }}
+select order_id, customer_id, price from {{ ref('orders') }}
+
+-- ✅ Accepted — `customer_id` is first
+{{ config(distributed_by={'columns': ['customer_id']}) }}
+select customer_id, order_id, price from {{ ref('orders') }}
+```
+
 Flink only supports the `HASH` distribution strategy today, so the adapter always emits `HASH(...)`. See the [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html#distributed-by-clause) for details.
 
 ## Schema Drift Detection

@@ -379,10 +379,9 @@ class ConfluentAdapter(SQLAdapter):
     @available
     def check_schema_drift(
         self,
-        relation_name: str,
-        existing_identifier: str,
-        temp_identifier: str,
-        drift_catalog,
+        existing_relation: ConfluentRelation,
+        temp_relation: ConfluentRelation,
+        drift_catalog: "agate.Table",
         expected_with: dict[str, str],
         expected_distribution: dict | None = None,
     ) -> None:
@@ -394,8 +393,11 @@ class ConfluentAdapter(SQLAdapter):
         existing relation from the temp relation in the COLUMNS section.
         Splitting it client-side trades one round-trip for a bit of Python.
         """
+        relation_name = str(existing_relation)
         existing_columns, expected_columns, existing_options, existing_distribution = (
-            self._partition_drift_catalog(drift_catalog, existing_identifier, temp_identifier)
+            self._partition_drift_catalog(
+                drift_catalog, existing_relation.identifier, temp_relation.identifier
+            )
         )
         self._check_column_drift(relation_name, existing_columns, expected_columns)
         self._check_options_drift(relation_name, expected_with, existing_options)
