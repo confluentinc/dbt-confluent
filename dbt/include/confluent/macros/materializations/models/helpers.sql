@@ -13,6 +13,9 @@
     {%- if col is not string or not col -%}
       {% do exceptions.raise_compiler_error("'distributed_by.columns' must contain only non-empty strings") %}
     {%- endif -%}
+    {%- if '`' in col -%}
+      {% do exceptions.raise_compiler_error("'distributed_by.columns' must not contain backtick characters; got: " ~ col) %}
+    {%- endif -%}
   {%- endfor -%}
 {% endmacro %}
 
@@ -28,7 +31,7 @@
   {%- if dist is not none -%}
     {%- set columns = dist.get('columns') -%}
     {%- set buckets = dist.get('buckets') -%}
-    DISTRIBUTED BY HASH({% for col in columns %}`{{ col }}`{%- if not loop.last %}, {% endif -%}{% endfor %})
+    DISTRIBUTED BY HASH({% for col in columns %}{{ adapter.quote(col) }}{%- if not loop.last %}, {% endif -%}{% endfor %})
     {%- if buckets %} INTO {{ buckets }} BUCKETS{% endif -%}
   {%- endif -%}
 {% endmacro %}
