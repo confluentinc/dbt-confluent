@@ -463,7 +463,7 @@ class ConfluentAdapter(SQLAdapter):
                 target[row["col_name"]] = row["data_type"]
                 if row["table_name"] == existing_identifier and row["dist_position"] is not None:
                     positions.append((row["dist_position"], row["col_name"]))
-            elif section == "TABLES" and row["is_distributed"] == "YES":
+            elif section == "TABLES" and str(row["is_distributed"]).upper() == "YES":
                 is_distributed = True
                 buckets = row["dist_buckets"]
             elif section == "TABLE_OPTIONS":
@@ -517,10 +517,11 @@ class ConfluentAdapter(SQLAdapter):
         for key, value in expected_with.items():
             existing_value = existing_options.get(key)
             if existing_value != str(value):
+                shown = existing_value if existing_value is not None else "<not set>"
                 raise CompilationError(
                     f"Table options drift detected for '{relation_name}'.\n"
                     f"Option '{key}': "
-                    f"existing='{existing_value or '<not set>'}', expected='{str(value)}'.\n"
+                    f"existing='{shown}', expected='{str(value)}'.\n"
                     f"Use --full-refresh to recreate the table."
                 )
 

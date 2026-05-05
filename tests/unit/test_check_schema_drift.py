@@ -113,6 +113,17 @@ class TestCheckOptionsDrift:
             existing_options={"rows-per-second": "1"},
         )
 
+    def test_empty_string_existing_not_misreported(self):
+        """An empty-string existing value must be shown as '' in the error,
+        not as <not set> (which would falsely imply the option is missing)."""
+        with pytest.raises(CompilationError, match=r"existing=''") as excinfo:
+            ConfluentAdapter._check_options_drift(
+                "t",
+                expected_with={"changelog.mode": "append"},
+                existing_options={"changelog.mode": ""},
+            )
+        assert "<not set>" not in str(excinfo.value)
+
 
 # ---------------------------------------------------------------------------
 # _check_distribution_drift
@@ -244,9 +255,7 @@ class TestPartitionDriftCatalog:
         catalog = _make_catalog(
             [
                 _row(section="COLUMNS", table_name="existing", col_name="id", data_type="BIGINT"),
-                _row(
-                    section="COLUMNS", table_name="temp", col_name="id", data_type="BIGINT"
-                ),
+                _row(section="COLUMNS", table_name="temp", col_name="id", data_type="BIGINT"),
                 _row(
                     section="COLUMNS",
                     table_name="temp",
@@ -255,8 +264,8 @@ class TestPartitionDriftCatalog:
                 ),
             ]
         )
-        existing, expected, options, distribution = (
-            ConfluentAdapter._partition_drift_catalog(catalog, "existing", "temp")
+        existing, expected, options, distribution = ConfluentAdapter._partition_drift_catalog(
+            catalog, "existing", "temp"
         )
         assert existing == {"id": "BIGINT"}
         assert expected == {"id": "BIGINT", "extra": "STRING"}
@@ -316,6 +325,31 @@ class TestPartitionDriftCatalog:
         )
         assert distribution is None
 
+    def test_is_distributed_case_insensitive(self):
+        """Defensive: confluent-sql may someday return 'yes' / 'Yes' / True
+        instead of the canonical 'YES'.  Comparison must not silently miss it."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name="existing",
+                    col_name="id",
+                    data_type="BIGINT",
+                    dist_position=1,
+                ),
+                _row(
+                    section="TABLES",
+                    table_name="existing",
+                    is_distributed="yes",
+                    dist_buckets=4,
+                ),
+            ]
+        )
+        _, _, _, distribution = ConfluentAdapter._partition_drift_catalog(
+            catalog, "existing", "temp"
+        )
+        assert distribution == {"buckets": 4, "columns": ["id"]}
+
     def test_collects_table_options(self):
         catalog = _make_catalog(
             [
@@ -333,9 +367,7 @@ class TestPartitionDriftCatalog:
                 ),
             ]
         )
-        _, _, options, _ = ConfluentAdapter._partition_drift_catalog(
-            catalog, "existing", "temp"
-        )
+        _, _, options, _ = ConfluentAdapter._partition_drift_catalog(catalog, "existing", "temp")
         assert options == {"changelog.mode": "upsert", "connector": "faker"}
 
 
