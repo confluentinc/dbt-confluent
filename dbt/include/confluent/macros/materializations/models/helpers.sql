@@ -1,37 +1,9 @@
 {% macro validate_distributed_by_config() %}
-  {# Raise a compiler error if the `distributed_by` config is malformed.
-     Called once per materialization run so downstream consumers
+  {# Delegate to ConfluentAdapter.validate_distributed_by_config (Python).
+     Materializations call this once at the top so downstream consumers
      (`get_distributed_by_clause`, `check_for_schema_drift`) can read the
      config directly without re-validating. #}
-  {%- set dist = config.get('distributed_by') -%}
-  {%- if dist is none -%}{{ return(none) }}{%- endif -%}
-  {%- set columns = (dist if dist is mapping else {}).get('columns') -%}
-  {%- if not columns or columns is string or columns is not sequence -%}
-    {% do exceptions.raise_compiler_error("'distributed_by' config must be a mapping with a non-empty 'columns' list of column names") %}
-  {%- endif -%}
-  {%- for col in columns -%}
-    {%- if col is not string or not col -%}
-      {% do exceptions.raise_compiler_error("'distributed_by.columns' must contain only non-empty strings") %}
-    {%- endif -%}
-    {%- if '`' in col -%}
-      {% do exceptions.raise_compiler_error("'distributed_by.columns' must not contain backtick characters; got: " ~ col) %}
-    {%- endif -%}
-  {%- endfor -%}
-  {# Reject anything other than a positive integer for `buckets`. Excludes
-     booleans explicitly because `True is integer` is True in Jinja. #}
-  {%- set buckets = dist.get('buckets') -%}
-  {%- if buckets is not none -%}
-    {%- if buckets is boolean or buckets is not integer or buckets <= 0 -%}
-      {% do exceptions.raise_compiler_error("'distributed_by.buckets' must be a positive integer; got: " ~ buckets) %}
-    {%- endif -%}
-  {%- endif -%}
-  {# Reject unknown keys to surface typos like `'strategy': 'range'`. If we
-     ever add another field, update this list and the validator together. #}
-  {%- for key in dist.keys() -%}
-    {%- if key not in ['columns', 'buckets'] -%}
-      {% do exceptions.raise_compiler_error("'distributed_by' has unknown key '" ~ key ~ "'. Allowed keys: 'columns', 'buckets'") %}
-    {%- endif -%}
-  {%- endfor -%}
+  {% do adapter.validate_distributed_by_config(config.get('distributed_by')) %}
 {% endmacro %}
 
 
