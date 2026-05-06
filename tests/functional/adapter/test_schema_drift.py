@@ -12,32 +12,13 @@ When a table already exists and --full-refresh is not set, the adapter should:
 import pytest
 
 from dbt.tests.util import run_dbt, set_model_file
+from tests.functional.adapter._helpers import (
+    assert_distribution_drift_error,
+    assert_drift_error,
+    get_result_by_name,
+    relation,
+)
 from tests.functional.adapter.fixtures import ConfluentFixtures
-
-
-def relation(project, name):
-    return project.adapter.Relation.create(identifier=name)
-
-
-def get_result_by_name(results, name):
-    """Extract a specific result by node name from run results."""
-    for result in results:
-        if result.node.name == name:
-            return result
-    return None
-
-
-def assert_drift_error(results, name):
-    """Assert that a specific result failed with a drift detection error."""
-    result = get_result_by_name(results, name)
-    assert result is not None, f"{name} not found in results"
-    assert result.status.name == "Error", (
-        f"{name} expected status 'Error' but got '{result.status.name}'"
-    )
-    assert "drift detected" in result.message.lower(), (
-        f"{name} error was not a drift error: {result.message}"
-    )
-
 
 # -- Table (CTAS) models --
 
@@ -696,28 +677,6 @@ models:
 """
 
 
-def assert_distribution_drift_error(results, name):
-    """Assert that a specific result failed with a distribution-drift error.
-
-    With the new collect-and-raise format the wrapper says "Schema drift
-    detected" once and each violation appears as a bullet line; distribution
-    violations always start with the literal "distribution" prefix
-    ("distribution: ...", "distribution columns: ...", "distribution buckets: ...").
-    """
-    result = get_result_by_name(results, name)
-    assert result is not None, f"{name} not found in results"
-    assert result.status.name == "Error", (
-        f"{name} expected status 'Error' but got '{result.status.name}'"
-    )
-    msg_lower = result.message.lower()
-    assert "schema drift detected" in msg_lower, (
-        f"{name} error was not a schema drift error: {result.message}"
-    )
-    assert "distribution" in msg_lower.split("schema drift detected", 1)[1], (
-        f"{name} schema drift error did not include a distribution violation: {result.message}"
-    )
-
-
 class TestDistributedBySchemaDrift(ConfluentFixtures):
     """Drift tests for the `distributed_by` config.
 
@@ -768,3 +727,250 @@ class TestDistributedBySchemaDrift(ConfluentFixtures):
         )
         result = run_dbt(["run"], expect_pass=False)
         assert_distribution_drift_error(result, "dist_drift_table")
+
+
+# -- CTAS table drift --
+
+DIST_CTAS_BASELINE = """
+{{ config(
+    materialized='table',
+    distributed_by={'columns': ['order_id'], 'buckets': 4},
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+DIST_CTAS_DIFFERENT_COLUMN = """
+{{ config(
+    materialized='table',
+    distributed_by={'columns': ['price'], 'buckets': 4},
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+DIST_CTAS_DIFFERENT_BUCKETS = """
+{{ config(
+    materialized='table',
+    distributed_by={'columns': ['order_id'], 'buckets': 8},
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+
+class TestDistributedByOnTableDrift(ConfluentFixtures):
+    """Drift coverage for `distributed_by` on the `table` (CTAS) materialization.
+
+    The class fixture creates source_for_drift + dist_drift_ctas with the
+    baseline distribution; tests then mutate the model file and assert that
+    the drift check fires. A successful baseline (test_second_run_skips)
+    implicitly proves the DISTRIBUTED BY clause was rendered correctly —
+    otherwise the second run would fire drift.
+    """
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {
+            "models": {"+schema": unique_schema},
+            "seeds": {"+schema": unique_schema},
+        }
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "dist_drift_ctas.sql": DIST_CTAS_BASELINE,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists dist_drift_ctas")
+
+    def test_second_run_skips(self, project):
+        """Re-running with the same distribution should skip cleanly."""
+        set_model_file(project, relation(project, "dist_drift_ctas"), DIST_CTAS_BASELINE)
+        results = run_dbt(["run"])
+        assert len(results) == 2
+        for r in results:
+            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
+
+    def test_changed_columns_detected(self, project):
+        set_model_file(project, relation(project, "dist_drift_ctas"), DIST_CTAS_DIFFERENT_COLUMN)
+        result = run_dbt(["run"], expect_pass=False)
+        assert_distribution_drift_error(result, "dist_drift_ctas")
+
+    def test_changed_buckets_detected(self, project):
+        set_model_file(project, relation(project, "dist_drift_ctas"), DIST_CTAS_DIFFERENT_BUCKETS)
+        result = run_dbt(["run"], expect_pass=False)
+        assert_distribution_drift_error(result, "dist_drift_ctas")
+
+
+# -- Streaming source drift --
+
+DIST_SOURCE_BASELINE = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+        'changelog.mode': 'append',
+    },
+    distributed_by={'columns': ['order_id'], 'buckets': 3},
+) }}
+order_id BIGINT NOT NULL,
+price DECIMAL(10, 2),
+order_time TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
+"""
+
+DIST_SOURCE_DIFFERENT_COLUMN = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+        'changelog.mode': 'append',
+    },
+    distributed_by={'columns': ['price'], 'buckets': 3},
+) }}
+order_id BIGINT NOT NULL,
+price DECIMAL(10, 2),
+order_time TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
+"""
+
+DIST_SOURCE_DIFFERENT_BUCKETS = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+        'changelog.mode': 'append',
+    },
+    distributed_by={'columns': ['order_id'], 'buckets': 5},
+) }}
+order_id BIGINT NOT NULL,
+price DECIMAL(10, 2),
+order_time TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
+"""
+
+
+class TestDistributedByOnStreamingSourceDrift(ConfluentFixtures):
+    """Drift coverage for `distributed_by` on the `streaming_source`
+    materialization. See TestDistributedByOnTableDrift for rationale."""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {
+            "models": {"+schema": unique_schema},
+            "seeds": {"+schema": unique_schema},
+        }
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "dist_drift_source.sql": DIST_SOURCE_BASELINE,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists dist_drift_source")
+
+    def test_second_run_skips(self, project):
+        """Re-running with the same distribution should skip cleanly."""
+        set_model_file(project, relation(project, "dist_drift_source"), DIST_SOURCE_BASELINE)
+        results = run_dbt(["run"])
+        assert len(results) == 1
+        assert results[0].message == "SKIP", (
+            f"{results[0].node.name} was not skipped (message: {results[0].message})"
+        )
+
+    def test_changed_columns_detected(self, project):
+        set_model_file(
+            project, relation(project, "dist_drift_source"), DIST_SOURCE_DIFFERENT_COLUMN
+        )
+        result = run_dbt(["run"], expect_pass=False)
+        assert_distribution_drift_error(result, "dist_drift_source")
+
+    def test_changed_buckets_detected(self, project):
+        set_model_file(
+            project, relation(project, "dist_drift_source"), DIST_SOURCE_DIFFERENT_BUCKETS
+        )
+        result = run_dbt(["run"], expect_pass=False)
+        assert_distribution_drift_error(result, "dist_drift_source")
+
+
+# -- Intentional gap: auto-assigned distribution does not trigger drift --
+
+NO_DIST_BUT_PK_MODEL = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+NO_DIST_BUT_PK_MODELS_YML = """
+models:
+  - name: no_dist_but_pk_table
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+          - type: primary_key
+            expression: "not enforced"
+      - name: price
+        data_type: decimal(10,2)
+      - name: order_time
+        data_type: timestamp(3)
+"""
+
+
+class TestDistributedByDefaultIsNotChecked(ConfluentFixtures):
+    """Locks in the documented intentional gap: when the user does NOT set
+    `distributed_by`, the adapter must NOT compare against the distribution
+    Confluent auto-assigned (typically derived from the primary key). Otherwise
+    every existing PK-bearing model would falsely fire drift on every re-run.
+
+    Setup creates a streaming_table with a PK (so Confluent auto-distributes
+    by `order_id`) but no `distributed_by` config. A second run must skip.
+    """
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {
+            "models": {"+schema": unique_schema},
+            "seeds": {"+schema": unique_schema},
+        }
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "no_dist_but_pk_table.sql": NO_DIST_BUT_PK_MODEL,
+            "models.yml": NO_DIST_BUT_PK_MODELS_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists no_dist_but_pk_table")
+
+    def test_auto_assigned_distribution_does_not_drift(self, project):
+        results = run_dbt(["run"])
+        assert len(results) == 2
+        for r in results:
+            assert r.message == "SKIP", (
+                f"{r.node.name} unexpectedly fired drift on auto-assigned distribution: "
+                f"{r.message}"
+            )

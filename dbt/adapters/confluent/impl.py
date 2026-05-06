@@ -377,6 +377,56 @@ class ConfluentAdapter(SQLAdapter):
         return "__dbt_tmp_schema_check_" + identifier + "_" + invocation_id.replace("-", "")
 
     @available
+    def validate_distributed_by_config(self, dist: object) -> None:
+        """Raise CompilationError if the `distributed_by` config is malformed.
+
+        Called once per materialization run so downstream consumers
+        (`get_distributed_by_clause`, `check_for_schema_drift`) can read the
+        config directly without re-validating.
+
+        Allowed shape: a dict with a non-empty list/tuple of non-empty
+        strings under `columns`, an optional positive int under `buckets`,
+        and no other keys. `bool` is a subclass of `int` in Python, so it's
+        excluded explicitly to keep `True`/`False` from slipping through.
+        """
+        if dist is None:
+            return
+        if not isinstance(dist, dict):
+            raise CompilationError(
+                "'distributed_by' config must be a mapping with a non-empty "
+                "'columns' list of column names"
+            )
+        columns = dist.get("columns")
+        if not columns or isinstance(columns, str) or not isinstance(columns, (list, tuple)):
+            raise CompilationError(
+                "'distributed_by' config must be a mapping with a non-empty "
+                "'columns' list of column names"
+            )
+        for col in columns:
+            if not isinstance(col, str) or not col:
+                raise CompilationError(
+                    "'distributed_by.columns' must contain only non-empty strings"
+                )
+            if "`" in col:
+                raise CompilationError(
+                    f"'distributed_by.columns' must not contain backtick characters; got: {col}"
+                )
+        buckets = dist.get("buckets")
+        if buckets is not None:
+            if isinstance(buckets, bool) or not isinstance(buckets, int) or buckets <= 0:
+                raise CompilationError(
+                    f"'distributed_by.buckets' must be a positive integer; got: {buckets}"
+                )
+        unknown = set(dist.keys()) - {"columns", "buckets"}
+        if unknown:
+            # Sort for stable messages; mention the first to mirror the
+            # previous Jinja behavior of failing on the first unknown key.
+            key = sorted(unknown)[0]
+            raise CompilationError(
+                f"'distributed_by' has unknown key '{key}'. Allowed keys: 'columns', 'buckets'"
+            )
+
+    @available
     def check_schema_drift(
         self,
         existing_relation: ConfluentRelation,
