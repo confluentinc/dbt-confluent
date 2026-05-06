@@ -4,17 +4,66 @@
 
 | Materialization | Description |
 |---|---|
-| `table` | Creates a table via `CREATE TABLE ... AS SELECT` (CTAS). Runs in snapshot mode — the query executes once and completes. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). |
+| `table` | Creates a table via `CREATE TABLE ... AS SELECT` (CTAS). Runs in snapshot mode — the query executes once and completes. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
 | `view` | Drop-and-recreate view. |
-| `streaming_table` | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). |
-| `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
+| `streaming_table` | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
+| `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | `ephemeral` | Standard dbt CTE-based query fragment, not materialized in Flink. |
+
+## Distributed By
+
+Confluent Flink lets you control how a table's rows are distributed across Kafka partitions with a `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause in the `CREATE TABLE` DDL. The adapter exposes this through a `distributed_by` config on `table`, `streaming_table`, and `streaming_source` models:
+
+```sql
+{{ config(
+    materialized='streaming_table',
+    distributed_by={'columns': ['order_id'], 'buckets': 4}
+) }}
+select order_id, customer_id, price from {{ ref('orders') }}
+```
+
+This renders as:
+
+```sql
+CREATE TABLE `orders_by_id` (...)
+DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS
+WITH (...)
+```
+
+**Fields**:
+- `columns` (required) - non-empty list of column names used to compute the hash
+- `buckets` (optional) - positive integer; omit to let Confluent Cloud choose
+
+**Validation**: The adapter validates the config at the start of each materialization run and raises a clear compile error if any of the following hold:
+- `distributed_by` is not a mapping
+- `columns` is missing, empty, a string, or contains non-string / empty entries
+- A column name contains a backtick (Flink identifiers can't escape backticks)
+- `buckets` is set but isn't a positive integer (rejects `0`, negatives, floats, strings, booleans)
+- The mapping has any key other than `columns` or `buckets` (catches typos like `'strategy': 'range'`)
+
+**Important — column ordering**: Flink requires that the distribution columns appear at the **beginning** of the table's column schema, and in the **same order** as listed in `columns`. The adapter does not validate this (it would require parsing the model SQL) — Flink will reject the `CREATE TABLE` at submission with `Key columns must appear at the beginning of the table schema. Also, DISTRIBUTED BY key names must be in the same order as the key schema columns.`
+
+Practical implication for each materialization:
+- `table` and `streaming_table`: list the distribution columns first in the model's `SELECT`.
+- `streaming_source`: declare the distribution columns first in the column-definition list.
+
+```sql
+-- ❌ Rejected by Flink — `customer_id` is the distribution key but appears second
+{{ config(distributed_by={'columns': ['customer_id']}) }}
+select order_id, customer_id, price from {{ ref('orders') }}
+
+-- ✅ Accepted — `customer_id` is first
+{{ config(distributed_by={'columns': ['customer_id']}) }}
+select customer_id, order_id, price from {{ ref('orders') }}
+```
+
+Flink only supports the `HASH` distribution strategy today, so the adapter always emits `HASH(...)`. See the [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html#distributed-by-clause) for details.
 
 ## Schema Drift Detection
 
-When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation.
+When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation. The check compares **columns**, **WITH options**, and **`distributed_by`** in a single pass and raises one error listing every violation, so you don't have to fix them one at a time.
 
-To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>_<invocation_id>`) and queries `INFORMATION_SCHEMA.COLUMNS` for its column names and data types. For `table` and `streaming_table`, this temp table is created from the model's SELECT query; for `streaming_source`, it is created from the model's column definitions (without the connector). The temp table is dropped immediately after the schema is read.
+To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>_<invocation_id>`) and issues a single `UNION ALL` query against `INFORMATION_SCHEMA.COLUMNS`, `TABLES`, and `TABLE_OPTIONS` to fetch every piece of metadata at once. For `table` and `streaming_table`, the temp table is created from the model's SELECT query; for `streaming_source`, from the model's column definitions (without the connector). The temp table is dropped immediately after the schema is read.
 
 ### Configuration
 
@@ -44,6 +93,11 @@ select * from {{ ref('source') }}
 ### Column Drift
 - **table, streaming_table**: Compares existing column names and data types with expected columns from the SELECT query. Raises an error if columns are added, removed, renamed, or if data types change. Column reordering is allowed (order doesn't matter for Kafka-backed tables).
 - **streaming_source**: Compares existing column names and data types with the column definitions in the model SQL. Raises an error if columns are added, removed, renamed, or if data types change. Uses a temporary table to infer schema from SQL column definitions.
+
+### Distribution Drift
+Compares the user-specified `config(distributed_by={...})` against the existing distribution from `INFORMATION_SCHEMA.TABLES` and `INFORMATION_SCHEMA.COLUMNS`. Raises an error if the column list, column order, or — when explicitly specified — the bucket count differ.
+
+**Important limitation**: As with WITH options, the adapter only verifies what the user explicitly requested. If `distributed_by` is unset, drift detection is skipped entirely, because Confluent assigns a default distribution (typically derived from the primary key) to every Kafka-backed table, and INFORMATION_SCHEMA does not distinguish user-specified from auto-assigned distribution. If you need to remove a previously-set `distributed_by`, use `--full-refresh`.
 
 ### WITH Options Drift
 Compares existing `WITH` options against the model's `config(with={...})`. Raises an error if any configured option value has changed.
