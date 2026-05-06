@@ -12,6 +12,8 @@ Features:
 - Standard dbt materializations (table, view, ephemeral) adapted for Flink SQL
 - Streaming-native materializations (`streaming_table`, `streaming_source`) for continuous data pipelines
 - Integration with Confluent Cloud connectors (e.g., Datagen/Faker) via `streaming_source`
+- `distributed_by` config to control Kafka partitioning via the `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause
+- Schema drift detection on re-runs (columns, WITH options, `distributed_by`) — surfaces every violation in one error
 
 See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 

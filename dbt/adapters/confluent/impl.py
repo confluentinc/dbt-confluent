@@ -472,6 +472,9 @@ class ConfluentAdapter(SQLAdapter):
         for row in drift_catalog:
             section = row["section"]
             if section == "COLUMNS":
+                # Defensive: get_drift_catalog filters TABLE_NAME to existing/temp,
+                # so a None target shouldn't happen — but skip rather than crash if
+                # INFORMATION_SCHEMA ever returns an unexpected row.
                 target = columns_by_table.get(row["table_name"])
                 if target is None:
                     continue

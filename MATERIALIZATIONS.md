@@ -4,10 +4,10 @@
 
 | Materialization | Description |
 |---|---|
-| `table` | Creates a table via `CREATE TABLE ... AS SELECT` (CTAS). Runs in snapshot mode — the query executes once and completes. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). |
+| `table` | Creates a table via `CREATE TABLE ... AS SELECT` (CTAS). Runs in snapshot mode — the query executes once and completes. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
 | `view` | Drop-and-recreate view. |
-| `streaming_table` | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). |
-| `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
+| `streaming_table` | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
+| `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | `ephemeral` | Standard dbt CTE-based query fragment, not materialized in Flink. |
 
 ## Distributed By
@@ -31,8 +31,15 @@ WITH (...)
 ```
 
 **Fields**:
-- `columns` (required) - list of column names used to compute the hash
-- `buckets` (optional) - number of buckets; omit to let Confluent Cloud choose
+- `columns` (required) - non-empty list of column names used to compute the hash
+- `buckets` (optional) - positive integer; omit to let Confluent Cloud choose
+
+**Validation**: The adapter validates the config at the start of each materialization run and raises a clear compile error if any of the following hold:
+- `distributed_by` is not a mapping
+- `columns` is missing, empty, a string, or contains non-string / empty entries
+- A column name contains a backtick (Flink identifiers can't escape backticks)
+- `buckets` is set but isn't a positive integer (rejects `0`, negatives, floats, strings, booleans)
+- The mapping has any key other than `columns` or `buckets` (catches typos like `'strategy': 'range'`)
 
 **Important — column ordering**: Flink requires that the distribution columns appear at the **beginning** of the table's column schema, and in the **same order** as listed in `columns`. The adapter does not validate this (it would require parsing the model SQL) — Flink will reject the `CREATE TABLE` at submission with `Key columns must appear at the beginning of the table schema. Also, DISTRIBUTED BY key names must be in the same order as the key schema columns.`
 
@@ -54,9 +61,9 @@ Flink only supports the `HASH` distribution strategy today, so the adapter alway
 
 ## Schema Drift Detection
 
-When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation.
+When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation. The check compares **columns**, **WITH options**, and **`distributed_by`** in a single pass and raises one error listing every violation, so you don't have to fix them one at a time.
 
-To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>_<invocation_id>`) and queries `INFORMATION_SCHEMA.COLUMNS` for its column names and data types. For `table` and `streaming_table`, this temp table is created from the model's SELECT query; for `streaming_source`, it is created from the model's column definitions (without the connector). The temp table is dropped immediately after the schema is read.
+To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>_<invocation_id>`) and issues a single `UNION ALL` query against `INFORMATION_SCHEMA.COLUMNS`, `TABLES`, and `TABLE_OPTIONS` to fetch every piece of metadata at once. For `table` and `streaming_table`, the temp table is created from the model's SELECT query; for `streaming_source`, from the model's column definitions (without the connector). The temp table is dropped immediately after the schema is read.
 
 ### Configuration
 

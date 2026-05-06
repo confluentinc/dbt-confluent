@@ -159,7 +159,24 @@
      `table_name` discriminator (existing vs temp for the COLUMNS section).
      Confluent's INFORMATION_SCHEMA only supports the primitives we use here:
      SELECT, WHERE with =/<>/IS NULL/IS NOT NULL/AND/OR, UNION ALL, AS,
-     and CAST(NULL AS dt). #}
+     and CAST(NULL AS dt).
+
+     Example rows for a table `my_table`(id BIGINT distributed, v STRING)
+     with WITH(changelog.mode='upsert') being compared against a temp table
+     `tmp`(id BIGINT, v STRING, x INT). Columns shown left-to-right are:
+     section, table_name, col_name, data_type, dist_position, option_key,
+     option_value, is_distributed, dist_buckets.
+
+       ('COLUMNS',       'my_table', 'id', 'BIGINT', 1,    NULL,             NULL,     NULL,  NULL)
+       ('COLUMNS',       'my_table', 'v',  'STRING', NULL, NULL,             NULL,     NULL,  NULL)
+       ('COLUMNS',       'tmp',      'id', 'BIGINT', NULL, NULL,             NULL,     NULL,  NULL)
+       ('COLUMNS',       'tmp',      'v',  'STRING', NULL, NULL,             NULL,     NULL,  NULL)
+       ('COLUMNS',       'tmp',      'x',  'INT',    NULL, NULL,             NULL,     NULL,  NULL)
+       ('TABLES',        'my_table', NULL, NULL,     NULL, NULL,             NULL,     'YES', 4)
+       ('TABLE_OPTIONS', 'my_table', NULL, NULL,     NULL, 'changelog.mode', 'upsert', NULL,  NULL)
+
+     `_partition_drift_catalog` (Python) splits this back into per-concern
+     dicts before any drift check runs. #}
   {% call statement('get_drift_catalog', fetch_result=True, hidden=True) %}
     SELECT
       'COLUMNS' AS section,
