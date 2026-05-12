@@ -156,6 +156,24 @@ class ConfluentAdapter(SQLAdapter):
         return sanitize_statement_name(name)
 
     @available
+    def classify_existing_statement(self, statement_name: str) -> str:
+        """Classify a Flink statement by name. Returns one of:
+
+        - 'missing'  — no statement exists with that name (404)
+        - 'terminal' — statement is in COMPLETED, STOPPED, FAILED, or DELETED
+        - 'healthy'  — anything else (PENDING, RUNNING, DEGRADED, in-flight transitions)
+
+        Used by materializations to decide whether to restart a long-running
+        statement when the relation already exists. No side effects.
+        """
+        conn = self.connections.get_thread_connection()
+        try:
+            statement = conn.handle.get_statement(statement_name)
+        except StatementNotFoundError:
+            return "missing"
+        return "terminal" if statement.phase.is_terminal else "healthy"
+
+    @available
     def delete_statement(self, statement_name: str) -> None:
         """Delete a Flink statement by name and wait for deletion to complete.
 

@@ -33,39 +33,55 @@
 {% endmacro %}
 
 
-{% macro skip_or_drop_existing(existing_relation, target_relation, has_select_query=true) %}
-  {# If the relation already exists, either drop it (on --full-refresh) or skip.
-     Returns true if the caller should skip (relation exists and no full refresh).
-     Before skipping, checks for schema drift according to on_schema_drift config.
+{% macro decide_action(existing_relation, target_relation, has_select_query=true, recoverable=false) %}
+  {# Decide what to do for an existing-relation materialization. Returns one of:
+       'create'  — drop (if needed) and create from scratch
+       'restart' — table is intact and matches; only the long-running statement
+                   is missing or in a terminal phase, re-submit it (no DDL).
+                   Caller is responsible for skipping its DDL block.
+       'skip'    — relation exists, schema matches, and the statement is healthy.
+
+     `recoverable` opts a materialization into the 'restart' branch. Only
+     `streaming_table` is recoverable today; other materializations either
+     don't have a long-running statement to restart (`table`, `view`) or
+     can't be safely restarted without dropping the table (`streaming_source`).
+
      has_select_query: true if the model SQL is a SELECT (table, streaming_table),
                        false if it's column definitions (streaming_source). #}
-  {% if existing_relation %}
-    {% if should_full_refresh() %}
-      {{ delete_statement_if_exists(get_statement_name()) }}
-      {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
-      {{ drop_relation_if_exists(existing_relation) }}
-      {{ return(false) }}
-    {% else %}
-      {% set on_schema_drift = config.get('on_schema_drift', 'fail') %}
-      {% if on_schema_drift == 'ignore' %}
-        {{ log("Relation " ~ existing_relation ~ " already exists. Skipping without drift check (on_schema_drift='ignore').", info=True) }}
-      {% elif on_schema_drift == 'fail' %}
-        {{ check_for_schema_drift(existing_relation, has_select_query) }}
-        {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
-      {% else %}
-        {% set msg = "Invalid value for on_schema_drift ('%s'). Expected 'ignore' or 'fail'." % on_schema_drift %}
-        {% do exceptions.raise_compiler_error(msg) %}
-      {% endif %}
-      {{ return(true) }}
-    {% endif %}
-  {% else %}
-    {# No relation exists, but orphaned Flink statements may linger if the table
-       was dropped without deleting its statements (e.g. external cleanup).
+  {% if not existing_relation %}
+    {# Orphaned statements may linger if the table was dropped externally.
        Delete them so the materialization can create fresh ones. #}
     {{ delete_statement_if_exists(get_statement_name()) }}
     {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
+    {{ return('create') }}
   {% endif %}
-  {{ return(false) }}
+
+  {% if should_full_refresh() %}
+    {{ delete_statement_if_exists(get_statement_name()) }}
+    {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
+    {{ drop_relation_if_exists(existing_relation) }}
+    {{ return('create') }}
+  {% endif %}
+
+  {% set on_schema_drift = config.get('on_schema_drift', 'fail') %}
+  {% if on_schema_drift == 'fail' %}
+    {{ check_for_schema_drift(existing_relation, has_select_query) }}
+  {% elif on_schema_drift != 'ignore' %}
+    {% set msg = "Invalid value for on_schema_drift ('%s'). Expected 'ignore' or 'fail'." % on_schema_drift %}
+    {% do exceptions.raise_compiler_error(msg) %}
+  {% endif %}
+
+  {% if recoverable %}
+    {% set health = adapter.classify_existing_statement(get_statement_name()) %}
+    {% if health != 'healthy' %}
+      {{ log("Statement for " ~ existing_relation ~ " is " ~ health ~ ". Re-submitting (no full refresh required).", info=True) }}
+      {{ delete_statement_if_exists(get_statement_name()) }}
+      {{ return('restart') }}
+    {% endif %}
+  {% endif %}
+
+  {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
+  {{ return('skip') }}
 {% endmacro %}
 
 
