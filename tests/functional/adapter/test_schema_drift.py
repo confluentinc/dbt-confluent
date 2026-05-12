@@ -269,7 +269,7 @@ class TestIgnoreSchemaDrift(ConfluentFixtures):
     """When on_schema_drift='ignore', drift should not be detected or cause errors.
 
     Tested on the cheap CTAS table only: on_schema_drift='ignore' short-circuits
-    skip_or_drop_existing *before* any drift check runs (helpers.sql), so the
+    decide_action *before* any drift check runs (helpers.sql), so the
     behavior is identical for every materialization and the drift kind (columns
     vs options) is irrelevant — the check never fires. No need to pay for a
     live streaming_table to re-prove the same branch.

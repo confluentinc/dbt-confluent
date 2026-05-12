@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from confluent_sql.exceptions import StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
@@ -284,3 +286,155 @@ class TestOrphanStatementCleanup(ConfluentFixtures):
             conn = adapter.connections.get_thread_connection()
             current = conn.handle.get_statement(orphan_name)
         assert current.statement_id != planted_id
+
+
+class TestCrashRecoveryRestart(ConfluentFixtures):
+    """Crash recovery (#33): if the table exists but the long-running
+    INSERT statement is gone (e.g. dbt was killed between DDL and DML, or
+    the statement was deleted externally), `dbt run` without --full-refresh
+    must re-submit the INSERT under the same deterministic name. The table
+    is preserved (no topic state lost)."""
+
+    NAME = "crashrec"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "my_streaming_source.sql": MY_STREAMING_SOURCE,
+            "my_streaming_table.sql": SIMPLE_STREAMING_TABLE,
+            "models.yml": SIMPLE_MODELS_YML,
+        }
+
+    @pytest.fixture(autouse=True, scope="class")
+    def class_clean_up(self, project, dbt_profile_data):
+        yield
+        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+        with project.adapter.connection_named("cleanup"):
+            conn = project.adapter.connections.get_thread_connection()
+            for stmt in conn.handle.list_statements(label=label):
+                project.adapter.delete_statement(stmt.name)
+        project.run_sql("drop table if exists my_streaming_table")
+        project.run_sql("drop table if exists my_streaming_source")
+
+    @pytest.fixture(autouse=True)
+    def clean_up(self, project, dbt_profile_data):
+        """Override per-test cleanup; class_clean_up handles teardown."""
+        yield
+
+    def test_missing_insert_statement_is_resubmitted(self, project):
+        adapter = project.adapter
+        insert_name = adapter.get_statement_name(
+            model_name="my_streaming_table", project_name=self.NAME
+        )
+
+        # First run creates the source, the table, and the long-running INSERT.
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results)
+        with adapter.connection_named("snapshot_first"):
+            conn = adapter.connections.get_thread_connection()
+            first = conn.handle.get_statement(insert_name)
+
+        # Simulate a crash between DDL and DML: delete only the INSERT
+        # statement, leave the table in place. The streaming_source
+        # statement is left alone so its source data continues to flow.
+        with adapter.connection_named("simulate_crash"):
+            adapter.delete_statement(insert_name)
+
+        # `dbt run` without --full-refresh must detect the missing statement
+        # and re-submit a new INSERT under the same deterministic name.
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results)
+
+        with adapter.connection_named("snapshot_second"):
+            conn = adapter.connections.get_thread_connection()
+            second = conn.handle.get_statement(insert_name)
+
+        assert second.name == first.name
+        assert second.statement_id != first.statement_id
+
+
+TERMINAL_PLANT_SQL = "SHOW TABLES"
+
+
+class TestDeadStatementRestart(ConfluentFixtures):
+    """Dead-statement recovery (half of #32): if the long-running INSERT
+    statement is in a terminal phase (FAILED, STOPPED, COMPLETED, DELETED),
+    `dbt run` without --full-refresh must replace it. The classifier doesn't
+    distinguish terminal phases, so we plant a `SHOW TABLES` statement under
+    the deterministic INSERT name — it reaches COMPLETED (terminal) within
+    seconds, no external stop API or invalid-SQL trick needed (invalid SQL
+    is rejected at validation time, before it can be persisted as FAILED)."""
+
+    NAME = "deadstmt"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "my_streaming_source.sql": MY_STREAMING_SOURCE,
+            "my_streaming_table.sql": SIMPLE_STREAMING_TABLE,
+            "models.yml": SIMPLE_MODELS_YML,
+        }
+
+    @pytest.fixture(autouse=True, scope="class")
+    def class_clean_up(self, project, dbt_profile_data):
+        yield
+        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+        with project.adapter.connection_named("cleanup"):
+            conn = project.adapter.connections.get_thread_connection()
+            for stmt in conn.handle.list_statements(label=label):
+                project.adapter.delete_statement(stmt.name)
+        project.run_sql("drop table if exists my_streaming_table")
+        project.run_sql("drop table if exists my_streaming_source")
+
+    @pytest.fixture(autouse=True)
+    def clean_up(self, project, dbt_profile_data):
+        """Override per-test cleanup; class_clean_up handles teardown."""
+        yield
+
+    def _wait_for_terminal(self, adapter, name, timeout=30):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with adapter.connection_named("phase_poll"):
+                conn = adapter.connections.get_thread_connection()
+                stmt = conn.handle.get_statement(name)
+                if stmt.phase.is_terminal:
+                    return stmt
+            time.sleep(2)
+        raise AssertionError(f"Statement {name} did not reach terminal state in {timeout}s")
+
+    def test_terminal_insert_statement_is_resubmitted(self, project, dbt_profile_data):
+        adapter = project.adapter
+        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+        insert_name = adapter.get_statement_name(
+            model_name="my_streaming_table", project_name=self.NAME
+        )
+
+        # First run creates everything cleanly.
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results)
+
+        # Replace the live INSERT with a planted statement that will
+        # finish on its own (COMPLETED is a terminal phase too). Delete
+        # the live one first so the name is free.
+        with adapter.connection_named("plant_terminal"):
+            adapter.delete_statement(insert_name)
+            conn = adapter.connections.get_thread_connection()
+            cursor = conn.handle.cursor(mode=ExecutionMode.STREAMING_QUERY)
+            cursor.execute(
+                TERMINAL_PLANT_SQL,
+                statement_name=insert_name,
+                statement_labels=[label],
+            )
+        terminal = self._wait_for_terminal(adapter, insert_name)
+        planted_id = terminal.statement_id
+
+        # `dbt run` without --full-refresh must detect the terminal statement,
+        # delete it, and submit a new healthy INSERT under the same name.
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results)
+
+        with adapter.connection_named("snapshot_after"):
+            conn = adapter.connections.get_thread_connection()
+            current = conn.handle.get_statement(insert_name)
+        assert current.statement_id != planted_id
+        assert not current.phase.is_terminal
