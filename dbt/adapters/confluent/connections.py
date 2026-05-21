@@ -332,7 +332,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 # INFORMATION_SCHEMA queries (especially the unified UNION ALL drift
                 # catalog) routinely take longer than the default 5s timeout on cold
                 # metadata lookups, surfacing as a "read operation timed out".
-                http_timeout_secs=60
+                http_timeout_secs=60,
             )
             connection.state = "open"
             connection.handle = handle
