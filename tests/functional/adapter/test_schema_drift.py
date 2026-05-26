@@ -25,15 +25,41 @@ def get_result_by_name(results, name):
     return None
 
 
-def assert_drift_error(results, name):
-    """Assert that a specific result failed with a drift detection error."""
+_DRIFT_KIND_SUBSTRINGS = {
+    # Column added / removed / renamed → mismatch between existing and expected
+    # column name lists. Match on the labels in the rendered error.
+    "columns": "Existing columns:",
+    # Column data type changed.
+    "type": "type mismatch",
+    # WITH-options drift.
+    "options": "Table options drift detected",
+}
+
+
+def assert_drift_error(results, name, kind):
+    """Assert that `name` errored with a drift detection error of the given kind.
+
+    kind: one of 'columns', 'type', 'options'. Forces tests to be specific about
+    which drift they expect; a generic "any drift error" match would have hidden
+    misdiagnosed failures (e.g. an empty expected_columns producing a fake
+    column-list drift message).
+    """
+    try:
+        expected_substring = _DRIFT_KIND_SUBSTRINGS[kind]
+    except KeyError as e:
+        raise ValueError(
+            f"Unknown drift kind {kind!r}; expected one of {sorted(_DRIFT_KIND_SUBSTRINGS)}"
+        ) from e
+
     result = get_result_by_name(results, name)
     assert result is not None, f"{name} not found in results"
     assert result.status.name == "Error", (
         f"{name} expected status 'Error' but got '{result.status.name}'"
     )
-    assert "drift detected" in result.message.lower(), (
-        f"{name} error was not a drift error: {result.message}"
+    assert expected_substring in result.message, (
+        f"{name} error did not match drift kind {kind!r} "
+        f"(expected substring {expected_substring!r}).\n"
+        f"Actual message: {result.message}"
     )
 
 
@@ -269,17 +295,17 @@ class TestTableSchemaDrift(ConfluentFixtures):
     def test_extra_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_table")
+        assert_drift_error(result, "my_table", kind="columns")
 
     def test_removed_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_REMOVED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_table")
+        assert_drift_error(result, "my_table", kind="columns")
 
     def test_renamed_column_detected(self, project):
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_RENAMED_COLUMN)
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_table")
+        assert_drift_error(result, "my_table", kind="columns")
 
     def test_reordered_columns_not_detected(self, project):
         """Column reordering is not considered drift — order doesn't matter for Kafka tables."""
@@ -293,7 +319,7 @@ class TestTableSchemaDrift(ConfluentFixtures):
         """Changing column data types should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_TYPE_CHANGE)
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_table")
+        assert_drift_error(result, "my_table", kind="type")
 
 
 class TestTableFullRefreshFixesDrift(ConfluentFixtures):
@@ -381,14 +407,14 @@ class TestStreamingTableSchemaDrift(ConfluentFixtures):
             STREAMING_TABLE_MODEL_DIFFERENT_OPTIONS,
         )
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_streaming_table")
+        assert_drift_error(result, "my_streaming_table", kind="options")
 
     def test_column_drift_detected(self, project):
         set_model_file(
             project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_EXTRA_COLUMN
         )
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_streaming_table")
+        assert_drift_error(result, "my_streaming_table", kind="columns")
 
     def test_type_change_detected(self, project):
         """Changing column data types should raise an error without --full-refresh."""
@@ -396,7 +422,7 @@ class TestStreamingTableSchemaDrift(ConfluentFixtures):
             project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_TYPE_CHANGE
         )
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_streaming_table")
+        assert_drift_error(result, "my_streaming_table", kind="type")
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +469,7 @@ class TestStreamingSourceSchemaDrift(ConfluentFixtures):
             project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_DIFFERENT_OPTIONS
         )
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
+        assert_drift_error(result, "my_source", kind="options")
 
     def test_extra_column_detected(self, project):
         """Adding a column should raise an error without --full-refresh."""
@@ -451,7 +477,7 @@ class TestStreamingSourceSchemaDrift(ConfluentFixtures):
             project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN
         )
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
+        assert_drift_error(result, "my_source", kind="columns")
 
     def test_removed_column_detected(self, project):
         """Removing a column should raise an error without --full-refresh."""
@@ -459,7 +485,7 @@ class TestStreamingSourceSchemaDrift(ConfluentFixtures):
             project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_REMOVED_COLUMN
         )
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
+        assert_drift_error(result, "my_source", kind="columns")
 
     def test_renamed_column_detected(self, project):
         """Renaming a column should raise an error without --full-refresh."""
@@ -467,13 +493,13 @@ class TestStreamingSourceSchemaDrift(ConfluentFixtures):
             project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_RENAMED_COLUMN
         )
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
+        assert_drift_error(result, "my_source", kind="columns")
 
     def test_type_change_detected(self, project):
         """Changing column data types should raise an error without --full-refresh."""
         set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_TYPE_CHANGE)
         result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
+        assert_drift_error(result, "my_source", kind="type")
 
 
 # ---------------------------------------------------------------------------

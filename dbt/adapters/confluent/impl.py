@@ -1,12 +1,12 @@
 import logging
 import re
-import time
 from dataclasses import dataclass, field
 
 import agate
-from confluent_sql.exceptions import StatementNotFoundError
+from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
+from dbt_common.events.functions import fire_event
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.base import BaseRelation, available
@@ -14,6 +14,7 @@ from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_tabl
 from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
 from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
+from dbt.adapters.events.types import AdapterEventWarning
 from dbt.adapters.sql import SQLAdapter
 
 from .naming import sanitize_statement_name
@@ -156,44 +157,55 @@ class ConfluentAdapter(SQLAdapter):
         return sanitize_statement_name(name)
 
     @available
-    def delete_statement(self, statement_name: str) -> None:
-        """Delete a Flink statement by name and wait for deletion to complete.
+    def delete_statement(self, statement_name: str, expect_exists: bool = True) -> None:
+        """Delete a Flink statement by name. No-op if it doesn't exist.
 
-        Deletion of RUNNING statements is async (the job must stop first),
-        so we poll until the statement is gone (404).
-        No-op if the statement doesn't already exist.
+        Compute-pool-scoped FlinkDeveloper roles return 403 — not 404 — when
+        the target statement does not exist (Confluent Cloud intentionally
+        hides existence across pool boundaries). We can't disambiguate
+        "missing" from "no permission" from the response, so we swallow
+        403 and surface a warning instead of failing. Real permission
+        problems will still surface on subsequent operations that need
+        the same scope.
+
+        expect_exists: if True (default), a 403 is surprising — the caller
+            had reason to believe the statement existed — so we emit a loud
+            AdapterEventWarning. If False (e.g. orphan-cleanup paths where
+            the statement is opportunistically deleted), 403 is the expected
+            response and we log quietly at debug level.
+
+        Async deletion is not awaited here: the connection manager retries
+        CREATE on 409 to handle the in-flight teardown race against the
+        next statement that reuses this name.
         """
         conn = self.connections.get_thread_connection()
         handle = conn.handle
-
-        # Send the delete request (no-op on 404).
-        handle.delete_statement(statement_name)
-
-        # Check if the statement is already gone after the delete request.
         try:
-            handle.get_statement(statement_name)
+            handle.delete_statement(statement_name)
         except StatementNotFoundError:
             return  # Already gone (either deleted instantly or never existed)
-
-        # Statement still exists — it's being stopped. Poll until gone.
-        logger.info("Waiting for statement '%s' to be deleted...", statement_name)
-        max_wait = 60
-        waited = 0
-        attempt = 1
-        while waited < max_wait:
-            backoff = min(2**attempt, 15)
-            time.sleep(backoff)
-            waited += backoff
-            attempt += 1
-            try:
-                handle.get_statement(statement_name)
-            except StatementNotFoundError:
-                return  # Successfully deleted
-
-        raise DbtDatabaseError(
-            f"Statement '{statement_name}' still exists after {waited}s. "
-            f"Flink may still be stopping the job."
-        )
+        except OperationalError as e:
+            if getattr(e, "http_status_code", None) != 403:
+                raise
+            if expect_exists:
+                fire_event(
+                    AdapterEventWarning(
+                        base_msg=(
+                            f"Got 403 when deleting Flink statement "
+                            f"'{statement_name}'. This is the expected response "
+                            f"for a missing statement under compute-pool-scoped "
+                            f"roles, so we are ignoring it. If subsequent "
+                            f"operations fail unexpectedly, verify that the API "
+                            f"key has permission to manage statements in this "
+                            f"compute pool."
+                        )
+                    )
+                )
+            else:
+                logger.debug(
+                    "Got 403 on opportunistic delete of statement '%s' (no orphan present).",
+                    statement_name,
+                )
 
     @classmethod
     def convert_text_type(cls, agate_table: agate.Table, col_idx: int) -> str:
@@ -397,6 +409,23 @@ class ConfluentAdapter(SQLAdapter):
         # canonical form.
         existing_map = {col["column_name"]: col["data_type"] for col in existing_columns}
         expected_map = {col["column_name"]: col["data_type"] for col in expected_columns}
+
+        # An empty expected_map means the drift-check temp table came back with
+        # zero columns from INFORMATION_SCHEMA. The temp table was just created
+        # from the model's column definitions / select query, so it has columns;
+        # an empty result almost always means Confluent Cloud's INFORMATION_SCHEMA
+        # hasn't yet propagated the freshly-created table. Surface this as a
+        # retriable database error rather than letting it cascade into a false
+        # "drift detected" message.
+        if not expected_map:
+            raise DbtDatabaseError(
+                f"Drift check could not introspect the expected schema for "
+                f"'{relation_name}': the temp table created from the model "
+                f"definition returned no columns from INFORMATION_SCHEMA. "
+                f"This usually indicates a transient Confluent Cloud metadata "
+                f"propagation lag. Retry with `dbt retry`; if it persists, "
+                f"run with `--full-refresh` or file a bug."
+            )
 
         existing_names = sorted(existing_map)
         expected_names = sorted(expected_map)

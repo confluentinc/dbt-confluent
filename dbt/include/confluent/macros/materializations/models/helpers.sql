@@ -1,8 +1,11 @@
-{% macro delete_statement_if_exists(statement_name) %}
+{% macro delete_statement_if_exists(statement_name, expect_exists=true) %}
   {# Delete an existing Flink statement by name so we can re-create it.
-     No-op if the statement doesn't exist (confluent-sql handles 404). #}
+     No-op if the statement doesn't exist (confluent-sql handles 404).
+     expect_exists: see adapter.delete_statement — controls whether a 403
+     (treated as "missing statement" under pool-scoped roles) emits a loud
+     warning or just a debug log. #}
   {% if execute %}
-    {% do adapter.delete_statement(statement_name) %}
+    {% do adapter.delete_statement(statement_name, expect_exists=expect_exists) %}
   {% endif %}
 {% endmacro %}
 
@@ -35,9 +38,11 @@
   {% else %}
     {# No relation exists, but orphaned Flink statements may linger if the table
        was dropped without deleting its statements (e.g. external cleanup).
-       Delete them so the materialization can create fresh ones. #}
-    {{ delete_statement_if_exists(get_statement_name()) }}
-    {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
+       Delete them so the materialization can create fresh ones. We don't expect
+       them to exist in the common case (first-time run), so suppress the loud
+       warning the adapter would otherwise emit for a pool-scoped 403. #}
+    {{ delete_statement_if_exists(get_statement_name(), expect_exists=false) }}
+    {{ delete_statement_if_exists(get_statement_name('-ddl'), expect_exists=false) }}
   {% endif %}
   {{ return(false) }}
 {% endmacro %}

@@ -2,7 +2,7 @@
 
 import agate
 import pytest
-from dbt_common.exceptions import CompilationError
+from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
 
@@ -135,3 +135,20 @@ class TestCheckSchemaDrift:
             expected_with={"rows-per-second": 1},
             existing_options={"rows-per-second": "1"},
         )
+
+    def test_empty_expected_columns_raises_distinct_error(self, adapter):
+        """An empty expected_columns must NOT masquerade as a column-list drift.
+
+        The drift-check temp table coming back with no columns from
+        INFORMATION_SCHEMA is almost always a transient Confluent Cloud
+        metadata propagation lag, so we surface it as a retriable
+        DbtDatabaseError with a distinct, diagnosable message.
+        """
+        existing = _make_agate_table([("id", "BIGINT"), ("value", "STRING")])
+        expected = _make_agate_table([])
+        with pytest.raises(DbtDatabaseError) as excinfo:
+            adapter.check_schema_drift("t", existing, expected, {}, {})
+        msg = str(excinfo.value)
+        assert "INFORMATION_SCHEMA" in msg
+        # Must not look like a regular column-list drift error.
+        assert "drift detected" not in msg.lower()
