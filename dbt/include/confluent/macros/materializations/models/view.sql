@@ -4,8 +4,10 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  -- delete existing statement and drop the relation if it exists already
-  {{ delete_statement_if_exists(get_statement_name()) }}
+  -- delete existing statement and drop the relation if it exists already.
+  -- If there's no existing relation, the statement probably doesn't exist either,
+  -- so suppress the loud warning the adapter emits for a pool-scoped 403.
+  {{ delete_statement_if_exists(get_statement_name(), expect_exists=(existing_relation is not none)) }}
   {{ drop_relation_if_exists(existing_relation) }}
 
   -- `BEGIN` happens here:

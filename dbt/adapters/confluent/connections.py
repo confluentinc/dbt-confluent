@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 import confluent_sql
 from confluent_sql import HIDDEN_LABEL, Cursor
-from confluent_sql.exceptions import ComputePoolExhaustedError, StatementNotFoundError
+from confluent_sql.exceptions import (
+    ComputePoolExhaustedError,
+    OperationalError,
+    StatementNotFoundError,
+)
 from confluent_sql.execution_mode import ExecutionMode
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.events.functions import fire_event
@@ -91,6 +95,96 @@ class ConfluentCredentials(Credentials):
             return (*keys, "cloud_provider", "cloud_region")
 
 
+def _execute_query_with_retry(
+    cursor: "confluent_sql.Cursor",
+    sql: str,
+    bindings: Any | None,
+    retryable_exceptions: tuple[type[Exception], ...],
+    retry_limit: int,
+    attempt: int,
+    statement_name: str | None = None,
+    statement_labels: list[str] | None = None,
+):
+    """Execute the cursor and retry on transient failures.
+
+    A success sees the try exit cleanly and avoid any recursive retries.
+    Failure begins a sleep and retry routine.
+
+    Lives at module scope (not as a closure inside add_query) so it can
+    be unit-tested in isolation.
+    """
+    try:
+        cursor.execute(
+            sql, bindings, statement_name=statement_name, statement_labels=statement_labels
+        )
+    except retryable_exceptions as e:
+        # Cease retries and fail when limit is hit.
+        if attempt >= retry_limit:
+            raise e
+
+        backoff = min(attempt * 3, 15)
+        retries_left = retry_limit - attempt
+
+        if isinstance(e, ComputePoolExhaustedError):
+            fire_event(
+                AdapterEventWarning(
+                    base_msg=f"Compute pool exhausted. {retries_left} retries left. "
+                    f"Retrying in {backoff} seconds."
+                )
+            )
+        else:
+            fire_event(
+                AdapterEventDebug(
+                    base_msg=f"Got a retryable error {type(e)}. {retries_left} retries left. "
+                    f"Retrying in {backoff} seconds.\nError:\n{e}"
+                )
+            )
+        time.sleep(backoff)
+
+        # Reuse the same statement name on retry. ComputePoolExhaustedError
+        # cleans up the failed statement, so the name is available for reuse.
+        return _execute_query_with_retry(
+            cursor=cursor,
+            sql=sql,
+            bindings=bindings,
+            retryable_exceptions=retryable_exceptions,
+            retry_limit=retry_limit,
+            attempt=attempt + 1,
+            statement_labels=statement_labels,
+            statement_name=statement_name,
+        )
+    except OperationalError as e:
+        # "Statement with name X already exists" — happens when a prior
+        # statement with the same name is still tearing down asynchronously
+        # after a DELETE. We retry until the name frees up.
+        if getattr(e, "http_status_code", None) != 409:
+            raise
+        if attempt >= retry_limit:
+            raise
+
+        backoff = min(attempt * 3, 15)
+        retries_left = retry_limit - attempt
+        fire_event(
+            AdapterEventDebug(
+                base_msg=f"Statement name '{statement_name}' is already in use "
+                f"(prior statement may still be tearing down). "
+                f"{retries_left} retries left. Retrying in {backoff} seconds."
+            )
+        )
+        time.sleep(backoff)
+
+        return _execute_query_with_retry(
+            cursor=cursor,
+            sql=sql,
+            bindings=bindings,
+            retryable_exceptions=retryable_exceptions,
+            retry_limit=retry_limit,
+            attempt=attempt + 1,
+            statement_labels=statement_labels,
+            statement_name=statement_name,
+        )
+
+
 class ConfluentConnectionManager(SQLConnectionManager):
     TYPE = "confluent"
 
@@ -157,62 +251,6 @@ class ConfluentConnectionManager(SQLConnectionManager):
         statement_name: if provided, used as the Flink statement name (deterministic).
         If None, a UUID-based name is generated (for metadata/schema queries).
         """
-
-        def _execute_query_with_retry(
-            cursor: confluent_sql.Cursor,
-            sql: str,
-            bindings: Any | None,
-            retryable_exceptions: tuple[type[Exception], ...],
-            retry_limit: int,
-            attempt: int,
-            statement_name: str | None = None,
-            statement_labels: list[str] | None = None,
-        ):
-            """
-            A success sees the try exit cleanly and avoid any recursive
-            retries. Failure begins a sleep and retry routine.
-            """
-            try:
-                cursor.execute(
-                    sql, bindings, statement_name=statement_name, statement_labels=statement_labels
-                )
-            except retryable_exceptions as e:
-                # Cease retries and fail when limit is hit.
-                if attempt >= retry_limit:
-                    raise e
-
-                backoff = min(attempt * 3, 15)
-                retries_left = retry_limit - attempt
-
-                if isinstance(e, ComputePoolExhaustedError):
-                    fire_event(
-                        AdapterEventWarning(
-                            base_msg=f"Compute pool exhausted. {retries_left} retries left. "
-                            f"Retrying in {backoff} seconds."
-                        )
-                    )
-                else:
-                    fire_event(
-                        AdapterEventDebug(
-                            base_msg=f"Got a retryable error {type(e)}. {retries_left} retries left. "
-                            f"Retrying in {backoff} seconds.\nError:\n{e}"
-                        )
-                    )
-                time.sleep(backoff)
-
-                # Reuse the same statement name on retry. ComputePoolExhaustedError
-                # cleans up the failed statement, so the name is available for reuse.
-                return _execute_query_with_retry(
-                    cursor=cursor,
-                    sql=sql,
-                    bindings=bindings,
-                    retryable_exceptions=retryable_exceptions,
-                    retry_limit=retry_limit,
-                    attempt=attempt + 1,
-                    statement_labels=statement_labels,
-                    statement_name=statement_name,
-                )
-
         connection = self.get_thread_connection()
         if auto_begin and connection.transaction_open is False:
             self.begin()
