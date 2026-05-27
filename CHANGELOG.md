@@ -1,3 +1,11 @@
+dbt-confluent 0.2.1 (2026-05-27)
+
+# Bugfixes
+
+- Fix `dbt run` failures under compute-pool-scoped FlinkDeveloper roles caused by DELETE-on-missing Flink statements returning 403 (not 404). The adapter now warns rather than errors on a 403 from statement DELETE, and retries CREATE on 409 name-conflicts to handle the async teardown race. ([#58](https://github.com/confluentinc/dbt-confluent/issues/58))
+- Increase the HTTP client timeout to 60s so cold INFORMATION_SCHEMA lookups (notably the unified drift-catalog UNION ALL) no longer surface as "read operation timed out" on the default 5s budget.
+
+
 dbt-confluent 0.2.0 (2026-04-22)
 
 # Features
