@@ -21,7 +21,3 @@ blocks:
             - DBT_CONFLUENT_KEY=$(vault kv get -field=dbt-confluent v1/ci/kv/pypi/pypi.org)
             - uv build
             - uv publish -u __token__ -p "$DBT_CONFLUENT_KEY" dist/*
-            - VERSION=$(grep -E '^version' dbt/adapters/confluent/__version__.py | sed -E 's/.*"([^"]+)".*/\1/')
-            - TAG="v$VERSION"
-            - git tag -a "$TAG" -m "Release $VERSION"
-            - git push origin "$TAG"
