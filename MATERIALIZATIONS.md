@@ -7,6 +7,7 @@
 | `table` | Creates a table via `CREATE TABLE ... AS SELECT` (CTAS). Runs in snapshot mode — the query executes once and completes. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
 | `view` | Drop-and-recreate view. |
 | `streaming_table` | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
+| `materialized_table` | Creates and maintains a Flink materialized table via `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. Each run re-asserts the definition and Flink reconciles it: a new table is created, any change (columns, data types, `WITH` options, or query logic) is evolved **in place**, and an unchanged definition is a cheap no-op. `--full-refresh` drops and recreates. Supports `config(distributed_by={...}, with={...}, start_mode='...')`. |
 | `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | `ephemeral` | Standard dbt CTE-based query fragment, not materialized in Flink. |
 
@@ -58,6 +59,19 @@ select customer_id, order_id, price from {{ ref('orders') }}
 ```
 
 Flink only supports the `HASH` distribution strategy today, so the adapter always emits `HASH(...)`. See the [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html#distributed-by-clause) for details.
+
+## Materialized Table
+
+`materialized_table` is declarative: every run issues `CREATE OR ALTER MATERIALIZED TABLE` and lets Flink reconcile the table, rather than using the drop/recreate + schema-drift flow that `table`/`streaming_table` use.
+
+- **New table** — created.
+- **Any change** (columns, data types, `WITH` options, or query logic) — evolved **in place** (a *full evolution*: state is discarded and the query restarts, but the table and its topic are not dropped).
+- **Unchanged** — a cheap no-op.
+- **`--full-refresh`** — `DROP MATERIALIZED TABLE` then recreate. Required to change `distributed_by`, which is fixed at creation.
+
+**Config:** `distributed_by` (a `{'columns': [...], 'buckets': N}` mapping — same shape and validation as the other materializations, see [Distributed By](#distributed-by)), `with`, `start_mode` (`FROM_BEGINNING` | `FROM_NOW` | `RESUME_OR_FROM_BEGINNING`). `freshness_interval`, `refresh_mode`, and `partition_by` are not supported and raise a compile error.
+
+Re-running while Flink is still establishing a freshly created or evolved table is transiently rejected (`being modified`) and retried automatically; at normal cadence this does not occur.
 
 ## Schema Drift Detection
 
@@ -146,6 +160,8 @@ Each materialization creates Flink statements with deterministic names derived f
 ```
 
 The default prefix is `dbt-`. For `streaming_table`, which creates two statements (a DDL and an INSERT), the DDL gets a `-ddl` suffix: `dbt-{project}-{model}-ddl`.
+
+`materialized_table` is the exception: a materialized table stays tied to its defining `CREATE OR ALTER` statement, so the adapter must not delete-and-reuse a fixed name (that would orphan the table). It instead submits each run under a unique per-run name and never deletes it; completed statements therefore accumulate over re-runs (prune by prefix if needed).
 
 ### Flink Naming Constraints
 
