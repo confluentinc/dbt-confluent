@@ -7,6 +7,8 @@
   {%- set start_mode = config.get('start_mode') -%}
   {%- set with_options = config.get('with', {}) -%}
 
+  {{ validate_materialized_table_config() }}
+
   {%- if distributed_by is string -%}
     {%- set distributed_by_clause = distributed_by -%}
   {%- elif distributed_by -%}
