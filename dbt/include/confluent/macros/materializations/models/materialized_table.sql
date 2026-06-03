@@ -1,21 +1,11 @@
 {% materialization materialized_table, adapter='confluent' %}
+  {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type=this.Table) %}
 
-  {%- set freshness = config.get('freshness_interval') -%}
-  {%- set partition_by = config.get('partition_by') -%}
   {%- set distributed_by = config.get('distributed_by') -%}
   {%- set buckets = config.get('buckets', 6) -%}
-  {%- set refresh_mode = config.get('refresh_mode') -%}
   {%- set start_mode = config.get('start_mode') -%}
   {%- set with_options = config.get('with', {}) -%}
-
-  {%- if partition_by is string -%}
-    {%- set partition_by_clause = partition_by -%}
-  {%- elif partition_by -%}
-    {%- set partition_by_clause = partition_by | join(', ') -%}
-  {%- else -%}
-    {%- set partition_by_clause = none -%}
-  {%- endif -%}
 
   {%- if distributed_by is string -%}
     {%- set distributed_by_clause = distributed_by -%}
@@ -27,11 +17,12 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  {# CREATE OR ALTER swaps the MT in place, so no existence check or
-     full-refresh branch is needed. Prior Flink statements still have to be
-     deleted so the new statement_name can be reused. #}
-  {{ delete_statement_if_exists(get_statement_name()) }}
-  {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
+  {# CREATE OR ALTER evolves the MT in place, so there is no existence check or
+     full-refresh drop branch. We still delete any prior Flink statement under the
+     deterministic name so it can be reused on re-runs. MT creates a single
+     statement (no separate '-ddl' phase); expect_exists is gated on
+     existing_relation to avoid the loud pool-scoped-403 warning on first run. #}
+  {{ delete_statement_if_exists(get_statement_name(), expect_exists=(existing_relation is not none)) }}
 
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
@@ -41,21 +32,12 @@
     {%- if distributed_by_clause %}
     DISTRIBUTED BY HASH({{ distributed_by_clause }}) INTO {{ buckets }} BUCKETS
     {%- endif %}
-    {%- if partition_by_clause %}
-    PARTITIONED BY ({{ partition_by_clause }})
-    {%- endif %}
     {%- if with_options %}
     WITH (
       {%- for key, value in with_options.items() %}
       '{{ key }}' = '{{ value | replace("'", "''") }}'{{ "," if not loop.last }}
       {%- endfor %}
     )
-    {%- endif %}
-    {%- if freshness %}
-    FRESHNESS = {{ freshness }}
-    {%- endif %}
-    {%- if refresh_mode %}
-    REFRESH_MODE = {{ refresh_mode }}
     {%- endif %}
     {%- if start_mode %}
     START_MODE = {{ start_mode }}
