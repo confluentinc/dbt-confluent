@@ -23,6 +23,51 @@
   {%- endif -%}
 {% endmacro %}
 
+{% macro validate_materialized_table_config() %}
+  {# MT-specific validation only. distributed_by/buckets are validated by
+     validate_distributed_by_config(); the materialization calls both. Confluent
+     MT supports only distributed_by, with, and start_mode (see MATERIALIZATIONS.md). #}
+
+  {# Configs that exist in open-source Flink MT but NOT Confluent's dialect. #}
+  {%- set unsupported = [] -%}
+  {%- for key in ['freshness_interval', 'refresh_mode', 'partition_by'] -%}
+    {%- if config.get(key) is not none -%}{%- do unsupported.append(key) -%}{%- endif -%}
+  {%- endfor -%}
+  {%- if unsupported -%}
+    {% set msg %}
+'{{ unsupported | join("', '") }}' {{ 'is' if unsupported | length == 1 else 'are' }} not supported by the 'materialized_table' materialization for Confluent Flink.
+Supported config options are: distributed_by, with, start_mode.
+    {% endset %}
+    {% do exceptions.raise_compiler_error(msg) %}
+  {%- endif -%}
+
+  {# start_mode must be one of the documented values. #}
+  {%- set start_mode = config.get('start_mode') -%}
+  {%- set valid_start_modes = ['FROM_BEGINNING', 'FROM_NOW', 'RESUME_OR_FROM_BEGINNING'] -%}
+  {%- if start_mode is not none and (start_mode | string | upper) not in valid_start_modes -%}
+    {% set msg %}
+'{{ start_mode }}' is not a valid value for 'start_mode'.
+Accepted values are: {{ valid_start_modes | join(', ') }}.
+    {% endset %}
+    {% do exceptions.raise_compiler_error(msg) %}
+  {%- endif -%}
+{% endmacro %}
+
+
+{% macro render_with_options(with_options) %}
+  {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping single
+     quotes in values. Renders nothing when with_options is empty. Reusable by any
+     materialization that accepts config(with={...}). -#}
+{%- if with_options -%}
+WITH (
+{%- for key, value in with_options.items() %}
+      '{{ key }}' = '{{ value | replace("'", "''") }}'{{ "," if not loop.last }}
+{%- endfor %}
+    )
+{%- endif -%}
+{% endmacro %}
+
+
 {% macro delete_statement_if_exists(statement_name, expect_exists=true) %}
   {# Delete an existing Flink statement by name so we can re-create it.
      No-op if the statement doesn't exist (confluent-sql handles 404).
