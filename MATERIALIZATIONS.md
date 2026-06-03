@@ -7,8 +7,18 @@
 | `table` | Creates a table via `CREATE TABLE ... AS SELECT` (CTAS). Runs in snapshot mode — the query executes once and completes. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). |
 | `view` | Drop-and-recreate view. |
 | `streaming_table` | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). |
+| `materialized_table` | Creates a Flink materialized table via `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. Flink continuously maintains and evolves it **in place**: query/column changes trigger a full evolution (state discarded, query restarts) and `WITH`/watermark changes apply without re-evolution — the table is never dropped, so `--full-refresh` is a no-op. Supports `config(distributed_by=..., buckets=..., with={...}, start_mode='...')`. |
 | `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | `ephemeral` | Standard dbt CTE-based query fragment, not materialized in Flink. |
+
+## Materialized Table (in-place evolution)
+
+The `materialized_table` materialization issues `CREATE OR ALTER MATERIALIZED TABLE` on every run and lets Flink evolve the table in place, so it does **not** use the drop/recreate or schema-drift flow that `table`/`streaming_table` use:
+
+- **Query or column changes** trigger a *full evolution* — Flink discards state and restarts the continuous query, but the table is not dropped.
+- **`WITH` options and watermarks** are altered without re-evolution.
+- **`--full-refresh` is a no-op** — there is nothing to drop.
+- **Supported config:** `distributed_by`, `buckets` (default 6), `with`, `start_mode` (`FROM_BEGINNING` | `FROM_NOW` | `RESUME_OR_FROM_BEGINNING`).
 
 ## Schema Drift Detection
 
