@@ -105,6 +105,25 @@ A streaming source creates a connector-backed source table. The model SQL define
 `email` STRING
 ```
 
+### Materialized table
+
+A materialized table is maintained continuously by Flink. Each run re-asserts the query; Flink evolves it in place when it changes and no-ops when it doesn't:
+
+```sql
+-- models/orders_by_status.sql
+{{
+  config(
+    materialized='materialized_table',
+    distributed_by='status',
+    buckets=6
+  )
+}}
+
+SELECT status, COUNT(*) AS orders, SUM(amount) AS total
+FROM {{ ref('orders') }}
+GROUP BY status
+```
+
 See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 
 ## Known Limitations
@@ -115,6 +134,7 @@ See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 - **No snapshots**: Flink SQL lacks the batch operations (MERGE, UPDATE) required by dbt snapshots.
 - **No incremental**: dbt's batch-incremental semantics does not map to Flink's continuous processing model. Use `streaming_table` instead.
 - **Drift detection for WITH options**: Schema drift detection only verifies that user-specified `WITH` options exist with correct values. It cannot detect when options are removed from the config (because connectors may add default options that cannot be distinguished from user-specified ones). Use `--full-refresh` to change or remove WITH options. Drift detection can be disabled per-model with `config(on_schema_drift='ignore')`. See [Materializations](MATERIALIZATIONS.md#schema-drift-detection) for details.
+- **Materialized table distribution**: a materialized table's `distributed_by`/`buckets` are fixed at creation; changing them requires `--full-refresh` (drop and recreate). Column, `WITH`, and query-logic changes evolve in place. See [Materializations](MATERIALIZATIONS.md#materialized-table).
 
 ## Development
 
