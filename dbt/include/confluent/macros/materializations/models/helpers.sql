@@ -40,6 +40,20 @@ Accepted values are: {{ valid_start_modes | join(', ') }}.
 {% endmacro %}
 
 
+{% macro render_with_options(with_options) %}
+  {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping single
+     quotes in values. Renders nothing when with_options is empty. Reusable by any
+     materialization that accepts config(with={...}). -#}
+{%- if with_options -%}
+WITH (
+{%- for key, value in with_options.items() %}
+      '{{ key }}' = '{{ value | replace("'", "''") }}'{{ "," if not loop.last }}
+{%- endfor %}
+    )
+{%- endif -%}
+{% endmacro %}
+
+
 {% macro delete_statement_if_exists(statement_name, expect_exists=true) %}
   {# Delete an existing Flink statement by name so we can re-create it.
      No-op if the statement doesn't exist (confluent-sql handles 404).

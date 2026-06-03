@@ -34,13 +34,7 @@
     {%- if distributed_by_clause %}
     DISTRIBUTED BY HASH({{ distributed_by_clause }}) INTO {{ buckets }} BUCKETS
     {%- endif %}
-    {%- if with_options %}
-    WITH (
-      {%- for key, value in with_options.items() %}
-      '{{ key }}' = '{{ value | replace("'", "''") }}'{{ "," if not loop.last }}
-      {%- endfor %}
-    )
-    {%- endif %}
+    {{ render_with_options(with_options) }}
     {%- if start_mode %}
     START_MODE = {{ start_mode }}
     {%- endif %}
