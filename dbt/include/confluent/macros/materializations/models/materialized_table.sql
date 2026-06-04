@@ -19,17 +19,16 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  {# Skip / drop+recreate / alter decision. Issuing CREATE OR ALTER against an
-     unchanged materialized table never converges (Flink leaves it PENDING), so
-     materialized_table_skip only lets us proceed for a new relation, detected
-     drift (alter in place), or --full-refresh (drop then recreate); an unchanged
-     MT is skipped. #}
-  {% if materialized_table_skip(existing_relation) %}
-    {# dbt requires a 'main' statement result even when skipping #}
-    {% call noop_statement('main', 'SKIP') %}{% endcall %}
-    {{ run_hooks(post_hooks, inside_transaction=False) }}
-    {{ return({'relations': [target_relation]}) }}
-  {% endif %}
+  {# Declarative lifecycle: we always re-assert the definition with
+     CREATE OR ALTER and let Flink reconcile it — a new table is created, any
+     change (columns, WITH options, or query logic) is evolved in place, and an
+     unchanged definition is a cheap no-op. `--full-refresh` drops first so the
+     table is rebuilt from scratch (the way to change distribution/buckets).
+     Re-running within Flink's brief establishment window is transiently rejected
+     ("being modified") and retried by the connection manager. #}
+  {%- if existing_relation and should_full_refresh() -%}
+    {% do adapter.drop_materialized_table(existing_relation) %}
+  {%- endif -%}
 
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 

@@ -498,26 +498,6 @@ class ConfluentAdapter(SQLAdapter):
                 + "\nUse --full-refresh to recreate the table."
             )
 
-    @available
-    def has_schema_drift(
-        self,
-        relation_name: str,
-        existing_columns,
-        expected_columns,
-        expected_with: dict[str, str],
-        existing_options: dict[str, str],
-    ) -> bool:
-        """Return True if the existing schema/options differ from expected.
-
-        Used by materialized_table to decide whether to skip (no drift) or issue
-        CREATE OR ALTER (drift). Unlike check_schema_drift, drift is not an error.
-        """
-        return bool(
-            self._schema_drift_reasons(
-                relation_name, existing_columns, expected_columns, expected_with, existing_options
-            )
-        )
-
     def run_sql_for_tests(self, sql, fetch, conn):
         cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
         try:

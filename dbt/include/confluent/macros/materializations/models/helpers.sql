@@ -40,57 +40,6 @@ Accepted values are: {{ valid_start_modes | join(', ') }}.
 {% endmacro %}
 
 
-{% macro materialized_table_has_drift(existing_relation) %}
-  {# Return true if the existing materialized table differs from what the model
-     would produce (column names/types or WITH options). Reuses the same
-     introspection as the other materializations' drift check, but returns a
-     boolean instead of raising — materialized_table treats drift as the signal
-     to CREATE OR ALTER (alter in place), not as an error. #}
-  {% set existing_columns = get_existing_columns(existing_relation) %}
-  {% set expected_columns = get_expected_columns_from_query(sql) %}
-  {% set expected_with = config.get('with', {}) %}
-  {% set existing_options = {} %}
-  {% if expected_with %}
-    {% set existing_options = get_existing_table_options(existing_relation) %}
-  {% endif %}
-  {{ return(adapter.has_schema_drift(
-       existing_relation | string,
-       existing_columns,
-       expected_columns,
-       expected_with,
-       existing_options
-  )) }}
-{% endmacro %}
-
-
-{% macro materialized_table_skip(existing_relation) %}
-  {# Decide whether to skip the CREATE OR ALTER. Issuing CREATE OR ALTER against
-     an unchanged materialized table never converges (Flink leaves it PENDING),
-     so we only proceed when there is a real change: a new relation, detected
-     drift (alter in place), or --full-refresh (drop then recreate). Returns true
-     to skip; false to proceed.
-
-     We deliberately do NOT delete the prior CREATE OR ALTER statement: an MT
-     remains tied to its defining statement, and deleting it orphans the table
-     (subsequent CREATE OR ALTER then fails "already exists"). Instead each run
-     submits under a unique statement name (see the materialization), so there
-     is never a name collision to clean up. #}
-  {% if existing_relation %}
-    {% if should_full_refresh() %}
-      {% do adapter.drop_materialized_table(existing_relation) %}
-      {{ return(false) }}
-    {% elif materialized_table_has_drift(existing_relation) %}
-      {{ return(false) }}
-    {% else %}
-      {{ log("Materialized table " ~ existing_relation ~ " is unchanged. Skipping (use --full-refresh to recreate).", info=True) }}
-      {{ return(true) }}
-    {% endif %}
-  {% else %}
-    {{ return(false) }}
-  {% endif %}
-{% endmacro %}
-
-
 {% macro render_with_options(with_options) %}
   {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping single
      quotes in values. Renders nothing when with_options is empty. Reusable by any
