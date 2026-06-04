@@ -143,8 +143,8 @@ class TestMaterializedTable(_MTFixtures):
     """Happy path: the MT is created and is queryable."""
 
     NAME = "mattable"
-    SRC = "src_happy5"
-    MT = "mt_happy5"
+    SRC = "src_create"
+    MT = "mt_create"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -169,8 +169,8 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
     CREATE OR ALTER and Flink reconciles it without rebuilding the table."""
 
     NAME = "matnoop"
-    SRC = "src_noop5"
-    MT = "mt_noop5"
+    SRC = "src_noop"
+    MT = "mt_noop"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -205,8 +205,8 @@ class TestMaterializedTableEvolvesInPlace(_MTFixtures):
     query-logic changes go through the identical path.)"""
 
     NAME = "matevolve"
-    SRC = "src_evolve5"
-    MT = "mt_evolve5"
+    SRC = "src_alter"
+    MT = "mt_alter"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -249,8 +249,8 @@ class TestMaterializedTableFullRefreshRecreates(_MTFixtures):
     distribution/buckets, which can't be altered in place)."""
 
     NAME = "matfr"
-    SRC = "src_fr5"
-    MT = "mt_fr5"
+    SRC = "src_recreate"
+    MT = "mt_recreate"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
