@@ -562,6 +562,50 @@ class TestCheckSchemaDriftOrchestrator:
             expected_with={},
         )
 
+    def test_distribution_added_drift_through_orchestrator(self):
+        """When the existing table is not distributed (IS_DISTRIBUTED='NO') but
+        the model requests `distributed_by`, the orchestrator surfaces the
+        'distribution: existing=<none>' violation.
+
+        This is the one distribution-violation string that does not start with
+        'distribution columns:'/'distribution buckets:', and the only path that
+        drives `_partition_drift_catalog` to return `existing_distribution=None`
+        while `expected` is set — so we exercise it end-to-end (partition →
+        orchestrator) rather than only at the `_check_distribution_drift` helper.
+        """
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                # IS_DISTRIBUTED='NO' → partition yields existing_distribution=None
+                _row(section="TABLES", table_name=self.EXISTING_ID, is_distributed="NO"),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                catalog,
+                expected_with={},
+                expected_distribution={"columns": ["id"], "buckets": 4},
+            )
+        msg = str(excinfo.value)
+        assert "distribution: existing=<none>" in msg
+        # Columns and options match, so distribution is the only bullet.
+        bullets = [line for line in msg.splitlines() if line.strip().startswith("- ")]
+        assert len(bullets) == 1
+
     def test_empty_expected_columns_raises_distinct_error(self):
         """An empty expected_columns must NOT masquerade as a column-list drift.
 

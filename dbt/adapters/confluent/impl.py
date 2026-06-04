@@ -527,6 +527,14 @@ class ConfluentAdapter(SQLAdapter):
                 # INFORMATION_SCHEMA ever returns an unexpected row.
                 target = columns_by_table.get(row["table_name"])
                 if target is None:
+                    fire_event(
+                        AdapterEventWarning(
+                            base_msg=(
+                                f"Got empty table during drift check for columns in {row['table_name']}. "
+                                "Columns drift detection skipped, this is probably a bug."
+                            )
+                        )
+                    )
                     continue
                 target[row["col_name"]] = row["data_type"]
                 if row["table_name"] == existing_identifier and row["dist_position"] is not None:
