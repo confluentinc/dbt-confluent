@@ -11,6 +11,7 @@
     {% do exceptions.raise_compiler_error(msg) %}
   {% endif %}
   {%- set with_options = config.get('with', {}) -%}
+  {% do validate_distributed_by_config() %}
 
   -- Run hooks like in the original materializations, so we don't
   -- break any assumption made by the framework.
@@ -32,6 +33,7 @@
                     statement_name=get_statement_name()) -%}
     CREATE TABLE {{ target_relation }}
     ( {{ sql }})
+    {{ get_distributed_by_clause() }}
     WITH (
       'connector' = '{{ connector }}'
       {%- for key, value in with_options.items() -%}
