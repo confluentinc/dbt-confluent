@@ -19,17 +19,25 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  {# CREATE OR ALTER evolves the MT in place, so there is no existence check or
-     full-refresh drop branch. We still delete any prior Flink statement under the
-     deterministic name so it can be reused on re-runs. MT creates a single
-     statement (no separate '-ddl' phase); expect_exists is gated on
-     existing_relation to avoid the loud pool-scoped-403 warning on first run. #}
-  {{ delete_statement_if_exists(get_statement_name(), expect_exists=(existing_relation is not none)) }}
+  {# Skip / drop+recreate / alter decision. Issuing CREATE OR ALTER against an
+     unchanged materialized table never converges (Flink leaves it PENDING), so
+     materialized_table_skip only lets us proceed for a new relation, detected
+     drift (alter in place), or --full-refresh (drop then recreate); an unchanged
+     MT is skipped. #}
+  {% if materialized_table_skip(existing_relation) %}
+    {# dbt requires a 'main' statement result even when skipping #}
+    {% call noop_statement('main', 'SKIP') %}{% endcall %}
+    {{ run_hooks(post_hooks, inside_transaction=False) }}
+    {{ return({'relations': [target_relation]}) }}
+  {% endif %}
 
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
+  {# Submit under a per-invocation statement name. An MT stays tied to its
+     defining CREATE OR ALTER statement, so we must not delete-and-reuse a fixed
+     name (that orphans the table); a unique name per run avoids any collision. #}
   {% call statement('main', execution_mode="streaming_ddl",
-                    statement_name=get_statement_name()) -%}
+                    statement_name=get_statement_name(suffix='-' ~ invocation_id)) -%}
     CREATE OR ALTER MATERIALIZED TABLE {{ target_relation }}
     {%- if distributed_by_clause %}
     DISTRIBUTED BY HASH({{ distributed_by_clause }}) INTO {{ buckets }} BUCKETS
