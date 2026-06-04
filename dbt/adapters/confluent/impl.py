@@ -137,6 +137,24 @@ class ConfluentAdapter(SQLAdapter):
         )
 
     @available
+    def drop_materialized_table(self, relation) -> None:
+        """DROP MATERIALIZED TABLE, tolerating a missing table.
+
+        Flink has no `DROP MATERIALIZED TABLE IF EXISTS`, and a materialized
+        table cannot be dropped with `DROP TABLE` ("not a regular table"). We
+        swallow the "does not exist" error so a stale relation cache or an
+        externally-dropped table doesn't fail the run — matching the resilience
+        of drop_relation_if_exists used by the other materializations.
+        """
+        try:
+            self.execute(f"DROP MATERIALIZED TABLE {relation}", execution_mode="streaming_ddl")
+        except (OperationalError, DbtDatabaseError) as e:
+            if "does not exist" in str(e).lower():
+                logger.debug(f"Materialized table {relation} already absent; skipping drop.")
+                return
+            raise
+
+    @available
     def get_statement_name(
         self,
         model_name: str,
@@ -388,16 +406,18 @@ class ConfluentAdapter(SQLAdapter):
         """Generate a unique temporary table name for schema drift checks."""
         return "__dbt_tmp_schema_check_" + identifier + "_" + invocation_id.replace("-", "")
 
-    @available
-    def check_schema_drift(
+    def _schema_drift_reasons(
         self,
         relation_name: str,
         existing_columns,
         expected_columns,
         expected_with: dict[str, str],
         existing_options: dict[str, str],
-    ) -> None:
-        """Compare existing vs expected schema and raise CompilationError on drift.
+    ) -> list[str]:
+        """Compare existing vs expected schema and return a list of drift reasons.
+
+        An empty list means no drift. Raises DbtDatabaseError (retriable) if the
+        expected schema could not be introspected.
 
         existing_columns: agate.Table from INFORMATION_SCHEMA query
         expected_columns: agate.Table from INFORMATION_SCHEMA query (via temp table)
@@ -427,35 +447,56 @@ class ConfluentAdapter(SQLAdapter):
                 f"run with `--full-refresh` or file a bug."
             )
 
+        reasons: list[str] = []
         existing_names = sorted(existing_map)
         expected_names = sorted(expected_map)
 
         if existing_names != expected_names:
-            raise CompilationError(
-                f"Schema drift detected for '{relation_name}'.\n"
-                f"Existing columns: {existing_names}\n"
-                f"Expected columns: {expected_names}\n"
-                f"Use --full-refresh to recreate the table."
+            reasons.append(
+                f"Existing columns: {existing_names}\nExpected columns: {expected_names}"
             )
-
-        for col_name in expected_map:
-            if existing_map[col_name] != expected_map[col_name]:
-                raise CompilationError(
-                    f"Schema drift detected for '{relation_name}'.\n"
-                    f"Column '{col_name}' type mismatch: "
-                    f"existing='{existing_map[col_name]}', expected='{expected_map[col_name]}'.\n"
-                    f"Use --full-refresh to recreate the table."
-                )
+        else:
+            for col_name in expected_map:
+                if existing_map[col_name] != expected_map[col_name]:
+                    reasons.append(
+                        f"Column '{col_name}' type mismatch: "
+                        f"existing='{existing_map[col_name]}', expected='{expected_map[col_name]}'."
+                    )
 
         for key, value in expected_with.items():
             existing_value = existing_options.get(key)
             if existing_value != str(value):
-                raise CompilationError(
-                    f"Table options drift detected for '{relation_name}'.\n"
+                reasons.append(
+                    f"Table options drift detected for '{relation_name}'. "
                     f"Option '{key}': "
-                    f"existing='{existing_value or '<not set>'}', expected='{str(value)}'.\n"
-                    f"Use --full-refresh to recreate the table."
+                    f"existing='{existing_value or '<not set>'}', expected='{str(value)}'."
                 )
+
+        return reasons
+
+    @available
+    def check_schema_drift(
+        self,
+        relation_name: str,
+        existing_columns,
+        expected_columns,
+        expected_with: dict[str, str],
+        existing_options: dict[str, str],
+    ) -> None:
+        """Compare existing vs expected schema and raise CompilationError on drift.
+
+        Used by table/streaming_table/streaming_source, where any drift is an
+        error directing the user to --full-refresh.
+        """
+        reasons = self._schema_drift_reasons(
+            relation_name, existing_columns, expected_columns, expected_with, existing_options
+        )
+        if reasons:
+            raise CompilationError(
+                f"Schema drift detected for '{relation_name}'.\n"
+                + "\n".join(reasons)
+                + "\nUse --full-refresh to recreate the table."
+            )
 
     def run_sql_for_tests(self, sql, fetch, conn):
         cursor = conn.handle.cursor(mode=conn.credentials.execution_mode)
