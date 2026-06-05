@@ -2,8 +2,7 @@
 
 import pytest
 
-from dbt.tests.util import run_dbt, set_model_file
-from tests.functional.adapter._helpers import get_result_by_name, relation
+from dbt.tests.util import run_dbt
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 # Test for issue with window functions producing NOT NULL constraints
@@ -236,103 +235,15 @@ models:
         data_type: decimal(10,2)
 """
 
-# Malformed distributed_by configs — exercised by
-# TestDistributedByHash.test_invalid_distributed_by_configs_raise to confirm
-# validate_distributed_by_config raises a clear compile error for each shape.
-DIST_INVALID_NOT_MAPPING = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    distributed_by=['order_id'],
-) }}
-select order_id, price from {{ ref('dist_source') }}
-"""
-
-DIST_INVALID_EMPTY_COLUMNS = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    distributed_by={'columns': []},
-) }}
-select order_id, price from {{ ref('dist_source') }}
-"""
-
-DIST_INVALID_STRING_COLUMNS = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    distributed_by={'columns': 'order_id'},
-) }}
-select order_id, price from {{ ref('dist_source') }}
-"""
-
-DIST_INVALID_NON_STRING_ENTRY = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    distributed_by={'columns': [42]},
-) }}
-select order_id, price from {{ ref('dist_source') }}
-"""
-
-DIST_INVALID_BACKTICK_IN_NAME = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    distributed_by={'columns': ['foo`bar']},
-) }}
-select order_id, price from {{ ref('dist_source') }}
-"""
-
-DIST_INVALID_BUCKETS_NEGATIVE = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    distributed_by={'columns': ['order_id'], 'buckets': -1},
-) }}
-select order_id, price from {{ ref('dist_source') }}
-"""
-
-DIST_INVALID_BUCKETS_FLOAT = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    distributed_by={'columns': ['order_id'], 'buckets': 1.5},
-) }}
-select order_id, price from {{ ref('dist_source') }}
-"""
-
-DIST_INVALID_BUCKETS_STRING = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    distributed_by={'columns': ['order_id'], 'buckets': 'four'},
-) }}
-select order_id, price from {{ ref('dist_source') }}
-"""
-
-DIST_INVALID_UNKNOWN_KEY = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    distributed_by={'columns': ['order_id'], 'strategy': 'range'},
-) }}
-select order_id, price from {{ ref('dist_source') }}
-"""
-
 
 class TestDistributedByHash(ConfluentFixtures):
     """Regression for #34: a `distributed_by` config on a streaming_table must
     emit `DISTRIBUTED BY HASH(...) INTO N BUCKETS` between the column list
-    and the WITH clause, so Flink applies the requested distribution."""
+    and the WITH clause, so Flink applies the requested distribution.
 
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        # Override ConfluentFixtures default (which sets `+full_refresh: True`):
-        # the validator test relies on the materialization wrapper running on a
-        # second `dbt run` against an already-existing table, which a forced
-        # full-refresh would short-circuit.
-        return {"models": {"+schema": unique_schema}}
+    Validation of malformed `distributed_by` configs is covered exhaustively
+    by the pure-Python unit tests in
+    tests/unit/test_validate_distributed_by_config.py — no live run needed."""
 
     @pytest.fixture(scope="class")
     def models(self):
@@ -357,42 +268,3 @@ class TestDistributedByHash(ConfluentFixtures):
         assert "DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS" in ddl, (
             f"DISTRIBUTED BY clause missing or malformed in created table DDL:\n{ddl}"
         )
-
-    def test_invalid_distributed_by_configs_raise(self, project):
-        """Bundled: every malformed `distributed_by` shape must raise a clear
-        compile error. Single method to avoid five fixture spin-ups. Uses
-        `dbt run` because `dbt compile` does not invoke the materialization
-        wrapper — the validator only fires during run. The validator runs at
-        the top of the materialization (before any Confluent calls), so each
-        invalid config short-circuits before any DDL is attempted."""
-        cases = [
-            (DIST_INVALID_NOT_MAPPING, "must be a mapping"),
-            (DIST_INVALID_EMPTY_COLUMNS, "non-empty 'columns' list"),
-            (DIST_INVALID_STRING_COLUMNS, "non-empty 'columns' list"),
-            (DIST_INVALID_NON_STRING_ENTRY, "non-empty strings"),
-            (DIST_INVALID_BACKTICK_IN_NAME, "backtick"),
-            (DIST_INVALID_BUCKETS_NEGATIVE, "must be a positive integer"),
-            (DIST_INVALID_BUCKETS_FLOAT, "must be a positive integer"),
-            (DIST_INVALID_BUCKETS_STRING, "must be a positive integer"),
-            (DIST_INVALID_UNKNOWN_KEY, "unknown key 'strategy'"),
-        ]
-        try:
-            for model_sql, expected_msg in cases:
-                set_model_file(project, relation(project, "dist_streaming_table"), model_sql)
-                result = run_dbt(["run"], expect_pass=False)
-                node = get_result_by_name(result, "dist_streaming_table")
-                assert node is not None, (
-                    f"dist_streaming_table not in run results for case '{expected_msg}'"
-                )
-                assert node.status.name == "Error", (
-                    f"Expected Error for case '{expected_msg}', got '{node.status.name}'"
-                )
-                assert expected_msg.lower() in node.message.lower(), (
-                    f"Expected error containing {expected_msg!r}, got: {node.message}"
-                )
-        finally:
-            # Reset model to baseline so the rendering test (if it runs after
-            # this one) sees a valid model.
-            set_model_file(
-                project, relation(project, "dist_streaming_table"), DIST_STREAMING_TABLE
-            )
