@@ -7,6 +7,17 @@ When a table already exists and --full-refresh is not set, the adapter should:
 - Raise an error if there's distributed_by drift (added, removed, columns or
   bucket count changed)
 - Allow skipping drift detection with on_schema_drift='ignore'
+
+Scope note: the drift *detection logic* (columns added/removed/renamed/type,
+WITH options, distribution columns/buckets, partitioning, collect-and-raise)
+is exhaustively unit-tested in tests/unit/test_check_schema_drift.py, which
+runs in milliseconds against hand-built catalogs. The functional tests here
+exist only to prove the end-to-end wiring against a live Confluent backend:
+that each materialization fires the drift check, that get_drift_catalog reads
+real INFORMATION_SCHEMA output, and that the skip / error / full-refresh /
+ignore behaviors hold. We therefore keep ONE representative drift case per
+materialization rather than re-verifying every drift kind through a (slow)
+live run — the kind-by-kind discrimination is the unit tests' job.
 """
 
 import pytest
@@ -20,6 +31,24 @@ from tests.functional.adapter._helpers import (
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
+# -- Shared faker source feeding the table / streaming_table models --
+
+SOURCE_FOR_DRIFT = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'number-of-rows': '100',
+    }
+) }}
+`order_id` BIGINT,
+`price` DECIMAL(10, 2),
+`order_time` TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND,
+PRIMARY KEY(`order_id`) NOT ENFORCED
+"""
+
 # -- Table (CTAS) models --
 
 TABLE_MODEL = """
@@ -32,30 +61,6 @@ TABLE_MODEL_EXTRA_COLUMN = """
 select order_id, price, order_time, order_id as duplicate_col from {{ ref('source_for_drift') }}
 """
 
-TABLE_MODEL_REMOVED_COLUMN = """
-{{ config(materialized='table') }}
-select order_id, price from {{ ref('source_for_drift') }}
-"""
-
-TABLE_MODEL_RENAMED_COLUMN = """
-{{ config(materialized='table') }}
-select order_id as id, price, order_time from {{ ref('source_for_drift') }}
-"""
-
-TABLE_MODEL_REORDERED_COLUMNS = """
-{{ config(materialized='table') }}
-select price, order_id, order_time from {{ ref('source_for_drift') }}
-"""
-
-TABLE_MODEL_TYPE_CHANGE = """
-{{ config(materialized='table') }}
-select
-  cast(order_id as int) as order_id,
-  cast(price as decimal(10, 3)) as price,
-  order_time
-from {{ ref('source_for_drift') }}
-"""
-
 # -- Streaming table models --
 
 STREAMING_TABLE_MODEL = """
@@ -66,48 +71,12 @@ STREAMING_TABLE_MODEL = """
 select order_id, price, order_time from {{ ref('source_for_drift') }}
 """
 
-STREAMING_TABLE_MODEL_DIFFERENT_OPTIONS = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-) }}
-select order_id, price, order_time from {{ ref('source_for_drift') }}
-"""
-
 STREAMING_TABLE_MODEL_EXTRA_COLUMN = """
 {{ config(
     materialized='streaming_table',
     with={'changelog.mode': 'upsert'},
 ) }}
 select order_id, price, order_time, order_id as duplicate_col from {{ ref('source_for_drift') }}
-"""
-
-STREAMING_TABLE_MODEL_TYPE_CHANGE = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'upsert'},
-) }}
-select
-  cast(order_id as int) as order_id,
-  price,
-  order_time
-from {{ ref('source_for_drift') }}
-"""
-
-STREAMING_TABLE_MODEL_REMOVED_COLUMN = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'upsert'},
-) }}
-select order_id, price from {{ ref('source_for_drift') }}
-"""
-
-STREAMING_TABLE_MODEL_RENAMED_COLUMN = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'upsert'},
-) }}
-select order_id as id, price, order_time from {{ ref('source_for_drift') }}
 """
 
 STREAMING_TABLE_MODELS_YML = """
@@ -128,41 +97,12 @@ models:
 
 # -- Streaming source models --
 
-SOURCE_FOR_DRIFT = """
-{{ config(
-    materialized='streaming_source',
-    connector='faker',
-    with={
-        'rows-per-second': '1',
-        'number-of-rows': '100',
-    }
-) }}
-`order_id` BIGINT,
-`price` DECIMAL(10, 2),
-`order_time` TIMESTAMP(3),
-WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND,
-PRIMARY KEY(`order_id`) NOT ENFORCED
-"""
-
 STREAMING_SOURCE_MODEL = """
 {{ config(
     materialized='streaming_source',
     connector='faker',
     with={
         'rows-per-second': '1',
-        'number-of-rows': '100',
-    }
-) }}
-`id` BIGINT,
-`value` STRING
-"""
-
-STREAMING_SOURCE_MODEL_DIFFERENT_OPTIONS = """
-{{ config(
-    materialized='streaming_source',
-    connector='faker',
-    with={
-        'rows-per-second': '10',
         'number-of-rows': '100',
     }
 ) }}
@@ -184,56 +124,24 @@ STREAMING_SOURCE_MODEL_EXTRA_COLUMN = """
 `extra_column` STRING
 """
 
-STREAMING_SOURCE_MODEL_REMOVED_COLUMN = """
-{{ config(
-    materialized='streaming_source',
-    connector='faker',
-    with={
-        'rows-per-second': '1',
-        'number-of-rows': '100',
-    }
-) }}
-`id` BIGINT
-"""
-
-STREAMING_SOURCE_MODEL_RENAMED_COLUMN = """
-{{ config(
-    materialized='streaming_source',
-    connector='faker',
-    with={
-        'rows-per-second': '1',
-        'number-of-rows': '100',
-    }
-) }}
-`id` BIGINT,
-`name` STRING
-"""
-
-STREAMING_SOURCE_MODEL_TYPE_CHANGE = """
-{{ config(
-    materialized='streaming_source',
-    connector='faker',
-    with={
-        'rows-per-second': '1',
-        'number-of-rows': '100',
-    }
-) }}
-`id` INT,
-`value` STRING
-"""
-
 
 # ---------------------------------------------------------------------------
-# Table (CTAS) drift tests
+# Drift detection wiring — one shared setup across all three materializations
 # ---------------------------------------------------------------------------
 
 
-class TestTableSchemaDrift(ConfluentFixtures):
-    """Table schema drift detection tests.
+class TestSchemaDriftDetection(ConfluentFixtures):
+    """End-to-end drift wiring for table, streaming_table and streaming_source.
 
-    Creates source_for_drift + my_table once, then runs drift checks against
-    the unchanged table.  Drift-error tests don't modify the table, so they
-    can all share the same class-scoped setup.
+    All three materializations are created once in a single class-scoped
+    full-refresh, then each drift-error test mutates one model file and runs
+    again. A drift error does not recreate the table, so the backend stays at
+    its baseline and the tests are independent of one another (each also resets
+    its model file in a finally for clean failure output).
+
+    Per-kind discrimination (renamed/removed/type/options) is covered by the
+    unit tests; here a single added-column drift per materialization proves the
+    check is wired and reaches check_schema_drift through the live catalog query.
     """
 
     @pytest.fixture(scope="class")
@@ -248,6 +156,9 @@ class TestTableSchemaDrift(ConfluentFixtures):
         return {
             "source_for_drift.sql": SOURCE_FOR_DRIFT,
             "my_table.sql": TABLE_MODEL,
+            "my_streaming_table.sql": STREAMING_TABLE_MODEL,
+            "my_source.sql": STREAMING_SOURCE_MODEL,
+            "models.yml": STREAMING_TABLE_MODELS_YML,
         }
 
     @pytest.fixture(scope="class", autouse=True)
@@ -256,50 +167,51 @@ class TestTableSchemaDrift(ConfluentFixtures):
         yield
         project.run_sql("drop table if exists source_for_drift")
         project.run_sql("drop table if exists my_table")
+        project.run_sql("drop table if exists my_streaming_table")
+        project.run_sql("drop table if exists my_source")
 
     def test_second_run_skips(self, project):
-        """Second run without --full-refresh should skip, not fail."""
-        set_model_file(project, relation(project, "my_table"), TABLE_MODEL)
+        """A second run with no changes must skip every model, not drift.
+
+        This is the shared no-drift path for all three materializations.
+        """
         results = run_dbt(["run"])
-        assert len(results) == 2
+        assert len(results) == 4
         for r in results:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
 
-    def test_extra_column_detected(self, project):
+    def test_column_drift_detected(self, project):
+        """Every materialization drifted at once, asserted in a single run.
+
+        A `dbt run` drift-checks *every* model in the project (each pays a
+        temp-table create + catalog query), so the per-run cost is paid whether
+        one model drifts or all three. We therefore mutate all three and assert
+        each raises, rather than spending three separate runs for no extra
+        coverage — the per-kind detection logic is unit-tested.
+        """
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_table")
-
-    def test_removed_column_detected(self, project):
-        set_model_file(project, relation(project, "my_table"), TABLE_MODEL_REMOVED_COLUMN)
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_table")
-
-    def test_renamed_column_detected(self, project):
-        set_model_file(project, relation(project, "my_table"), TABLE_MODEL_RENAMED_COLUMN)
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_table")
-
-    def test_reordered_columns_not_detected(self, project):
-        """Column reordering is not considered drift — order doesn't matter for Kafka tables."""
-        set_model_file(project, relation(project, "my_table"), TABLE_MODEL_REORDERED_COLUMNS)
-        result = run_dbt(["run"])
-        assert len(result) == 2
-        for r in result:
-            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-
-    def test_type_change_detected(self, project):
-        """Changing column data types should raise an error without --full-refresh."""
-        set_model_file(project, relation(project, "my_table"), TABLE_MODEL_TYPE_CHANGE)
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_table")
+        set_model_file(
+            project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_EXTRA_COLUMN
+        )
+        set_model_file(
+            project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN
+        )
+        try:
+            result = run_dbt(["run"], expect_pass=False)
+            assert_drift_error(result, "my_table")
+            assert_drift_error(result, "my_streaming_table")
+            assert_drift_error(result, "my_source")
+        finally:
+            set_model_file(project, relation(project, "my_table"), TABLE_MODEL)
+            set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL)
+            set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL)
 
 
 class TestTableFullRefreshFixesDrift(ConfluentFixtures):
     """After detecting drift, --full-refresh should succeed.
 
     Separated because --full-refresh recreates the table with a different
-    schema, which would invalidate other drift tests sharing the same setup.
+    schema, which would invalidate the shared-setup drift tests above.
     """
 
     @pytest.fixture(scope="class")
@@ -333,169 +245,6 @@ class TestTableFullRefreshFixesDrift(ConfluentFixtures):
 
 
 # ---------------------------------------------------------------------------
-# Streaming table drift tests
-# ---------------------------------------------------------------------------
-
-
-class TestStreamingTableSchemaDrift(ConfluentFixtures):
-    """Streaming table schema and options drift detection tests.
-
-    Creates source_for_drift + my_streaming_table once, then runs drift
-    checks.  Drift-error tests don't modify the table.
-    """
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return {
-            "models": {"+schema": unique_schema},
-            "seeds": {"+schema": unique_schema},
-        }
-
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {
-            "source_for_drift.sql": SOURCE_FOR_DRIFT,
-            "my_streaming_table.sql": STREAMING_TABLE_MODEL,
-            "models.yml": STREAMING_TABLE_MODELS_YML,
-        }
-
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql("drop table if exists source_for_drift")
-        project.run_sql("drop table if exists my_streaming_table")
-
-    def test_second_run_skips(self, project):
-        set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL)
-        results = run_dbt(["run"])
-        assert len(results) == 2
-        for r in results:
-            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-
-    def test_changed_options_detected(self, project):
-        set_model_file(
-            project,
-            relation(project, "my_streaming_table"),
-            STREAMING_TABLE_MODEL_DIFFERENT_OPTIONS,
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_streaming_table")
-
-    def test_column_drift_detected(self, project):
-        set_model_file(
-            project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_EXTRA_COLUMN
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_streaming_table")
-
-    def test_type_change_detected(self, project):
-        """Changing column data types should raise an error without --full-refresh."""
-        set_model_file(
-            project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL_TYPE_CHANGE
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_streaming_table")
-
-    def test_removed_and_renamed_columns_detected(self, project):
-        """Removing or renaming a column both raise drift errors. Bundled
-        because each variant takes the same path through the drift check
-        and a separate test would double the (slow) class fixture cost."""
-        set_model_file(
-            project,
-            relation(project, "my_streaming_table"),
-            STREAMING_TABLE_MODEL_REMOVED_COLUMN,
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_streaming_table")
-
-        set_model_file(
-            project,
-            relation(project, "my_streaming_table"),
-            STREAMING_TABLE_MODEL_RENAMED_COLUMN,
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_streaming_table")
-
-
-# ---------------------------------------------------------------------------
-# Streaming source drift tests
-# ---------------------------------------------------------------------------
-
-
-class TestStreamingSourceSchemaDrift(ConfluentFixtures):
-    """Streaming source schema and options drift detection tests.
-
-    Creates my_source once, then runs drift checks.  Drift-error tests
-    don't modify the table.
-    """
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return {
-            "models": {"+schema": unique_schema},
-            "seeds": {"+schema": unique_schema},
-        }
-
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {
-            "my_source.sql": STREAMING_SOURCE_MODEL,
-        }
-
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql("drop table if exists my_source")
-
-    def test_second_run_skips(self, project):
-        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL)
-        results = run_dbt(["run"])
-        assert len(results) == 1
-        assert results[0].message == "SKIP", (
-            f"{results[0].node.name} was not skipped (message: {results[0].message})"
-        )
-
-    def test_changed_options_detected(self, project):
-        set_model_file(
-            project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_DIFFERENT_OPTIONS
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
-
-    def test_extra_column_detected(self, project):
-        """Adding a column should raise an error without --full-refresh."""
-        set_model_file(
-            project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_EXTRA_COLUMN
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
-
-    def test_removed_column_detected(self, project):
-        """Removing a column should raise an error without --full-refresh."""
-        set_model_file(
-            project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_REMOVED_COLUMN
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
-
-    def test_renamed_column_detected(self, project):
-        """Renaming a column should raise an error without --full-refresh."""
-        set_model_file(
-            project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_RENAMED_COLUMN
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
-
-    def test_type_change_detected(self, project):
-        """Changing column data types should raise an error without --full-refresh."""
-        set_model_file(project, relation(project, "my_source"), STREAMING_SOURCE_MODEL_TYPE_CHANGE)
-        result = run_dbt(["run"], expect_pass=False)
-        assert_drift_error(result, "my_source")
-
-
-# ---------------------------------------------------------------------------
 # on_schema_drift='ignore' tests
 # ---------------------------------------------------------------------------
 
@@ -515,27 +264,16 @@ TABLE_MODEL_IGNORE_DRIFT_CHANGED = """
 select order_id, price from {{ ref('source_for_drift') }}
 """
 
-STREAMING_TABLE_MODEL_IGNORE_DRIFT = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'upsert'},
-    on_schema_drift='ignore'
-) }}
-select order_id, price, order_time from {{ ref('source_for_drift') }}
-"""
-
-STREAMING_TABLE_MODEL_IGNORE_DRIFT_CHANGED = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'append'},
-    on_schema_drift='ignore'
-) }}
-select order_id, price from {{ ref('source_for_drift') }}
-"""
-
 
 class TestIgnoreSchemaDrift(ConfluentFixtures):
-    """When on_schema_drift='ignore', drift should not be detected or cause errors."""
+    """When on_schema_drift='ignore', drift should not be detected or cause errors.
+
+    Tested on the cheap CTAS table only: on_schema_drift='ignore' short-circuits
+    skip_or_drop_existing *before* any drift check runs (helpers.sql), so the
+    behavior is identical for every materialization and the drift kind (columns
+    vs options) is irrelevant — the check never fires. No need to pay for a
+    live streaming_table to re-prove the same branch.
+    """
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -548,8 +286,6 @@ class TestIgnoreSchemaDrift(ConfluentFixtures):
         return {
             "source_for_drift.sql": SOURCE_FOR_DRIFT,
             "my_table.sql": TABLE_MODEL_IGNORE_DRIFT,
-            "my_streaming_table.sql": STREAMING_TABLE_MODEL_IGNORE_DRIFT,
-            "models.yml": STREAMING_TABLE_MODELS_YML,
         }
 
     @pytest.fixture(scope="class", autouse=True)
@@ -558,35 +294,18 @@ class TestIgnoreSchemaDrift(ConfluentFixtures):
         yield
         project.run_sql("drop table if exists source_for_drift")
         project.run_sql("drop table if exists my_table")
-        project.run_sql("drop table if exists my_streaming_table")
 
     def test_table_with_column_drift_ignored(self, project):
         """With on_schema_drift='ignore', column drift should not cause an error."""
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_IGNORE_DRIFT_CHANGED)
         result = run_dbt(["run"])
         # All models should succeed (skip)
-        assert len(result) == 3  # source + my_table + my_streaming_table
+        assert len(result) == 2  # source + my_table
         for r in result:
             assert r.status.name == "Success"
         # my_table should have been skipped
         my_table_result = get_result_by_name(result, "my_table")
         assert my_table_result.message == "SKIP"
-
-    def test_streaming_table_with_options_drift_ignored(self, project):
-        """With on_schema_drift='ignore', WITH options drift should not cause an error."""
-        set_model_file(
-            project,
-            relation(project, "my_streaming_table"),
-            STREAMING_TABLE_MODEL_IGNORE_DRIFT_CHANGED,
-        )
-        result = run_dbt(["run"])
-        # All models should succeed (skip)
-        assert len(result) == 3
-        for r in result:
-            assert r.status.name == "Success"
-        # my_streaming_table should have been skipped
-        streaming_result = get_result_by_name(result, "my_streaming_table")
-        assert streaming_result.message == "SKIP"
 
 
 class TestInvalidOnSchemaChange(ConfluentFixtures):
@@ -630,107 +349,10 @@ select order_id, price, order_time from {{ ref('source_for_drift') }}
 
 
 # ---------------------------------------------------------------------------
-# distributed_by drift tests
+# distributed_by drift — one shared setup across all three materializations
 # ---------------------------------------------------------------------------
 
-DIST_TABLE_BASELINE = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'upsert'},
-    distributed_by={'columns': ['order_id'], 'buckets': 4},
-) }}
-select order_id, price, order_time from {{ ref('source_for_drift') }}
-"""
-
-DIST_TABLE_DIFFERENT_COLUMN = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'upsert'},
-    distributed_by={'columns': ['price'], 'buckets': 4},
-) }}
-select order_id, price, order_time from {{ ref('source_for_drift') }}
-"""
-
-DIST_TABLE_DIFFERENT_BUCKETS = """
-{{ config(
-    materialized='streaming_table',
-    with={'changelog.mode': 'upsert'},
-    distributed_by={'columns': ['order_id'], 'buckets': 8},
-) }}
-select order_id, price, order_time from {{ ref('source_for_drift') }}
-"""
-
-DIST_TABLE_MODELS_YML = """
-models:
-  - name: dist_drift_table
-    columns:
-      - name: order_id
-        data_type: bigint
-        constraints:
-          - type: not_null
-          - type: primary_key
-            expression: "not enforced"
-      - name: price
-        data_type: decimal(10,2)
-      - name: order_time
-        data_type: timestamp(3)
-"""
-
-
-class TestDistributedBySchemaDrift(ConfluentFixtures):
-    """Drift tests for the `distributed_by` config.
-
-    Creates source_for_drift + dist_drift_table once with a baseline
-    distribution, then runs drift checks against the unchanged table.
-    """
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return {
-            "models": {"+schema": unique_schema},
-            "seeds": {"+schema": unique_schema},
-        }
-
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {
-            "source_for_drift.sql": SOURCE_FOR_DRIFT,
-            "dist_drift_table.sql": DIST_TABLE_BASELINE,
-            "models.yml": DIST_TABLE_MODELS_YML,
-        }
-
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql("drop table if exists source_for_drift")
-        project.run_sql("drop table if exists dist_drift_table")
-
-    def test_second_run_skips(self, project):
-        """Re-running with the same distribution should skip cleanly."""
-        set_model_file(project, relation(project, "dist_drift_table"), DIST_TABLE_BASELINE)
-        results = run_dbt(["run"])
-        assert len(results) == 2
-        for r in results:
-            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-
-    def test_changed_columns_detected(self, project):
-        """Changing the distribution column list should raise a drift error."""
-        set_model_file(project, relation(project, "dist_drift_table"), DIST_TABLE_DIFFERENT_COLUMN)
-        result = run_dbt(["run"], expect_pass=False)
-        assert_distribution_drift_error(result, "dist_drift_table")
-
-    def test_changed_buckets_detected(self, project):
-        """Changing the bucket count should raise a drift error."""
-        set_model_file(
-            project, relation(project, "dist_drift_table"), DIST_TABLE_DIFFERENT_BUCKETS
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_distribution_drift_error(result, "dist_drift_table")
-
-
-# -- CTAS table drift --
-
+# -- table (CTAS) --
 DIST_CTAS_BASELINE = """
 {{ config(
     materialized='table',
@@ -747,67 +369,7 @@ DIST_CTAS_DIFFERENT_COLUMN = """
 select order_id, price, order_time from {{ ref('source_for_drift') }}
 """
 
-DIST_CTAS_DIFFERENT_BUCKETS = """
-{{ config(
-    materialized='table',
-    distributed_by={'columns': ['order_id'], 'buckets': 8},
-) }}
-select order_id, price, order_time from {{ ref('source_for_drift') }}
-"""
-
-
-class TestDistributedByOnTableDrift(ConfluentFixtures):
-    """Drift coverage for `distributed_by` on the `table` (CTAS) materialization.
-
-    The class fixture creates source_for_drift + dist_drift_ctas with the
-    baseline distribution; tests then mutate the model file and assert that
-    the drift check fires. A successful baseline (test_second_run_skips)
-    implicitly proves the DISTRIBUTED BY clause was rendered correctly —
-    otherwise the second run would fire drift.
-    """
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, unique_schema):
-        return {
-            "models": {"+schema": unique_schema},
-            "seeds": {"+schema": unique_schema},
-        }
-
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {
-            "source_for_drift.sql": SOURCE_FOR_DRIFT,
-            "dist_drift_ctas.sql": DIST_CTAS_BASELINE,
-        }
-
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql("drop table if exists source_for_drift")
-        project.run_sql("drop table if exists dist_drift_ctas")
-
-    def test_second_run_skips(self, project):
-        """Re-running with the same distribution should skip cleanly."""
-        set_model_file(project, relation(project, "dist_drift_ctas"), DIST_CTAS_BASELINE)
-        results = run_dbt(["run"])
-        assert len(results) == 2
-        for r in results:
-            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-
-    def test_changed_columns_detected(self, project):
-        set_model_file(project, relation(project, "dist_drift_ctas"), DIST_CTAS_DIFFERENT_COLUMN)
-        result = run_dbt(["run"], expect_pass=False)
-        assert_distribution_drift_error(result, "dist_drift_ctas")
-
-    def test_changed_buckets_detected(self, project):
-        set_model_file(project, relation(project, "dist_drift_ctas"), DIST_CTAS_DIFFERENT_BUCKETS)
-        result = run_dbt(["run"], expect_pass=False)
-        assert_distribution_drift_error(result, "dist_drift_ctas")
-
-
-# -- Streaming source drift --
-
+# -- streaming_source --
 DIST_SOURCE_BASELINE = """
 {{ config(
     materialized='streaming_source',
@@ -842,27 +404,23 @@ order_time TIMESTAMP(3),
 WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
 """
 
-DIST_SOURCE_DIFFERENT_BUCKETS = """
-{{ config(
-    materialized='streaming_source',
-    connector='faker',
-    with={
-        'rows-per-second': '1',
-        'number-of-rows': '100',
-        'changelog.mode': 'append',
-    },
-    distributed_by={'columns': ['order_id'], 'buckets': 5},
-) }}
-order_id BIGINT NOT NULL,
-price DECIMAL(10, 2),
-order_time TIMESTAMP(3),
-WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND
-"""
 
+class TestDistributedBySchemaDrift(ConfluentFixtures):
+    """End-to-end `distributed_by` drift wiring on the table (CTAS) and
+    streaming_source materializations.
 
-class TestDistributedByOnStreamingSourceDrift(ConfluentFixtures):
-    """Drift coverage for `distributed_by` on the `streaming_source`
-    materialization. See TestDistributedByOnTableDrift for rationale."""
+    One class-scoped full-refresh creates a distributed baseline for each; the
+    drift test then mutates both distribution column lists and asserts the
+    check fires. streaming_table is intentionally omitted here: its drift path
+    is identical to the CTAS table's (both are `has_select_query=true`), and a
+    live streaming_table costs ~2 min of compute-pool provisioning per setup —
+    its end-to-end drift wiring is proven once in TestSchemaDriftDetection.
+
+    A passing test_second_run_skips implicitly proves the DISTRIBUTED BY clause
+    rendered correctly — otherwise the unchanged second run would itself drift.
+    The column-vs-bucket discrimination (and the detection logic generally) is
+    covered by the unit tests, so one changed-column case is enough here.
+    """
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -874,6 +432,8 @@ class TestDistributedByOnStreamingSourceDrift(ConfluentFixtures):
     @pytest.fixture(scope="class")
     def models(self):
         return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "dist_drift_ctas.sql": DIST_CTAS_BASELINE,
             "dist_drift_source.sql": DIST_SOURCE_BASELINE,
         }
 
@@ -881,30 +441,33 @@ class TestDistributedByOnStreamingSourceDrift(ConfluentFixtures):
     def setup_and_teardown(self, project):
         run_dbt(["run", "--full-refresh"])
         yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists dist_drift_ctas")
         project.run_sql("drop table if exists dist_drift_source")
 
     def test_second_run_skips(self, project):
-        """Re-running with the same distribution should skip cleanly."""
-        set_model_file(project, relation(project, "dist_drift_source"), DIST_SOURCE_BASELINE)
+        """Re-running with the same distribution must skip cleanly for both
+        materializations — also proves both DISTRIBUTED BY clauses rendered."""
         results = run_dbt(["run"])
-        assert len(results) == 1
-        assert results[0].message == "SKIP", (
-            f"{results[0].node.name} was not skipped (message: {results[0].message})"
-        )
+        assert len(results) == 3
+        for r in results:
+            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
 
-    def test_changed_columns_detected(self, project):
+    def test_distribution_drift_detected(self, project):
+        """Both materializations' distribution drifted at once, in a single run
+        (see TestSchemaDriftDetection.test_column_drift_detected for why one run
+        rather than two)."""
+        set_model_file(project, relation(project, "dist_drift_ctas"), DIST_CTAS_DIFFERENT_COLUMN)
         set_model_file(
             project, relation(project, "dist_drift_source"), DIST_SOURCE_DIFFERENT_COLUMN
         )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_distribution_drift_error(result, "dist_drift_source")
-
-    def test_changed_buckets_detected(self, project):
-        set_model_file(
-            project, relation(project, "dist_drift_source"), DIST_SOURCE_DIFFERENT_BUCKETS
-        )
-        result = run_dbt(["run"], expect_pass=False)
-        assert_distribution_drift_error(result, "dist_drift_source")
+        try:
+            result = run_dbt(["run"], expect_pass=False)
+            assert_distribution_drift_error(result, "dist_drift_ctas")
+            assert_distribution_drift_error(result, "dist_drift_source")
+        finally:
+            set_model_file(project, relation(project, "dist_drift_ctas"), DIST_CTAS_BASELINE)
+            set_model_file(project, relation(project, "dist_drift_source"), DIST_SOURCE_BASELINE)
 
 
 # -- Intentional gap: auto-assigned distribution does not trigger drift --
