@@ -464,6 +464,7 @@ class ConfluentAdapter(SQLAdapter):
         drift_catalog: "agate.Table",
         expected_with: dict[str, str],
         expected_distribution: dict | None = None,
+        enforce: str = "all",
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
@@ -476,7 +477,16 @@ class ConfluentAdapter(SQLAdapter):
         Each helper returns a list of one-line violation strings; we collect
         them all and raise a single error so the user sees every drift in one
         run rather than fixing them one at a time.
+
+        `enforce` controls which concerns can produce violations:
+            "all"     — columns + options + distribution (default).
+            "columns" — only column drift raises. Used by the streaming
+                        restart path under `on_schema_drift='ignore'`, where
+                        options/distribution drift is fine but a column
+                        mismatch would cause Flink to reject the INSERT.
         """
+        if enforce not in ("all", "columns"):
+            raise ValueError(f"check_schema_drift: invalid enforce value {enforce!r}")
         existing_columns, expected_columns, existing_options, existing_distribution = (
             self._partition_drift_catalog(
                 drift_catalog, existing_relation.identifier, temp_relation.identifier
@@ -502,10 +512,11 @@ class ConfluentAdapter(SQLAdapter):
 
         violations: list[str] = []
         violations.extend(self._check_column_drift(existing_columns, expected_columns))
-        violations.extend(self._check_options_drift(expected_with, existing_options))
-        violations.extend(
-            self._check_distribution_drift(expected_distribution, existing_distribution)
-        )
+        if enforce == "all":
+            violations.extend(self._check_options_drift(expected_with, existing_options))
+            violations.extend(
+                self._check_distribution_drift(expected_distribution, existing_distribution)
+            )
         if violations:
             bullets = "\n".join(f"  - {v}" for v in violations)
             raise CompilationError(

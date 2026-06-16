@@ -79,6 +79,13 @@
   {% if recoverable %}
     {% set health = adapter.classify_existing_statement(get_statement_name()) %}
     {% if health != 'healthy' %}
+      {# Restart re-submits INSERT against the existing table. In 'fail' mode
+         we already verified columns match above. In 'ignore' mode we skipped
+         the check, so verify columns now — options/distribution drift won't
+         break INSERT, but a column mismatch will. #}
+      {% if on_schema_drift == 'ignore' %}
+        {{ check_for_schema_drift(existing_relation, has_select_query, enforce='columns') }}
+      {% endif %}
       {{ log("Statement for " ~ existing_relation ~ " is " ~ health ~ ". Re-submitting (no full refresh required).", info=True) }}
       {{ delete_statement_if_exists(get_statement_name()) }}
       {{ return('restart') }}
@@ -90,7 +97,7 @@
 {% endmacro %}
 
 
-{% macro check_for_schema_drift(existing_relation, has_select_query) %}
+{% macro check_for_schema_drift(existing_relation, has_select_query, enforce='all') %}
   {# Compare the existing table against what the model would produce and
      raise a compilation error on any drift (columns, types, WITH options,
      or DISTRIBUTED BY).
@@ -102,7 +109,11 @@
 
      has_select_query: true if the model SQL is a SELECT (table,
                        streaming_table); false if it's column definitions
-                       (streaming_source). #}
+                       (streaming_source).
+     enforce: 'all' (default) checks columns + options + distribution.
+              'columns' only raises on column drift — used by the streaming
+              restart path under on_schema_drift='ignore' to keep restart
+              safe without rejecting benign options/distribution drift. #}
 
   {% set temp_table_name = adapter.generate_schema_check_temp_name(this.identifier, invocation_id) %}
   {% set temp_relation = adapter.Relation.create(
@@ -137,7 +148,8 @@
     temp_relation,
     load_result('get_drift_catalog').table,
     config.get('with', {}),
-    config.get('distributed_by')
+    config.get('distributed_by'),
+    enforce
   ) %}
 {% endmacro %}
 
