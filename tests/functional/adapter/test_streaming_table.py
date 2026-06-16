@@ -402,6 +402,26 @@ class TestDeadStatementRestart(ConfluentFixtures):
             time.sleep(2)
         raise AssertionError(f"Statement {name} did not reach terminal state in {timeout}s")
 
+    def _wait_for_absent(self, adapter, name, timeout=60):
+        """Block until `name` is fully gone (get_statement 404s).
+
+        adapter.delete_statement() does not await async teardown — the
+        production restart path tolerates the lingering name via add_query's
+        409-retry on CREATE. This test re-submits the same name through the raw
+        cursor (no such retry), so it must wait for the name to actually free
+        before planting, or it races the teardown and hits a 409 Conflict.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with adapter.connection_named("absence_poll"):
+                conn = adapter.connections.get_thread_connection()
+                try:
+                    conn.handle.get_statement(name)
+                except StatementNotFoundError:
+                    return
+            time.sleep(2)
+        raise AssertionError(f"Statement {name} was not freed within {timeout}s of deletion")
+
     def test_terminal_insert_statement_is_resubmitted(self, project, dbt_profile_data):
         adapter = project.adapter
         label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
@@ -414,10 +434,14 @@ class TestDeadStatementRestart(ConfluentFixtures):
         assert all(r.status == "success" for r in results)
 
         # Replace the live INSERT with a planted statement that will
-        # finish on its own (COMPLETED is a terminal phase too). Delete
-        # the live one first so the name is free.
+        # finish on its own (COMPLETED is a terminal phase too). Delete the
+        # live one first, then wait for the name to actually free — the raw
+        # cursor re-submit below has no 409-retry, so it must not race the
+        # async teardown.
         with adapter.connection_named("plant_terminal"):
             adapter.delete_statement(insert_name)
+        self._wait_for_absent(adapter, insert_name)
+        with adapter.connection_named("plant_terminal"):
             conn = adapter.connections.get_thread_connection()
             cursor = conn.handle.cursor(mode=ExecutionMode.STREAMING_QUERY)
             cursor.execute(

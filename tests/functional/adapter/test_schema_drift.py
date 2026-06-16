@@ -32,14 +32,22 @@ from tests.functional.adapter._helpers import (
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 # -- Shared faker source feeding the table / streaming_table models --
-
+#
+# Intentionally UNBOUNDED (no `number-of-rows`). The streaming_table that reads
+# from this source is recoverable: on a re-run, decide_action classifies its
+# long-running INSERT and restarts it if the statement is missing or terminal.
+# A bounded faker source makes that INSERT *complete* (reach a terminal phase),
+# which would turn a no-change second run into a restart and break
+# TestSchemaDriftDetection.test_second_run_skips. Keeping the source unbounded
+# keeps the INSERT RUNNING/healthy across re-runs, matching production, so the
+# second run skips. The autouse ConfluentFixtures.clean_up deletes every
+# statement by label after each test, so an unbounded source leaks no compute.
 SOURCE_FOR_DRIFT = """
 {{ config(
     materialized='streaming_source',
     connector='faker',
     with={
         'rows-per-second': '1',
-        'number-of-rows': '100',
     }
 ) }}
 `order_id` BIGINT,
@@ -306,6 +314,87 @@ class TestIgnoreSchemaDrift(ConfluentFixtures):
         # my_table should have been skipped
         my_table_result = get_result_by_name(result, "my_table")
         assert my_table_result.message == "SKIP"
+
+
+# -- streaming_table restart under on_schema_drift='ignore' --
+
+STREAMING_TABLE_MODEL_IGNORE = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+    on_schema_drift='ignore',
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+STREAMING_TABLE_MODEL_IGNORE_COLUMN_DROPPED = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+    on_schema_drift='ignore',
+) }}
+select order_id, price from {{ ref('source_for_drift') }}
+"""
+
+
+class TestStreamingRestartUnderIgnore(ConfluentFixtures):
+    """on_schema_drift='ignore' suppresses *benign* drift, not load-bearing
+    column drift on the restart path.
+
+    The skip path (healthy statement) short-circuits before any drift check, so
+    'ignore' is total there — that's covered by TestIgnoreSchemaDrift on the
+    cheap CTAS table. But streaming_table is recoverable: when its INSERT is
+    missing or terminal, the materialization re-submits the INSERT against the
+    *existing* table. If the model's columns have actually drifted, that INSERT
+    would fail at Flink with a cryptic "Different number of columns" error. So
+    the restart path runs a columns-only drift check even under 'ignore' and
+    surfaces a clear dbt drift error instead.
+    """
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {
+            "models": {"+schema": unique_schema},
+        }
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "my_streaming_table.sql": STREAMING_TABLE_MODEL_IGNORE,
+            "models.yml": STREAMING_TABLE_MODELS_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project, dbt_profile_data):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+        with project.adapter.connection_named("cleanup"):
+            conn = project.adapter.connections.get_thread_connection()
+            for stmt in conn.handle.list_statements(label=label):
+                project.adapter.delete_statement(stmt.name)
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists my_streaming_table")
+
+    def test_restart_under_ignore_raises_on_column_drift(self, project, dbt_profile_data):
+        """Regression: missing INSERT + drifted columns under 'ignore' must
+        surface a drift error, not a cryptic Flink failure on resubmit."""
+        # Force the missing-statement state deterministically so decide_action
+        # takes the restart branch on the next run.
+        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+        with project.adapter.connection_named("force_missing"):
+            conn = project.adapter.connections.get_thread_connection()
+            for stmt in conn.handle.list_statements(label=label):
+                project.adapter.delete_statement(stmt.name)
+
+        set_model_file(
+            project,
+            relation(project, "my_streaming_table"),
+            STREAMING_TABLE_MODEL_IGNORE_COLUMN_DROPPED,
+        )
+        result = run_dbt(["run"], expect_pass=False)
+        assert_drift_error(result, "my_streaming_table")
 
 
 class TestInvalidOnSchemaChange(ConfluentFixtures):
