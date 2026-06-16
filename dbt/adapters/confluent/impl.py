@@ -160,17 +160,41 @@ class ConfluentAdapter(SQLAdapter):
     def classify_existing_statement(self, statement_name: str) -> str:
         """Classify a Flink statement by name. Returns one of:
 
-        - 'missing'  — no statement exists with that name (404)
+        - 'missing'  — no statement exists with that name (404), or it is
+                       invisible to this compute-pool scope (403, see below)
         - 'terminal' — statement is in COMPLETED, STOPPED, FAILED, or DELETED
         - 'healthy'  — anything else (PENDING, RUNNING, DEGRADED, in-flight transitions)
 
         Used by materializations to decide whether to restart a long-running
         statement when the relation already exists. No side effects.
+
+        Like delete_statement(), we treat a 403 as 'missing': compute-pool-scoped
+        roles return 403 (not 404) for a statement that doesn't exist, or that
+        lives on a different compute pool than the one in config. We can't
+        disambiguate that from a real permission problem here, but reaching this
+        method means an existing relation was already read on the same scope, so
+        auth is working; and if it isn't, the resulting restart's CREATE runs on
+        the same scope and surfaces the real permission error there.
         """
         conn = self.connections.get_thread_connection()
         try:
             statement = conn.handle.get_statement(statement_name)
         except StatementNotFoundError:
+            return "missing"
+        except OperationalError as e:
+            if getattr(e, "http_status_code", None) != 403:
+                raise
+            fire_event(
+                AdapterEventWarning(
+                    base_msg=(
+                        f"Got 403 when inspecting Flink statement '{statement_name}'. "
+                        f"This is the expected response for a statement that is missing "
+                        f"or on a different compute pool under pool-scoped roles, so we "
+                        f"treat it as missing and resubmit. If the resubmit fails, verify "
+                        f"that the API key can manage statements in this compute pool."
+                    )
+                )
+            )
             return "missing"
         return "terminal" if statement.phase.is_terminal else "healthy"
 

@@ -3,13 +3,14 @@
 The classifier is the decision input for the streaming-statement
 recovery path in `decide_action` (Jinja). Terminal phases trigger a
 restart; healthy phases (including in-flight transitions) skip; a
-404 from the API also triggers a restart.
+404 from the API also triggers a restart, and so does a 403 (pool-scoped
+roles return 403 instead of 404 for a missing / cross-pool statement).
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-from confluent_sql.exceptions import StatementNotFoundError
+from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.statement import Phase
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
@@ -51,3 +52,26 @@ class TestClassifyExistingStatement:
     )
     def test_healthy_and_inflight_phases_return_healthy(self, phase: Phase):
         assert classify(_adapter_with_phase(phase)) == "healthy"
+
+    def test_403_returns_missing_and_warns(self):
+        """Pool-scoped roles return 403 for a missing / cross-pool statement;
+        treat it as missing (resubmit) and emit a warning."""
+        adapter = MagicMock()
+        handle = adapter.connections.get_thread_connection.return_value.handle
+        handle.get_statement.side_effect = OperationalError(
+            "error sending request '403'", http_status_code=403
+        )
+        with patch("dbt.adapters.confluent.impl.fire_event") as fire_event:
+            assert classify(adapter) == "missing"
+        fire_event.assert_called_once()
+        assert "403" in fire_event.call_args.args[0].base_msg
+
+    def test_non_403_operational_error_reraises(self):
+        """A non-403 API error is a real failure and must propagate."""
+        adapter = MagicMock()
+        handle = adapter.connections.get_thread_connection.return_value.handle
+        handle.get_statement.side_effect = OperationalError(
+            "internal server error", http_status_code=500
+        )
+        with pytest.raises(OperationalError):
+            classify(adapter)
