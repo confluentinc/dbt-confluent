@@ -18,7 +18,12 @@
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
   -- TODO: Support altering table options without full refresh (ALTER TABLE ... SET).
-  {% if skip_or_drop_existing(existing_relation, target_relation, has_select_query=false) %}
+  {# Recovery is not safe for streaming_source: the CREATE statement also
+     attaches the connector, and Flink doesn't support re-attaching to an
+     existing table. Pass recoverable=false so a dead connector statement
+     surfaces as a SKIP (with a log line from decide_action) — user must
+     run --full-refresh. Tracked as a follow-up to #32/#33. #}
+  {% if decide_action(existing_relation, has_select_query=false) == 'skip' %}
     {# dbt requires a 'main' statement result even when skipping #}
     {% call noop_statement('main', 'SKIP') %}{% endcall %}
     {{ run_hooks(post_hooks, inside_transaction=False) }}

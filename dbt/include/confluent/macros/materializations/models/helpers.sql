@@ -35,45 +35,117 @@
 {% endmacro %}
 
 
-{% macro skip_or_drop_existing(existing_relation, target_relation, has_select_query=true) %}
-  {# If the relation already exists, either drop it (on --full-refresh) or skip.
-     Returns true if the caller should skip (relation exists and no full refresh).
-     Before skipping, checks for schema drift according to on_schema_drift config.
-     has_select_query: true if the model SQL is a SELECT (table, streaming_table),
-                       false if it's column definitions (streaming_source). #}
-  {% if existing_relation %}
-    {% if should_full_refresh() %}
-      {{ delete_statement_if_exists(get_statement_name()) }}
-      {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
-      {{ drop_relation_if_exists(existing_relation) }}
-      {{ return(false) }}
-    {% else %}
-      {% set on_schema_drift = config.get('on_schema_drift', 'fail') %}
-      {% if on_schema_drift == 'ignore' %}
-        {{ log("Relation " ~ existing_relation ~ " already exists. Skipping without drift check (on_schema_drift='ignore').", info=True) }}
-      {% elif on_schema_drift == 'fail' %}
-        {{ check_for_schema_drift(existing_relation, has_select_query) }}
-        {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
-      {% else %}
-        {% set msg = "Invalid value for on_schema_drift ('%s'). Expected 'ignore' or 'fail'." % on_schema_drift %}
-        {% do exceptions.raise_compiler_error(msg) %}
-      {% endif %}
-      {{ return(true) }}
-    {% endif %}
+{% macro decide_action(existing_relation, has_select_query=true, recoverable=false) %}
+  {# Decide what to do for an existing-relation materialization, perform the
+     side effects that decision implies, and return the action so the caller
+     can skip its own DDL/INSERT blocks. Returns one of:
+       'create'  — build from scratch. `_prepare_create` has already dropped
+                   the existing relation (on --full-refresh) or cleared
+                   orphaned statements (fresh build); the caller just creates.
+       'restart' — the table is intact and matches; only the long-running
+                   statement is missing or terminal. `_prepare_restart` has
+                   re-verified the columns and deleted the dead statement; the
+                   caller skips its DDL and re-submits the statement.
+       'skip'    — relation exists, schema matches, statement is healthy.
+
+     `recoverable` opts a materialization into the 'restart' branch. Only
+     `streaming_table` is recoverable today; other materializations either
+     don't have a long-running statement to restart (`table`, `view`) or
+     can't be safely restarted without dropping the table (`streaming_source`).
+
+     has_select_query: true if the model SQL is a SELECT (table,
+     streaming_table), false if it's column definitions (streaming_source). #}
+  {% set action = _classify_action(existing_relation, recoverable) %}
+  {% if action == 'create' %}
+    {{ _prepare_create(existing_relation) }}
+  {% elif action == 'restart' %}
+    {{ _prepare_restart(existing_relation, has_select_query) }}
   {% else %}
-    {# No relation exists, but orphaned Flink statements may linger if the table
-       was dropped without deleting its statements (e.g. external cleanup).
-       Delete them so the materialization can create fresh ones. We don't expect
-       them to exist in the common case (first-time run), so suppress the loud
-       warning the adapter would otherwise emit for a pool-scoped 403. #}
-    {{ delete_statement_if_exists(get_statement_name(), expect_exists=false) }}
-    {{ delete_statement_if_exists(get_statement_name('-ddl'), expect_exists=false) }}
+    {{ _prepare_skip(existing_relation, has_select_query) }}
   {% endif %}
-  {{ return(false) }}
+  {{ return(action) }}
 {% endmacro %}
 
 
-{% macro check_for_schema_drift(existing_relation, has_select_query) %}
+{% macro _classify_action(existing_relation, recoverable) %}
+  {# Pure decision: read state and return the action, no mutations
+     (statement_needs_restart is a read-only API call). The on_schema_drift
+     config does not affect the action — it only changes which drift the
+     _prepare_* steps enforce — so it is validated there, not here. #}
+  {% if not existing_relation %}
+    {{ return('create') }}
+  {% endif %}
+  {% if should_full_refresh() %}
+    {{ return('create') }}
+  {% endif %}
+  {% if recoverable and adapter.statement_needs_restart(get_statement_name()) %}
+    {{ return('restart') }}
+  {% endif %}
+  {{ return('skip') }}
+{% endmacro %}
+
+
+{% macro _prepare_create(existing_relation) %}
+  {# Side effects for the 'create' action. #}
+  {% if existing_relation %}
+    {# --full-refresh: drop the existing statements and the relation so the
+       caller can recreate from scratch. #}
+    {{ delete_statement_if_exists(get_statement_name()) }}
+    {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
+    {{ drop_relation_if_exists(existing_relation) }}
+  {% else %}
+    {# Fresh build, but orphaned Flink statements may linger if the table was
+       dropped without deleting its statements (e.g. external cleanup). Delete
+       them so the materialization can create fresh ones. We don't expect them
+       in the common case (first-time run), so suppress the loud warning the
+       adapter would otherwise emit for a pool-scoped 403. #}
+    {{ delete_statement_if_exists(get_statement_name(), expect_exists=false) }}
+    {{ delete_statement_if_exists(get_statement_name('-ddl'), expect_exists=false) }}
+  {% endif %}
+{% endmacro %}
+
+
+{% macro _prepare_restart(existing_relation, has_select_query) %}
+  {# Side effects for the 'restart' action: re-verify the schema, then delete
+     the dead statement so the caller can re-submit it. Re-submitting INSERT
+     against the existing table is only safe if the columns still match (a
+     mismatch makes Flink reject the INSERT), so we enforce a columns check
+     even under on_schema_drift='ignore'. #}
+  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=true) }}
+  {{ log("Statement for " ~ existing_relation ~ " is missing or in a terminal phase. Re-submitting (no full refresh required).", info=True) }}
+  {{ delete_statement_if_exists(get_statement_name()) }}
+{% endmacro %}
+
+
+{% macro _prepare_skip(existing_relation, has_select_query) %}
+  {# Side effects for the 'skip' action: enforce schema drift, then log. #}
+  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=false) }}
+  {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
+{% endmacro %}
+
+
+{% macro _enforce_schema_drift(existing_relation, has_select_query, restart) %}
+  {# Run the drift check appropriate to the on_schema_drift config:
+       'fail'   — full check (columns + options + distribution); raises on any drift.
+       'ignore' — no check, except the restart path still needs a columns-only
+                  check (benign options/distribution drift is fine, but a column
+                  mismatch would make the re-submitted INSERT fail at Flink).
+     Validated here, the single place on_schema_drift is consumed. #}
+  {% set on_schema_drift = config.get('on_schema_drift', 'fail') %}
+  {% if on_schema_drift == 'fail' %}
+    {{ check_for_schema_drift(existing_relation, has_select_query) }}
+  {% elif on_schema_drift == 'ignore' %}
+    {% if restart %}
+      {{ check_for_schema_drift(existing_relation, has_select_query, enforce='columns') }}
+    {% endif %}
+  {% else %}
+    {% set msg = "Invalid value for on_schema_drift ('%s'). Expected 'ignore' or 'fail'." % on_schema_drift %}
+    {% do exceptions.raise_compiler_error(msg) %}
+  {% endif %}
+{% endmacro %}
+
+
+{% macro check_for_schema_drift(existing_relation, has_select_query, enforce='all') %}
   {# Compare the existing table against what the model would produce and
      raise a compilation error on any drift (columns, types, WITH options,
      or DISTRIBUTED BY).
@@ -85,7 +157,11 @@
 
      has_select_query: true if the model SQL is a SELECT (table,
                        streaming_table); false if it's column definitions
-                       (streaming_source). #}
+                       (streaming_source).
+     enforce: 'all' (default) checks columns + options + distribution.
+              'columns' only raises on column drift — used by the streaming
+              restart path under on_schema_drift='ignore' to keep restart
+              safe without rejecting benign options/distribution drift. #}
 
   {% set temp_table_name = adapter.generate_schema_check_temp_name(this.identifier, invocation_id) %}
   {% set temp_relation = adapter.Relation.create(
@@ -120,7 +196,8 @@
     temp_relation,
     load_result('get_drift_catalog').table,
     config.get('with', {}),
-    config.get('distributed_by')
+    config.get('distributed_by'),
+    enforce
   ) %}
 {% endmacro %}
 
