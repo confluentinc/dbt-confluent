@@ -4,6 +4,8 @@ from uuid import uuid4
 
 import pytest
 
+from tests.functional.adapter._helpers import delete_statements_by_label, drop_tables
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,9 +72,28 @@ class ConfluentFixtures:
                 "Skipping statement cleanup — lingering statements may remain."
             )
             return
-        with project.adapter.connection_named("cleanup"):
-            conn = project.adapter.connections.get_thread_connection()
-            for statement in conn.handle.list_statements(label=label):
-                # Use the adapter helper which polls until deletion completes,
-                # because deleting RUNNING statements is async.
-                project.adapter.delete_statement(statement.name)
+        delete_statements_by_label(project, label)
+
+
+class ClassScopedCleanup(ConfluentFixtures):
+    """For tests that manipulate statements inside the test body and want
+    teardown once at class scope rather than after every test.
+
+    Subclasses set TABLES to the model relation names to drop. The default
+    per-test clean_up only deletes statements (it can't drop schemas); these
+    tests additionally need their tables dropped, which class_clean_up does.
+    """
+
+    TABLES: list[str] = []
+
+    @pytest.fixture(autouse=True)
+    def clean_up(self, project, dbt_profile_data):
+        # Suppress the per-test statement cleanup; class_clean_up handles teardown.
+        yield
+
+    @pytest.fixture(autouse=True, scope="class")
+    def class_clean_up(self, project, dbt_profile_data):
+        yield
+        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+        delete_statements_by_label(project, label)
+        drop_tables(project, *self.TABLES)

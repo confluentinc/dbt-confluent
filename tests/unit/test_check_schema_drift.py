@@ -642,3 +642,81 @@ class TestCheckSchemaDriftOrchestrator:
         assert "INFORMATION_SCHEMA" in msg
         # Must not look like a regular column-list drift error.
         assert "drift detected" not in msg.lower()
+
+    def test_enforce_columns_ignores_options_and_distribution_drift(self):
+        """With enforce='columns', only column violations should raise."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                    dist_position=1,
+                ),
+                _row(
+                    section="TABLES",
+                    table_name=self.EXISTING_ID,
+                    is_distributed="YES",
+                    dist_buckets=4,
+                ),
+                _row(
+                    section="TABLE_OPTIONS",
+                    table_name=self.EXISTING_ID,
+                    option_key="changelog.mode",
+                    option_value="upsert",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        # Options and distribution differ, but enforce='columns' suppresses
+        # those; columns match so no error is raised.
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            _relation(self.TEMP_ID),
+            catalog,
+            expected_with={"changelog.mode": "append"},
+            expected_distribution={"columns": ["other"], "buckets": 8},
+            enforce="columns",
+        )
+
+    def test_enforce_columns_still_raises_on_column_drift(self):
+        """enforce='columns' must still surface real column drift."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="extra",
+                    data_type="STRING",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                catalog,
+                expected_with={},
+                enforce="columns",
+            )
+        assert "column added: 'extra'" in str(excinfo.value)
