@@ -1,7 +1,7 @@
 import time
 
 import pytest
-from confluent_sql.exceptions import StatementNotFoundError
+from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.tests.util import relation_from_name, run_dbt
@@ -373,13 +373,17 @@ class TestDeadStatementRestart(ClassScopedCleanup):
         raise AssertionError(f"Statement {name} did not reach terminal state in {timeout}s")
 
     def _wait_for_absent(self, adapter, name, timeout=60):
-        """Block until `name` is fully gone (get_statement 404s).
+        """Block until `name` is fully gone (get_statement reports it missing).
 
         adapter.delete_statement() does not await async teardown — the
         production restart path tolerates the lingering name via add_query's
         409-retry on CREATE. This test re-submits the same name through the raw
         cursor (no such retry), so it must wait for the name to actually free
         before planting, or it races the teardown and hits a 409 Conflict.
+
+        "Missing" is a 404 (StatementNotFoundError) or, under compute-pool-scoped
+        roles, a 403 — the same condition the adapter treats as missing — so we
+        accept both rather than spinning to timeout on the 403.
         """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -389,6 +393,10 @@ class TestDeadStatementRestart(ClassScopedCleanup):
                     conn.handle.get_statement(name)
                 except StatementNotFoundError:
                     return
+                except OperationalError as e:
+                    if getattr(e, "http_status_code", None) == 403:
+                        return
+                    raise
             time.sleep(2)
         raise AssertionError(f"Statement {name} was not freed within {timeout}s of deletion")
 

@@ -62,8 +62,9 @@ def delete_statements_by_label(project, label):
     with project.adapter.connection_named("cleanup"):
         conn = project.adapter.connections.get_thread_connection()
         for statement in conn.handle.list_statements(label=label):
-            # Use the adapter helper which polls until deletion completes,
-            # because deleting RUNNING statements is async.
+            # Use the adapter helper so a missing statement / pool-scoped 403 is
+            # swallowed rather than failing teardown. Deletion is async and not
+            # awaited here; that's fine for cleanup, which doesn't reuse names.
             project.adapter.delete_statement(statement.name)
 
 
