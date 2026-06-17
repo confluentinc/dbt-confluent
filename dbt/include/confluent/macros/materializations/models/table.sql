@@ -5,7 +5,7 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  {% if decide_action(existing_relation, target_relation) == 'skip' %}
+  {% if decide_action(existing_relation) == 'skip' %}
     {# dbt requires a 'main' statement result even when skipping #}
     {% call noop_statement('main', 'SKIP') %}{% endcall %}
     {{ run_hooks(post_hooks, inside_transaction=False) }}

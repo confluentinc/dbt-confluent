@@ -17,7 +17,7 @@
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
   -- TODO: Support altering table options without full refresh (ALTER TABLE ... SET).
-  {% set action = decide_action(existing_relation, target_relation, recoverable=true) %}
+  {% set action = decide_action(existing_relation, recoverable=true) %}
   {% if action == 'skip' %}
     {# dbt requires a 'main' statement result even when skipping #}
     {% call noop_statement('main', 'SKIP') %}{% endcall %}
