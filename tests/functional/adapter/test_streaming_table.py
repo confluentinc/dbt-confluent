@@ -5,7 +5,7 @@ from confluent_sql.exceptions import StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.tests.util import relation_from_name, run_dbt
-from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.fixtures import ClassScopedCleanup, ConfluentFixtures
 
 MY_STREAMING_TABLE = """
 {{ config(
@@ -288,7 +288,7 @@ class TestOrphanStatementCleanup(ConfluentFixtures):
         assert current.statement_id != planted_id
 
 
-class TestCrashRecoveryRestart(ConfluentFixtures):
+class TestCrashRecoveryRestart(ClassScopedCleanup):
     """Crash recovery (#33): if the table exists but the long-running
     INSERT statement is gone (e.g. dbt was killed between DDL and DML, or
     the statement was deleted externally), `dbt run` without --full-refresh
@@ -296,6 +296,7 @@ class TestCrashRecoveryRestart(ConfluentFixtures):
     is preserved (no topic state lost)."""
 
     NAME = "crashrec"
+    TABLES = ["my_streaming_table", "my_streaming_source"]
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -304,22 +305,6 @@ class TestCrashRecoveryRestart(ConfluentFixtures):
             "my_streaming_table.sql": SIMPLE_STREAMING_TABLE,
             "models.yml": SIMPLE_MODELS_YML,
         }
-
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-        with project.adapter.connection_named("cleanup"):
-            conn = project.adapter.connections.get_thread_connection()
-            for stmt in conn.handle.list_statements(label=label):
-                project.adapter.delete_statement(stmt.name)
-        project.run_sql("drop table if exists my_streaming_table")
-        project.run_sql("drop table if exists my_streaming_source")
-
-    @pytest.fixture(autouse=True)
-    def clean_up(self, project, dbt_profile_data):
-        """Override per-test cleanup; class_clean_up handles teardown."""
-        yield
 
     def test_missing_insert_statement_is_resubmitted(self, project):
         adapter = project.adapter
@@ -356,7 +341,7 @@ class TestCrashRecoveryRestart(ConfluentFixtures):
 TERMINAL_PLANT_SQL = "SHOW TABLES"
 
 
-class TestDeadStatementRestart(ConfluentFixtures):
+class TestDeadStatementRestart(ClassScopedCleanup):
     """Dead-statement recovery (half of #32): if the long-running INSERT
     statement is in a terminal phase (FAILED, STOPPED, COMPLETED, DELETED),
     `dbt run` without --full-refresh must replace it. The classifier doesn't
@@ -366,6 +351,7 @@ class TestDeadStatementRestart(ConfluentFixtures):
     is rejected at validation time, before it can be persisted as FAILED)."""
 
     NAME = "deadstmt"
+    TABLES = ["my_streaming_table", "my_streaming_source"]
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -374,22 +360,6 @@ class TestDeadStatementRestart(ConfluentFixtures):
             "my_streaming_table.sql": SIMPLE_STREAMING_TABLE,
             "models.yml": SIMPLE_MODELS_YML,
         }
-
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-        with project.adapter.connection_named("cleanup"):
-            conn = project.adapter.connections.get_thread_connection()
-            for stmt in conn.handle.list_statements(label=label):
-                project.adapter.delete_statement(stmt.name)
-        project.run_sql("drop table if exists my_streaming_table")
-        project.run_sql("drop table if exists my_streaming_source")
-
-    @pytest.fixture(autouse=True)
-    def clean_up(self, project, dbt_profile_data):
-        """Override per-test cleanup; class_clean_up handles teardown."""
-        yield
 
     def _wait_for_terminal(self, adapter, name, timeout=30):
         deadline = time.monotonic() + timeout

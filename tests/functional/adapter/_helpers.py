@@ -51,3 +51,24 @@ def assert_distribution_drift_error(results, name):
     assert "- distribution" in msg_lower, (
         f"{name} schema drift error did not include a distribution violation: {result.message}"
     )
+
+
+def delete_statements_by_label(project, label):
+    """Delete every Flink statement carrying `label`, freeing compute-pool
+    resources. The adapter can't drop schemas, so test teardown is statement-
+    and table-scoped instead. No-op if `label` is falsy."""
+    if not label:
+        return
+    with project.adapter.connection_named("cleanup"):
+        conn = project.adapter.connections.get_thread_connection()
+        for statement in conn.handle.list_statements(label=label):
+            # Use the adapter helper which polls until deletion completes,
+            # because deleting RUNNING statements is async.
+            project.adapter.delete_statement(statement.name)
+
+
+def drop_tables(project, *names):
+    """Drop each named table if it exists. Pairs with delete_statements_by_label
+    so teardown removes both the statements and the relations they created."""
+    for name in names:
+        project.run_sql(f"drop table if exists {name}")

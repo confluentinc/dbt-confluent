@@ -29,7 +29,7 @@ from tests.functional.adapter._helpers import (
     get_result_by_name,
     relation,
 )
-from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.fixtures import ClassScopedCleanup, ConfluentFixtures
 
 # -- Shared faker source feeding the table / streaming_table models --
 #
@@ -337,7 +337,7 @@ select order_id, price from {{ ref('source_for_drift') }}
 """
 
 
-class TestStreamingRestartUnderIgnore(ConfluentFixtures):
+class TestStreamingRestartUnderIgnore(ClassScopedCleanup):
     """on_schema_drift='ignore' suppresses *benign* drift, not load-bearing
     column drift on the restart path.
 
@@ -350,6 +350,8 @@ class TestStreamingRestartUnderIgnore(ConfluentFixtures):
     the restart path runs a columns-only drift check even under 'ignore' and
     surfaces a clear dbt drift error instead.
     """
+
+    TABLES = ["source_for_drift", "my_streaming_table"]
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -366,16 +368,10 @@ class TestStreamingRestartUnderIgnore(ConfluentFixtures):
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project, dbt_profile_data):
+    def first_run(self, project):
+        # Build the table and its live INSERT once; class_clean_up tears down.
         run_dbt(["run", "--full-refresh"])
         yield
-        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-        with project.adapter.connection_named("cleanup"):
-            conn = project.adapter.connections.get_thread_connection()
-            for stmt in conn.handle.list_statements(label=label):
-                project.adapter.delete_statement(stmt.name)
-        project.run_sql("drop table if exists source_for_drift")
-        project.run_sql("drop table if exists my_streaming_table")
 
     def test_restart_under_ignore_raises_on_column_drift(self, project, dbt_profile_data):
         """Regression: missing INSERT + drifted columns under 'ignore' must
