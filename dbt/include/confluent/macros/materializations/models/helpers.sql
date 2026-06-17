@@ -76,20 +76,18 @@
     {% do exceptions.raise_compiler_error(msg) %}
   {% endif %}
 
-  {% if recoverable %}
-    {% set health = adapter.classify_existing_statement(get_statement_name()) %}
-    {% if health != 'healthy' %}
-      {# Restart re-submits INSERT against the existing table. In 'fail' mode
-         we already verified columns match above. In 'ignore' mode we skipped
-         the check, so verify columns now — options/distribution drift won't
-         break INSERT, but a column mismatch will. #}
-      {% if on_schema_drift == 'ignore' %}
-        {{ check_for_schema_drift(existing_relation, has_select_query, enforce='columns') }}
-      {% endif %}
-      {{ log("Statement for " ~ existing_relation ~ " is " ~ health ~ ". Re-submitting (no full refresh required).", info=True) }}
-      {{ delete_statement_if_exists(get_statement_name()) }}
-      {{ return('restart') }}
+  {% if recoverable and adapter.statement_needs_restart(get_statement_name()) %}
+    {# The long-running statement is missing or in a terminal phase. Restart
+       re-submits INSERT against the existing table. In 'fail' mode we already
+       verified columns match above. In 'ignore' mode we skipped the check, so
+       verify columns now — options/distribution drift won't break INSERT, but
+       a column mismatch will. #}
+    {% if on_schema_drift == 'ignore' %}
+      {{ check_for_schema_drift(existing_relation, has_select_query, enforce='columns') }}
     {% endif %}
+    {{ log("Statement for " ~ existing_relation ~ " is missing or in a terminal phase. Re-submitting (no full refresh required).", info=True) }}
+    {{ delete_statement_if_exists(get_statement_name()) }}
+    {{ return('restart') }}
   {% endif %}
 
   {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}

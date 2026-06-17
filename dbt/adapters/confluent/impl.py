@@ -1,6 +1,7 @@
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Literal
 
 import agate
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
@@ -156,65 +157,90 @@ class ConfluentAdapter(SQLAdapter):
             name = f"{prefix}{project_name}-{model_name}{suffix}"
         return sanitize_statement_name(name)
 
+    def _handle_pool_scoped_403(
+        self,
+        e: OperationalError,
+        statement_name: str,
+        *,
+        action: str,
+        expect_exists: bool = True,
+    ) -> bool:
+        """Decide how to treat an OperationalError from a statement API call.
+
+        Compute-pool-scoped FlinkDeveloper roles return 403 — not 404 — when
+        the target statement does not exist or lives on a different compute
+        pool than the one in config (Confluent Cloud intentionally hides
+        existence across pool boundaries). We can't disambiguate "missing"
+        from "no permission" from the response, so we treat 403 as missing and
+        let any genuine permission problem surface on a subsequent operation
+        that runs on the same scope.
+
+        Returns True if `e` was a handled 403 (the caller should treat the
+        statement as missing); returns False if it's any other error (the
+        caller must re-raise).
+
+        action: noun describing the call ("deletion", "inspection"), used in
+            the message. expect_exists: if True (default), the 403 is
+            surprising — the caller had reason to believe the statement
+            existed — so we emit a loud AdapterEventWarning. If False (e.g.
+            orphan-cleanup paths), the 403 is expected and we log at debug.
+        """
+        if getattr(e, "http_status_code", None) != 403:
+            return False
+        if expect_exists:
+            fire_event(
+                AdapterEventWarning(
+                    base_msg=(
+                        f"Got 403 during {action} of Flink statement "
+                        f"'{statement_name}'. Under compute-pool-scoped roles this "
+                        f"is the expected response for a statement that is missing "
+                        f"or lives on a different compute pool, so we are treating "
+                        f"it as missing. If subsequent operations fail "
+                        f"unexpectedly, verify that the API key can manage "
+                        f"statements in this compute pool."
+                    )
+                )
+            )
+        else:
+            logger.debug(
+                "Got 403 on opportunistic %s of statement '%s' (no orphan present).",
+                action,
+                statement_name,
+            )
+        return True
+
     @available
-    def classify_existing_statement(self, statement_name: str) -> str:
-        """Classify a Flink statement by name. Returns one of:
+    def statement_needs_restart(self, statement_name: str) -> bool:
+        """Return True if the long-running statement should be re-submitted.
 
-        - 'missing'  — no statement exists with that name (404), or it is
-                       invisible to this compute-pool scope (403, see below)
-        - 'terminal' — statement is in COMPLETED, STOPPED, FAILED, or DELETED
-        - 'healthy'  — anything else (PENDING, RUNNING, DEGRADED, in-flight transitions)
+        True when the statement is missing (404, or 403 under pool-scoped
+        roles — see _handle_pool_scoped_403) or in a terminal phase
+        (COMPLETED, STOPPED, FAILED, DELETED). False for healthy phases,
+        including in-flight transitions (PENDING, RUNNING, DEGRADED, STOPPING,
+        DELETING) which we must not interrupt. No side effects.
 
-        Used by materializations to decide whether to restart a long-running
-        statement when the relation already exists. No side effects.
-
-        Like delete_statement(), we treat a 403 as 'missing': compute-pool-scoped
-        roles return 403 (not 404) for a statement that doesn't exist, or that
-        lives on a different compute pool than the one in config. We can't
-        disambiguate that from a real permission problem here, but reaching this
-        method means an existing relation was already read on the same scope, so
-        auth is working; and if it isn't, the resulting restart's CREATE runs on
-        the same scope and surfaces the real permission error there.
+        Used by `decide_action` (Jinja) to recover a streaming_table whose
+        INSERT died without the table being dropped.
         """
         conn = self.connections.get_thread_connection()
         try:
             statement = conn.handle.get_statement(statement_name)
         except StatementNotFoundError:
-            return "missing"
+            return True
         except OperationalError as e:
-            if getattr(e, "http_status_code", None) != 403:
+            if not self._handle_pool_scoped_403(e, statement_name, action="inspection"):
                 raise
-            fire_event(
-                AdapterEventWarning(
-                    base_msg=(
-                        f"Got 403 when inspecting Flink statement '{statement_name}'. "
-                        f"This is the expected response for a statement that is missing "
-                        f"or on a different compute pool under pool-scoped roles, so we "
-                        f"treat it as missing and resubmit. If the resubmit fails, verify "
-                        f"that the API key can manage statements in this compute pool."
-                    )
-                )
-            )
-            return "missing"
-        return "terminal" if statement.phase.is_terminal else "healthy"
+            return True
+        return statement.phase.is_terminal
 
     @available
     def delete_statement(self, statement_name: str, expect_exists: bool = True) -> None:
         """Delete a Flink statement by name. No-op if it doesn't exist.
 
-        Compute-pool-scoped FlinkDeveloper roles return 403 — not 404 — when
-        the target statement does not exist (Confluent Cloud intentionally
-        hides existence across pool boundaries). We can't disambiguate
-        "missing" from "no permission" from the response, so we swallow
-        403 and surface a warning instead of failing. Real permission
-        problems will still surface on subsequent operations that need
-        the same scope.
-
-        expect_exists: if True (default), a 403 is surprising — the caller
-            had reason to believe the statement existed — so we emit a loud
-            AdapterEventWarning. If False (e.g. orphan-cleanup paths where
-            the statement is opportunistically deleted), 403 is the expected
-            response and we log quietly at debug level.
+        See _handle_pool_scoped_403 for how the 403 that pool-scoped roles
+        return for a missing statement is treated. expect_exists controls
+        whether that 403 warns loudly (default) or logs quietly (e.g.
+        orphan-cleanup paths where the statement is opportunistically deleted).
 
         Async deletion is not awaited here: the connection manager retries
         CREATE on 409 to handle the in-flight teardown race against the
@@ -227,27 +253,10 @@ class ConfluentAdapter(SQLAdapter):
         except StatementNotFoundError:
             return  # Already gone (either deleted instantly or never existed)
         except OperationalError as e:
-            if getattr(e, "http_status_code", None) != 403:
+            if not self._handle_pool_scoped_403(
+                e, statement_name, action="deletion", expect_exists=expect_exists
+            ):
                 raise
-            if expect_exists:
-                fire_event(
-                    AdapterEventWarning(
-                        base_msg=(
-                            f"Got 403 when deleting Flink statement "
-                            f"'{statement_name}'. This is the expected response "
-                            f"for a missing statement under compute-pool-scoped "
-                            f"roles, so we are ignoring it. If subsequent "
-                            f"operations fail unexpectedly, verify that the API "
-                            f"key has permission to manage statements in this "
-                            f"compute pool."
-                        )
-                    )
-                )
-            else:
-                logger.debug(
-                    "Got 403 on opportunistic delete of statement '%s' (no orphan present).",
-                    statement_name,
-                )
 
     @classmethod
     def convert_text_type(cls, agate_table: agate.Table, col_idx: int) -> str:
@@ -488,7 +497,7 @@ class ConfluentAdapter(SQLAdapter):
         drift_catalog: "agate.Table",
         expected_with: dict[str, str],
         expected_distribution: dict | None = None,
-        enforce: str = "all",
+        enforce: Literal["all", "columns"] = "all",
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
@@ -509,8 +518,6 @@ class ConfluentAdapter(SQLAdapter):
                         options/distribution drift is fine but a column
                         mismatch would cause Flink to reject the INSERT.
         """
-        if enforce not in ("all", "columns"):
-            raise ValueError(f"check_schema_drift: invalid enforce value {enforce!r}")
         existing_columns, expected_columns, existing_options, existing_distribution = (
             self._partition_drift_catalog(
                 drift_catalog, existing_relation.identifier, temp_relation.identifier
