@@ -21,12 +21,16 @@ MY_STREAMING_TABLE = """
 select order_id, price, order_time from {{ ref('my_streaming_source') }}
 """
 
+# rows-per-second is high so all 100 rows arrive in ~1s instead of trickling at
+# 1/s over ~100s. These sources feed dbt unit tests whose given/expect rows are
+# mocked, so the faker values never reach an assertion — only the materialization
+# needs the source populated, and faster is strictly better.
 MY_STREAMING_SOURCE = """
 {{ config(
     materialized='streaming_source',
     connector='faker',
     with={
-        'rows-per-second': '1',
+        'rows-per-second': '100',
         'number-of-rows': '100',
     }
 ) }}
@@ -81,12 +85,13 @@ models:
 """
 
 
+# High rows-per-second for fast population; see MY_STREAMING_SOURCE note above.
 JOIN_SOURCE_A = """
 {{ config(
     materialized='streaming_source',
     connector='faker',
     with={
-        'rows-per-second': '1',
+        'rows-per-second': '100',
         'number-of-rows': '100',
     }
 ) }}
@@ -100,7 +105,7 @@ JOIN_SOURCE_B = """
     materialized='streaming_source',
     connector='faker',
     with={
-        'rows-per-second': '1',
+        'rows-per-second': '100',
         'number-of-rows': '100',
     }
 ) }}

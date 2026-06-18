@@ -165,7 +165,11 @@ Override the generated name with the `statement_name` config:
 
 ### Statement Lifecycle
 
-On `--full-refresh`, the adapter deletes existing statements before dropping and recreating the table. When no relation exists, orphaned statements are also cleaned up. This enables idempotent re-runs and crash recovery.
+On `--full-refresh`, the adapter deletes existing statements before dropping and recreating the table. When no relation exists, orphaned statements are also cleaned up.
+
+For `streaming_table`, the adapter additionally checks the long-running INSERT statement on every re-run. If the statement is missing (e.g. the process crashed between DDL and DML, or the statement was deleted externally) or in a terminal phase (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), `dbt run` resubmits **only the INSERT** under the same deterministic name — the table and its topic state are preserved. No `--full-refresh` required. A `RUNNING` statement, in-flight transitions (`PENDING`, `STOPPING`, `DELETING`), and `DEGRADED` are treated as healthy: the adapter does not interrupt them.
+
+For `streaming_source`, automatic recovery is **not** supported: the CREATE statement also attaches the connector, and Flink does not allow re-attaching a connector to an existing table. If the connector statement is dead, run with `--full-refresh` (which drops and recreates the table). Tracked as a follow-up.
 
 ## Not Supported
 
