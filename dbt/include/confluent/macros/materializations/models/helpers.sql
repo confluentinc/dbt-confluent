@@ -113,7 +113,11 @@
      even under on_schema_drift='ignore'. #}
   {{ _enforce_schema_drift(existing_relation, has_select_query, restart=true) }}
   {{ log("Statement for " ~ existing_relation ~ " is missing or in a terminal phase. Re-submitting (no full refresh required).", info=True) }}
-  {{ delete_statement_if_exists(get_statement_name()) }}
+  {# expect_exists=false: _classify_action already inspected this statement (and
+     warned if a pool-scoped 403 surfaced there), so a 403 on this delete is a
+     duplicate — suppress its loud warning. A terminal statement still exists and
+     deletes normally. #}
+  {{ delete_statement_if_exists(get_statement_name(), expect_exists=false) }}
 {% endmacro %}
 
 
