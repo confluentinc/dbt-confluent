@@ -14,17 +14,31 @@ prompts:
         hint: "eg: https://flink.us-east-2.aws.private.confluent.cloud"
   organization_id:
     hint: "eg: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-  compute_pool_id:
-    hint: "eg: lfcp-xxxxx"
+  _choose_compute_pool:
+    "Use a specific compute pool":
+      compute_pool_id:
+        hint: "eg: lfcp-xxxxx"
+    # 'Poolless': omitting compute_pool_id lets Confluent Cloud Flink run
+    # statements in the default compute pool (provisioning one if necessary).
+    # Empty mapping = no further prompts; compute_pool_id is left unset.
+    "Use the environment+region default compute pool": {}
   environment_id:
     hint: "eg: env-xxxxxx"
   dbname:
     hint: "Database name"
-  flink_api_key:
-    hint: "Flink API key"
-  flink_api_secret:
-    hint: "Flink API secret"
-    hide_input: true
+  _choose_api_credentials:
+    "Use a Global API key (works against every Confluent Cloud route)":
+      global_api_key:
+        hint: "Global API key"
+      global_api_secret:
+        hint: "Global API secret"
+        hide_input: true
+    "Use a Flink-region API key":
+      flink_api_key:
+        hint: "Flink API key"
+      flink_api_secret:
+        hint: "Flink API secret"
+        hide_input: true
   execution_mode:
     hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'"
     type: "string"

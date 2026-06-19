@@ -55,10 +55,19 @@ class ConfluentCredentials(Credentials):
     """
 
     # Add credentials members here, like:
-    compute_pool_id: str
     organization_id: str
-    flink_api_key: str
-    flink_api_secret: str
+    # API credentials: supply either a Global key pair (works against every
+    # Confluent Cloud route) or a Flink-region key pair. confluent_sql.connect()
+    # validates that at least one complete pair is present, rejects half-supplied
+    # pairs, and prefers the Global pair when both are given — so we pass these
+    # straight through without re-validating here.
+    global_api_key: str | None = None
+    global_api_secret: str | None = None
+    flink_api_key: str | None = None
+    flink_api_secret: str | None = None
+    # Optional ("poolless"): when omitted, Confluent Cloud Flink runs statements
+    # in the environment+region default compute pool (provisioning if necessary).
+    compute_pool_id: str | None = None
     cloud_provider: str | None = None
     cloud_region: str | None = None
     endpoint: str | None = None
@@ -88,7 +97,7 @@ class ConfluentCredentials(Credentials):
         """
         List of keys to display in the `dbt debug` output.
         """
-        keys = ("organization_id", "database", "schema")
+        keys = ("organization_id", "database", "schema", "compute_pool_id")
         if self.endpoint:
             return (*keys, "endpoint")
         else:
@@ -357,6 +366,8 @@ class ConfluentConnectionManager(SQLConnectionManager):
             user_agent = f"Confluent-dbt/v{version}"
 
             handle = confluent_sql.connect(
+                global_api_key=credentials.global_api_key,
+                global_api_secret=credentials.global_api_secret,
                 flink_api_key=credentials.flink_api_key,
                 flink_api_secret=credentials.flink_api_secret,
                 environment_id=credentials.database,
