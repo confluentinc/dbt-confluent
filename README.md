@@ -11,6 +11,7 @@ Build, test, and manage streaming data transformations on Confluent Cloud using 
 Features:
 - Standard dbt materializations (table, view, ephemeral) adapted for Flink SQL
 - Streaming-native materializations (`streaming_table`, `streaming_source`) for continuous data pipelines
+- A declarative `materialized_table` materialization built on Flink's `CREATE OR ALTER MATERIALIZED TABLE`
 - Integration with Confluent Cloud connectors (e.g., Datagen/Faker) via `streaming_source`
 - `distributed_by` config to control Kafka partitioning via the `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause
 - Schema drift detection on re-runs (columns, WITH options, `distributed_by`) — surfaces every violation in one error
@@ -114,8 +115,7 @@ A materialized table is maintained continuously by Flink. Each run re-asserts th
 {{
   config(
     materialized='materialized_table',
-    distributed_by='status',
-    buckets=6
+    distributed_by={'columns': ['status'], 'buckets': 6}
   )
 }}
 
@@ -134,7 +134,7 @@ See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 - **No snapshots**: Flink SQL lacks the batch operations (MERGE, UPDATE) required by dbt snapshots.
 - **No incremental**: dbt's batch-incremental semantics does not map to Flink's continuous processing model. Use `streaming_table` instead.
 - **Drift detection for WITH options**: Schema drift detection only verifies that user-specified `WITH` options exist with correct values. It cannot detect when options are removed from the config (because connectors may add default options that cannot be distinguished from user-specified ones). Use `--full-refresh` to change or remove WITH options. Drift detection can be disabled per-model with `config(on_schema_drift='ignore')`. See [Materializations](MATERIALIZATIONS.md#schema-drift-detection) for details.
-- **Materialized table distribution**: a materialized table's `distributed_by`/`buckets` are fixed at creation; changing them requires `--full-refresh` (drop and recreate). Column, `WITH`, and query-logic changes evolve in place. See [Materializations](MATERIALIZATIONS.md#materialized-table).
+- **Materialized table distribution**: a materialized table's `distributed_by` (columns and buckets) is fixed at creation; changing it requires `--full-refresh` (drop and recreate). Column, `WITH`, and query-logic changes evolve in place. See [Materializations](MATERIALIZATIONS.md#materialized-table).
 
 ## Development
 
