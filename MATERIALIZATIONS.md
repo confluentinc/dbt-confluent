@@ -248,6 +248,6 @@ Adoption is purely name-based — the adapter does not track which tool created 
 
 | Materialization | Reason |
 |---|---|
-| `materialized_view` | Use `table` instead. In Confluent Flink, materialized views are implemented as CTAS tables that are continuously updated by Flink. |
+| `materialized_view` | dbt's built-in `materialized_view` materialization is not implemented. For a Flink materialized table use the `materialized_table` materialization (declarative, `CREATE OR ALTER MATERIALIZED TABLE`); for a CTAS table that Flink keeps continuously updated use `table`. |
 | `incremental` | dbt's batch-incremental semantics does not map to Flink's continuous processing model. Use `streaming_table` instead. |
 | `snapshot` | Flink SQL lacks the batch operations (MERGE, UPDATE) required by dbt snapshots. |
