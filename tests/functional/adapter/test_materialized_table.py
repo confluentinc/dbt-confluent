@@ -6,7 +6,10 @@ CREATE OR ALTER MATERIALIZED TABLE and lets Flink reconcile it —
 - any change (columns, WITH options, query logic) -> evolve in place,
 - unchanged -> cheap no-op,
 - --full-refresh -> DROP MATERIALIZED TABLE then recreate.
-Config is validated (fail-fast) for unsupported options, start_mode, and buckets.
+Config is validated (fail-fast) for unsupported options and start_mode; the
+shared distributed_by validation (delegated to validate_distributed_by_config)
+is exercised here only for end-to-end wiring — its per-case behavior lives in
+the pure-Python tests/unit/test_validate_distributed_by_config.py.
 
 Notes:
 - ConfluentFixtures forces models +full_refresh=True, which would make every run a
@@ -19,56 +22,16 @@ Notes:
   back-to-back are marked xfail(strict=False) so that flakiness never gates CI.
 """
 
-import time
-
 import pytest
 
 from dbt.tests.util import relation_from_name, run_dbt, set_model_file
+from tests.functional.adapter._helpers import (
+    delete_statements_by_label,
+    drop_materialized_table,
+    get_result_by_name,
+    relation,
+)
 from tests.functional.adapter.fixtures import ConfluentFixtures
-
-
-def relation(project, name):
-    return project.adapter.Relation.create(identifier=name)
-
-
-def get_result_by_name(results, name):
-    for result in results:
-        if result.node.name == name:
-            return result
-    return None
-
-
-def _delete_label_statements(project, dbt_profile_data):
-    label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-    with project.adapter.connection_named("cleanup"):
-        conn = project.adapter.connections.get_thread_connection()
-        for stmt in conn.handle.list_statements(label=label):
-            project.adapter.delete_statement(stmt.name)
-
-
-def _drop_mt(project, name, attempts=16, interval=10):
-    """Best-effort drop of a materialized table; returns True if it's gone.
-
-    Waits out the transient state ("being modified" / "Could not execute
-    DropTable") that occurs while a prior CREATE OR ALTER is still establishing.
-    Critically, teardown must drop the MT *before* any statement is deleted: an
-    MT stays tied to its defining statement, so deleting that statement while the
-    table still exists orphans (wedges) it. The caller therefore only deletes
-    statements when this returns True.
-    """
-    for i in range(attempts):
-        try:
-            project.run_sql(f"drop materialized table `{name}`")
-            return True
-        except Exception as e:
-            msg = str(e).lower()
-            if "does not exist" in msg:
-                return True
-            if i < attempts - 1 and ("being modified" in msg or "could not execute" in msg):
-                time.sleep(interval)
-                continue
-            return False  # give up; do NOT delete statements (would wedge it)
-
 
 # A bounded faker source (number-of-rows) so the MT refresh settles quickly.
 SOURCE = """
@@ -91,8 +54,7 @@ PRIMARY KEY(`order_id`) NOT ENFORCED
 MT = """
 {{ config(
     materialized='materialized_table',
-    distributed_by='order_id',
-    buckets=4,
+    distributed_by={'columns': ['order_id'], 'buckets': 4},
     start_mode='RESUME_OR_FROM_BEGINNING',
     with={'key.format': 'avro-registry', 'value.format': 'avro-registry'},
 ) }}
@@ -102,8 +64,7 @@ select order_id, price from {{ ref('__SOURCE__') }}
 MT_ADDED_COLUMN = """
 {{ config(
     materialized='materialized_table',
-    distributed_by='order_id',
-    buckets=4,
+    distributed_by={'columns': ['order_id'], 'buckets': 4},
     start_mode='RESUME_OR_FROM_BEGINNING',
     with={'key.format': 'avro-registry', 'value.format': 'avro-registry'},
 ) }}
@@ -113,6 +74,10 @@ select order_id, price, order_time from {{ ref('__SOURCE__') }}
 
 def _models(src, mt, mt_sql=MT):
     return {f"{src}.sql": SOURCE, f"{mt}.sql": mt_sql.replace("__SOURCE__", src)}
+
+
+def _statement_label(dbt_profile_data):
+    return dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
 
 
 class _MTFixtures(ConfluentFixtures):
@@ -134,8 +99,8 @@ class _MTFixtures(ConfluentFixtures):
         yield
         # Drop the MT first; only delete statements if it's actually gone
         # (deleting the defining statement of a still-present MT wedges it).
-        if _drop_mt(project, self.MT):
-            _delete_label_statements(project, dbt_profile_data)
+        if drop_materialized_table(project, self.MT):
+            delete_statements_by_label(project, _statement_label(dbt_profile_data))
         project.run_sql(f"drop table if exists {self.SRC}")
 
 
@@ -246,7 +211,7 @@ class TestMaterializedTableEvolvesInPlace(_MTFixtures):
 
 class TestMaterializedTableFullRefreshRecreates(_MTFixtures):
     """--full-refresh drops the MT and recreates it from scratch (e.g. to change
-    distribution/buckets, which can't be altered in place)."""
+    distribution, which can't be altered in place)."""
 
     NAME = "matfr"
     SRC = "src_recreate"
@@ -277,18 +242,15 @@ MT_INVALID_START_MODE = """
 select order_id, price from {{ ref('src_inval') }}
 """
 
-MT_INVALID_BUCKETS = """
+# Representative wiring case: an invalid distributed_by mapping must surface the
+# shared validate_distributed_by_config error through the MT materialization. The
+# exhaustive per-shape cases live in tests/unit/test_validate_distributed_by_config.py.
+MT_INVALID_DISTRIBUTED_BY = """
 {{ config(
     materialized='materialized_table',
-    distributed_by='order_id',
-    buckets=0,
+    distributed_by={'columns': ['order_id'], 'buckets': 0},
     with={'key.format': 'avro-registry', 'value.format': 'avro-registry'},
 ) }}
-select order_id, price from {{ ref('src_inval') }}
-"""
-
-MT_BUCKETS_NO_DIST = """
-{{ config(materialized='materialized_table', buckets=4) }}
 select order_id, price from {{ ref('src_inval') }}
 """
 
@@ -305,14 +267,13 @@ class TestMaterializedTableInvalidConfig(ConfluentFixtures):
             "src_inval.sql": SOURCE,
             "mt_freshness.sql": MT_INVALID_FRESHNESS,
             "mt_start_mode.sql": MT_INVALID_START_MODE,
-            "mt_buckets.sql": MT_INVALID_BUCKETS,
-            "mt_buckets_no_dist.sql": MT_BUCKETS_NO_DIST,
+            "mt_dist.sql": MT_INVALID_DISTRIBUTED_BY,
         }
 
     @pytest.fixture(autouse=True, scope="class")
     def class_clean_up(self, project, dbt_profile_data):
         yield
-        _delete_label_statements(project, dbt_profile_data)
+        delete_statements_by_label(project, _statement_label(dbt_profile_data))
         project.run_sql(f"drop table if exists {self.SRC}")
 
     def test_invalid_configs_error(self, project):
@@ -325,9 +286,8 @@ class TestMaterializedTableInvalidConfig(ConfluentFixtures):
             return r.message
 
         assert "not supported by the 'materialized_table'" in msg("mt_freshness")
-        assert "Supported config options are: distributed_by, buckets, with, start_mode" in msg(
+        assert "Supported config options are: distributed_by, with, start_mode" in msg(
             "mt_freshness"
         )
         assert "not a valid value for 'start_mode'" in msg("mt_start_mode")
-        assert "must be a positive integer" in msg("mt_buckets")
-        assert "requires 'distributed_by'" in msg("mt_buckets_no_dist")
+        assert "must be a positive integer" in msg("mt_dist")

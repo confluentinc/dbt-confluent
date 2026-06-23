@@ -115,6 +115,19 @@ class TestRetryBehavior:
             _run(cursor, retry_limit=2)
         assert cursor.execute.call_count == 12
 
+    def test_being_modified_classified_by_message_even_with_409_status(self):
+        """A 'being modified' error can arrive with a 409 status. It must be
+        classified by message (generous budget of 12), not as a 409 name-reuse
+        race (which would cap at retry_limit). Guards the message-before-status
+        ordering in _execute_query_with_retry."""
+        cursor = MagicMock()
+        cursor.execute.side_effect = OperationalError(
+            "table is being modified by statement: s1", http_status_code=409
+        )
+        with pytest.raises(OperationalError):
+            _run(cursor, retry_limit=2)
+        assert cursor.execute.call_count == 12
+
     def test_reuses_statement_name_across_retries(self):
         """The same statement_name must be passed to each cursor.execute attempt."""
         cursor = MagicMock()
