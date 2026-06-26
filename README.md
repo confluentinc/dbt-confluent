@@ -41,7 +41,7 @@ dbt init my_project
 
 Select `confluent` as the adapter and fill in the prompts for your Confluent Cloud credentials (API key, compute pool, environment, etc.).
 
-You can authenticate with either a **Global** Confluent Cloud API key (`global_api_key` / `global_api_secret`, which works against every route) or a **Flink-region** key (`flink_api_key` / `flink_api_secret`). The `compute_pool_id` is optional: omit it to run statements in the environment+region [default compute pool](https://docs.confluent.io/cloud/current/flink/concepts/compute-pools.html#default-compute-pools).
+You can authenticate with either a **Global** Confluent Cloud API key (`global_api_key` / `global_api_secret`, which works against every route) or a **Flink-region** key (`flink_api_key` / `flink_api_secret`). The `compute_pool_id` is optional: omit it to run statements in the environment+region [default compute pool](https://docs.confluent.io/cloud/current/flink/concepts/compute-pools.html#default-compute-pools). This profile-level pool is the default for every model; individual models can override it with `config(compute_pool_id='...')` — see [Materializations](MATERIALIZATIONS.md#compute-pool).
 
 ### Concept mapping
 
@@ -146,6 +146,11 @@ export CONFLUENT_CLOUD_REGION=us-west-6
 export CONFLUENT_TEST_DBNAME=dbname
 export CONFLUENT_FLINK_API_KEY=xxx
 export CONFLUENT_FLINK_API_SECRET=xxx
+
+# Optional: a second compute pool (same environment + region, different from
+# CONFLUENT_COMPUTE_POOL_ID) used only by the per-model compute pool test.
+# The test is skipped when this is unset or equal to CONFLUENT_COMPUTE_POOL_ID.
+export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 ```
 
 ```bash
