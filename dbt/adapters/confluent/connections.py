@@ -113,6 +113,7 @@ def _execute_query_with_retry(
     attempt: int,
     statement_name: str | None = None,
     statement_labels: list[str] | None = None,
+    compute_pool_id: str | None = None,
 ):
     """Execute the cursor and retry on transient failures.
 
@@ -121,10 +122,18 @@ def _execute_query_with_retry(
 
     Lives at module scope (not as a closure inside add_query) so it can
     be unit-tested in isolation.
+
+    compute_pool_id: if provided, overrides the connection-default compute pool
+    for this statement (per-model `compute_pool_id` config). If None, the
+    connection's default compute pool is used.
     """
     try:
         cursor.execute(
-            sql, bindings, statement_name=statement_name, statement_labels=statement_labels
+            sql,
+            bindings,
+            statement_name=statement_name,
+            statement_labels=statement_labels,
+            compute_pool_id=compute_pool_id,
         )
     except retryable_exceptions as e:
         # Cease retries and fail when limit is hit.
@@ -161,6 +170,7 @@ def _execute_query_with_retry(
             attempt=attempt + 1,
             statement_labels=statement_labels,
             statement_name=statement_name,
+            compute_pool_id=compute_pool_id,
         )
     except OperationalError as e:
         # "Statement with name X already exists" — happens when a prior
@@ -191,6 +201,7 @@ def _execute_query_with_retry(
             attempt=attempt + 1,
             statement_labels=statement_labels,
             statement_name=statement_name,
+            compute_pool_id=compute_pool_id,
         )
 
 
@@ -220,8 +231,10 @@ class ConfluentConnectionManager(SQLConnectionManager):
         execution_mode: str | None = None,
         hidden: bool = False,
         statement_name: str | None = None,
+        compute_pool_id: str | None = None,
     ) -> tuple[AdapterResponse, "agate.Table"]:
-        """This is customized so we can pass execution_mode, hidden and statement_name down the chain."""
+        """This is customized so we can pass execution_mode, hidden, statement_name and
+        compute_pool_id down the chain."""
         from dbt_common.clients.agate_helper import empty_table
 
         sql = self._add_query_comment(sql)
@@ -231,6 +244,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
             execution_mode=execution_mode,
             statement_name=statement_name,
             hidden=hidden,
+            compute_pool_id=compute_pool_id,
         )
         response = self.get_response(cursor)
         if fetch:
@@ -251,6 +265,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         execution_mode: str | None = None,
         hidden: bool = False,
         statement_name: str | None = None,
+        compute_pool_id: str | None = None,
     ) -> tuple[Connection, Any]:
         """
         Copied from upstream (in SqlConnectionManager) with handling of cursor's
@@ -259,6 +274,10 @@ class ConfluentConnectionManager(SQLConnectionManager):
 
         statement_name: if provided, used as the Flink statement name (deterministic).
         If None, a UUID-based name is generated (for metadata/schema queries).
+
+        compute_pool_id: if provided (per-model `compute_pool_id` config), overrides the
+        connection-default compute pool for this statement. If None, the connection's
+        default compute pool (from credentials) is used.
         """
         connection = self.get_thread_connection()
         if auto_begin and connection.transaction_open is False:
@@ -311,6 +330,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 attempt=1,
                 statement_name=statement_name,
                 statement_labels=labels,
+                compute_pool_id=compute_pool_id,
             )
 
             result = self.get_response(cursor)
