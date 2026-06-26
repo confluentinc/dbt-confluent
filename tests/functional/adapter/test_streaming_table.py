@@ -1,10 +1,9 @@
-import time
-
 import pytest
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.tests.util import relation_from_name, run_dbt
+from tests.functional.adapter._helpers import wait_for_absent, wait_for_terminal
 from tests.functional.adapter.fixtures import ClassScopedCleanup
 
 MY_STREAMING_TABLE = """
@@ -351,45 +350,6 @@ class TestDeadStatementRestart(ClassScopedCleanup):
             "models.yml": SIMPLE_MODELS_YML,
         }
 
-    def _wait_for_terminal(self, adapter, name, timeout=30):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with adapter.connection_named("phase_poll"):
-                conn = adapter.connections.get_thread_connection()
-                stmt = conn.handle.get_statement(name)
-                if stmt.phase.is_terminal:
-                    return stmt
-            time.sleep(2)
-        raise AssertionError(f"Statement {name} did not reach terminal state in {timeout}s")
-
-    def _wait_for_absent(self, adapter, name, timeout=60):
-        """Block until `name` is fully gone (get_statement reports it missing).
-
-        adapter.delete_statement() does not await async teardown — the
-        production restart path tolerates the lingering name via add_query's
-        409-retry on CREATE. This test re-submits the same name through the raw
-        cursor (no such retry), so it must wait for the name to actually free
-        before planting, or it races the teardown and hits a 409 Conflict.
-
-        "Missing" is a 404 (StatementNotFoundError) or, under compute-pool-scoped
-        roles, a 403 — the same condition the adapter treats as missing — so we
-        accept both rather than spinning to timeout on the 403.
-        """
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with adapter.connection_named("absence_poll"):
-                conn = adapter.connections.get_thread_connection()
-                try:
-                    conn.handle.get_statement(name)
-                except StatementNotFoundError:
-                    return
-                except OperationalError as e:
-                    if getattr(e, "http_status_code", None) == 403:
-                        return
-                    raise
-            time.sleep(2)
-        raise AssertionError(f"Statement {name} was not freed within {timeout}s of deletion")
-
     def test_terminal_insert_statement_is_resubmitted(self, project, dbt_profile_data):
         adapter = project.adapter
         label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
@@ -408,7 +368,7 @@ class TestDeadStatementRestart(ClassScopedCleanup):
         # async teardown.
         with adapter.connection_named("plant_terminal"):
             adapter.delete_statement(insert_name)
-        self._wait_for_absent(adapter, insert_name)
+        wait_for_absent(adapter, insert_name)
         with adapter.connection_named("plant_terminal"):
             conn = adapter.connections.get_thread_connection()
             cursor = conn.handle.cursor(mode=ExecutionMode.STREAMING_QUERY)
@@ -417,7 +377,7 @@ class TestDeadStatementRestart(ClassScopedCleanup):
                 statement_name=insert_name,
                 statement_labels=[label],
             )
-        terminal = self._wait_for_terminal(adapter, insert_name)
+        terminal = wait_for_terminal(adapter, insert_name)
         planted_id = terminal.statement_id
 
         # `dbt run` without --full-refresh must detect the terminal statement,
