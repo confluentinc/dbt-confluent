@@ -4,8 +4,23 @@ import pytest
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
-from dbt.tests.util import relation_from_name, run_dbt
+from dbt.tests.util import relation_from_name, run_dbt, run_dbt_and_capture
 from tests.functional.adapter.fixtures import ClassScopedCleanup
+
+
+# The shared ConfluentFixtures sets +full_refresh: True so the inherited dbt
+# standard tests recreate on re-run. That makes should_full_refresh() true for
+# every run, which forces the 'create' path and bypasses the skip/restart logic.
+# Tests that exercise re-run behavior must drop it; this override keeps the
+# project name + schema but leaves full_refresh unset.
+def _no_full_refresh_config(name, unique_schema):
+    return {
+        "name": name,
+        "models": {"+schema": unique_schema},
+        "seeds": {"+schema": unique_schema},
+        "tests": {"+schema": unique_schema},
+    }
+
 
 MY_STREAMING_TABLE = """
 {{ config(
@@ -256,6 +271,12 @@ class TestCrashRecoveryRestart(ClassScopedCleanup):
     NAME = "crashrec"
     TABLES = ["my_streaming_table", "my_streaming_source"]
 
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        # Restart only happens without --full-refresh; drop the shared
+        # +full_refresh: True (see _no_full_refresh_config).
+        return _no_full_refresh_config(self.NAME, unique_schema)
+
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {
@@ -309,9 +330,15 @@ class TestCrashRecoveryRestart(ClassScopedCleanup):
         ddl_before = self._statement_id_or_none(adapter, ddl_name)
 
         # `dbt run` without --full-refresh must detect the missing statement
-        # and re-submit a new INSERT under the same deterministic name.
-        results = run_dbt(["run"])
+        # and re-submit a new INSERT under the same deterministic name. The
+        # restart path logs a distinct line; assert on it so a regression that
+        # silently full-refreshes (which would also change statement_id) fails
+        # loudly here instead of passing for the wrong reason.
+        results, logs = run_dbt_and_capture(["run"])
         assert all(r.status == "success" for r in results)
+        assert "Re-submitting (no full refresh required)." in logs, (
+            "streaming_table did not take the restart path (it full-refreshed instead)"
+        )
 
         with adapter.connection_named("snapshot_second"):
             conn = adapter.connections.get_thread_connection()
@@ -342,6 +369,12 @@ class TestDeadStatementRestart(ClassScopedCleanup):
 
     NAME = "deadstmt"
     TABLES = ["my_streaming_table", "my_streaming_source"]
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        # Restart only happens without --full-refresh; drop the shared
+        # +full_refresh: True (see _no_full_refresh_config).
+        return _no_full_refresh_config(self.NAME, unique_schema)
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -421,9 +454,14 @@ class TestDeadStatementRestart(ClassScopedCleanup):
         planted_id = terminal.statement_id
 
         # `dbt run` without --full-refresh must detect the terminal statement,
-        # delete it, and submit a new healthy INSERT under the same name.
-        results = run_dbt(["run"])
+        # delete it, and submit a new healthy INSERT under the same name. Assert
+        # on the restart log line so a silent full-refresh regression (which
+        # would also change statement_id) fails loudly here.
+        results, logs = run_dbt_and_capture(["run"])
         assert all(r.status == "success" for r in results)
+        assert "Re-submitting (no full refresh required)." in logs, (
+            "streaming_table did not take the restart path (it full-refreshed instead)"
+        )
 
         with adapter.connection_named("snapshot_after"):
             conn = adapter.connections.get_thread_connection()
