@@ -171,6 +171,7 @@ For `streaming_table`, the adapter additionally checks the long-running INSERT s
 
 For `streaming_source`, automatic recovery is **not** supported: the CREATE statement also attaches the connector, and Flink does not allow re-attaching a connector to an existing table. If the connector statement is dead, run with `--full-refresh` (which drops and recreates the table). Tracked as a follow-up.
 
+<<<<<<< HEAD
 ## Compute Pool
 
 By default, every statement runs on the compute pool configured in your profile (`compute_pool_id`). You can override the pool per model — for example to isolate a heavy model or to manage resources — with the `compute_pool_id` config:
@@ -194,6 +195,37 @@ The same model is often deployed to different compute pools across environments 
 ```
 
 Your CI/CD pipeline sets `FLINK_COMPUTE_POOL` (and typically `statement_name`) per target, keeping a single Git source of truth.
+
+## Adopting Existing Tables and Statements
+
+If you already have a Flink pipeline running — deployed by hand, by a previous tool, or by another team — you can bring it under dbt management without recreating it. A pipeline is two things: a **table** (the relation) and a **statement** (the long-running query that populates it). Map your model to each:
+
+- **Table** — set dbt's standard [`alias`](https://docs.getdbt.com/reference/resource-configs/alias) config to the existing table name (omit it if the table already matches the model name).
+- **Statement** — set `statement_name` to the existing statement name.
+
+```sql
+{{ config(
+    materialized='streaming_table',
+    alias='orders_enriched',          -- existing table
+    statement_name='orders-enriched-insert',  -- existing INSERT statement
+    with={'changelog.mode': 'append'},
+) }}
+select order_id, price from {{ ref('orders') }}
+```
+
+On the next `dbt run` (no `--full-refresh`), the adapter looks up both by name and takes over their lifecycle:
+
+- If the statement is **healthy** (`RUNNING`), it is adopted as-is — the run skips creation and leaves the statement untouched.
+- If the statement is **missing or terminal** (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), it is re-submitted under the same name (see [Statement Lifecycle](#statement-lifecycle)).
+- The existing **table is never dropped** (only `--full-refresh` drops and recreates).
+
+Adoption is purely name-based — the adapter does not track which tool created a resource, only its name — so there is no separate "import" step.
+
+### Preconditions
+
+- **Schema must match.** Before skipping, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT; a mismatch fails the run. Align the model to the existing schema, or set `config(on_schema_drift='ignore')` to relax non-column drift (a column mismatch still fails, because the re-submitted INSERT would be rejected by Flink).
+- **Names are sanitized.** The `statement_name` you configure is normalized to Flink's constraints (see [Flink Naming Constraints](#flink-naming-constraints)) before lookup, so it must match the existing statement's actual name. Statements already named within those constraints (lowercase alphanumeric + hyphens) match verbatim.
+- **`streaming_source` cannot recover a dead connector statement** (see above); adoption of a source means pointing `alias` at the existing table, after which re-runs skip while the connector statement is healthy.
 
 ## Not Supported
 
