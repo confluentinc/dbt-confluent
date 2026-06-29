@@ -3,6 +3,72 @@
 Underscore-prefixed so pytest does not treat it as a test module.
 """
 
+import time
+
+from confluent_sql.exceptions import OperationalError, StatementNotFoundError
+
+
+def wait_for_absent(adapter, name, timeout=60):
+    """Block until `name` is fully gone (get_statement reports it missing).
+
+    adapter.delete_statement() does not await async teardown — the production
+    restart path tolerates the lingering name via add_query's 409-retry on
+    CREATE. Tests that re-submit the same name through the raw cursor (no such
+    retry) must wait for the name to actually free before planting, or they race
+    the teardown and hit a 409 Conflict.
+
+    "Missing" is a 404 (StatementNotFoundError) or, under compute-pool-scoped
+    roles, a 403 — the same condition the adapter treats as missing — so we
+    accept both rather than spinning to timeout on the 403.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with adapter.connection_named("absence_poll"):
+            conn = adapter.connections.get_thread_connection()
+            try:
+                conn.handle.get_statement(name)
+            except StatementNotFoundError:
+                return
+            except OperationalError as e:
+                if getattr(e, "http_status_code", None) == 403:
+                    return
+                raise
+        time.sleep(2)
+    raise AssertionError(f"Statement {name} was not freed within {timeout}s of deletion")
+
+
+def wait_for_terminal(adapter, name, timeout=30):
+    """Block until `name` reaches a terminal phase (COMPLETED/STOPPED/FAILED/DELETED)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with adapter.connection_named("phase_poll"):
+            conn = adapter.connections.get_thread_connection()
+            stmt = conn.handle.get_statement(name)
+            if stmt.phase.is_terminal:
+                return stmt
+        time.sleep(2)
+    raise AssertionError(f"Statement {name} did not reach terminal state in {timeout}s")
+
+
+def wait_for_running(adapter, name, timeout=60):
+    """Block until `name` reaches RUNNING so the adapter classifies it as healthy
+    (adoptable). Fails fast if it reaches a terminal phase instead."""
+    deadline = time.monotonic() + timeout
+    last_phase = None
+    while time.monotonic() < deadline:
+        with adapter.connection_named("running_poll"):
+            conn = adapter.connections.get_thread_connection()
+            stmt = conn.handle.get_statement(name)
+        last_phase = stmt.phase
+        if stmt.phase.name == "RUNNING":
+            return stmt
+        if stmt.phase.is_terminal:
+            raise AssertionError(f"Statement {name} reached terminal phase {stmt.phase}")
+        time.sleep(2)
+    raise AssertionError(
+        f"Statement {name} never reached RUNNING in {timeout}s (last: {last_phase})"
+    )
+
 
 def relation(project, name):
     """Build a Relation for a model that lives in the test project's schema."""
