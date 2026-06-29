@@ -26,7 +26,7 @@
       {% if not execution_mode %}
         {% set execution_mode = config.get("execution_mode", None) %}
       {% endif %}
-      {% if not compute_pool_id %}
+      {% if compute_pool_id is none %}
         {% set compute_pool_id = config.get("compute_pool_id", None) %}
       {% endif %}
       {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode, limit=limit, hidden=hidden, statement_name=statement_name, compute_pool_id=compute_pool_id) -%}
