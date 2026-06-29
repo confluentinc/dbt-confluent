@@ -65,7 +65,9 @@ def wait_for_running(adapter, name, timeout=60):
         if stmt.phase.is_terminal:
             raise AssertionError(f"Statement {name} reached terminal phase {stmt.phase}")
         time.sleep(2)
-    raise AssertionError(f"Statement {name} never reached RUNNING in {timeout}s (last: {last_phase})")
+    raise AssertionError(
+        f"Statement {name} never reached RUNNING in {timeout}s (last: {last_phase})"
+    )
 
 
 def relation(project, name):
