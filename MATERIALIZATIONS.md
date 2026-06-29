@@ -190,7 +190,7 @@ select order_id, price from {{ ref('orders') }}
 
 On the next `dbt run` (no `--full-refresh`), the adapter looks up both by name and takes over their lifecycle:
 
-- If the statement is **healthy** (`RUNNING`), it is adopted as-is — the run skips creation and leaves the statement untouched.
+- If the statement is **healthy** — `RUNNING`, an in-flight transition (`PENDING`, `STOPPING`, `DELETING`), or `DEGRADED` (any non-terminal phase) — it is adopted as-is: the run skips creation and leaves the statement untouched.
 - If the statement is **missing or terminal** (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), it is re-submitted under the same name (see [Statement Lifecycle](#statement-lifecycle)).
 - The existing **table is never dropped** (only `--full-refresh` drops and recreates).
 
