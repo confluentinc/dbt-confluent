@@ -2,6 +2,8 @@
 -- rather than `fetchall`, and also to get the `execution_mode` from the config, so that
 -- we can instantiate a different cursor in `adapter.execute`.
 -- `statement_name` allows materializations to pass a deterministic Flink statement name.
+-- `compute_pool_id` lets a model override the connection-default compute pool; when not
+-- passed explicitly it is read from the model's `compute_pool_id` config.
 {%- macro statement(
   name=None,
   fetch_result=False,
@@ -10,7 +12,8 @@
   limit=None,
   execution_mode=None,
   hidden=False,
-  statement_name=None
+  statement_name=None,
+  compute_pool_id=None
 ) -%}
   {%- if execute: -%}
     {%- set compiled_code = caller() -%}
@@ -23,7 +26,10 @@
       {% if not execution_mode %}
         {% set execution_mode = config.get("execution_mode", None) %}
       {% endif %}
-      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode, limit=limit, hidden=hidden, statement_name=statement_name) -%}
+      {% if compute_pool_id is none %}
+        {% set compute_pool_id = config.get("compute_pool_id", None) %}
+      {% endif %}
+      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode, limit=limit, hidden=hidden, statement_name=statement_name, compute_pool_id=compute_pool_id) -%}
     {%- elif language == 'python' -%}
       {%- set res = submit_python_job(model, compiled_code) -%}
       {#-- TODO: What should table be for python models? --#}
