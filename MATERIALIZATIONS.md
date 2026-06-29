@@ -183,6 +183,8 @@ The override applies to all statements a model submits (DDL, the long-running IN
 
 Statement recovery and cleanup (see [Statement Lifecycle](#statement-lifecycle)) operate by statement name and are pool-agnostic: a model's statement is found, inspected, and — when dead — resubmitted on the model's configured pool regardless of the profile default.
 
+Changing `compute_pool_id` on an existing, healthy model takes effect **only** on the next `--full-refresh` or statement restart — a running statement is not migrated to a new pool, since the pool is a property of the statement (not the table) and isn't part of drift detection.
+
 ### Per-environment pools in CI/CD
 
 The same model is often deployed to different compute pools across environments (dev / staging / prod) or regions. Rather than hard-coding a pool, inject it at deploy time with an environment variable:
