@@ -51,8 +51,15 @@ def wait_for_terminal(adapter, name, timeout=30):
 
 
 def wait_for_running(adapter, name, timeout=60):
-    """Block until `name` reaches RUNNING so the adapter classifies it as healthy
-    (adoptable). Fails fast if it reaches a terminal phase instead."""
+    """Block until `name` reaches RUNNING. Fails fast if it reaches a terminal
+    phase instead.
+
+    The adapter classifies *any* non-terminal phase as healthy/adoptable
+    (PENDING, RUNNING, DEGRADED, STOPPING, DELETING), so RUNNING is stricter
+    than strictly necessary. We wait for it anyway as a deterministic
+    "stably healthy" signal: a faker-backed INSERT reaches RUNNING within
+    seconds, and waiting avoids racing a transient PENDING that could still
+    flip to a terminal phase before the assertion runs."""
     deadline = time.monotonic() + timeout
     last_phase = None
     while time.monotonic() < deadline:

@@ -7,8 +7,8 @@ created outside dbt (e.g. by a previous tool or a manual deployment):
   - `statement_name` maps the model to an existing statement name.
 
 Once mapped, dbt manages their lifecycle without recreating them: a healthy
-(RUNNING) statement is adopted as-is (skip), and a dead/missing one is
-re-submitted under the same adopted name (restart) — the table is never
+(any non-terminal phase) statement is adopted as-is (skip), and a dead/missing
+one is re-submitted under the same adopted name (restart) — the table is never
 dropped.
 
 Adoption is purely name-based: the adapter looks resources up by name and does
@@ -32,9 +32,9 @@ ALIAS = "adopted_orders"
 STATEMENT_NAME_OVERRIDE = "adopted-orders-insert"
 
 # Deliberately UNBOUNDED (no number-of-rows): the adopted INSERT must stay
-# RUNNING so the re-run classifies it as healthy and skips. A bounded source
-# would let the INSERT reach COMPLETED (terminal), and dbt would restart it
-# instead of adopting it. See [[project_bounded_source_restart_collision]].
+# non-terminal so the re-run classifies it as healthy and skips. A bounded
+# source would let the INSERT reach COMPLETED (terminal), and dbt would restart
+# it instead of adopting it. See [[project_bounded_source_restart_collision]].
 MY_STREAMING_SOURCE = """
 {{ config(
     materialized='streaming_source',
@@ -151,7 +151,8 @@ class TestAdoptExistingPipeline(ClassScopedCleanup):
         # Replace dbt's INSERT with one created out of band under the SAME custom
         # name, so what dbt adopts next is demonstrably not its own. Wait for the
         # name to free (delete is async) before the raw-cursor re-submit, which
-        # has no 409-retry, then wait until it's RUNNING so dbt sees it healthy.
+        # has no 409-retry, then wait until it's RUNNING — a stably-healthy
+        # state (the adapter adopts any non-terminal phase) so dbt skips it.
         with adapter.connection_named("simulate_external"):
             adapter.delete_statement(insert_name)
         wait_for_absent(adapter, insert_name)

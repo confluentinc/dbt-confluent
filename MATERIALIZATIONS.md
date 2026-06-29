@@ -171,7 +171,6 @@ For `streaming_table`, the adapter additionally checks the long-running INSERT s
 
 For `streaming_source`, automatic recovery is **not** supported: the CREATE statement also attaches the connector, and Flink does not allow re-attaching a connector to an existing table. If the connector statement is dead, run with `--full-refresh` (which drops and recreates the table). Tracked as a follow-up.
 
-<<<<<<< HEAD
 ## Compute Pool
 
 By default, every statement runs on the compute pool configured in your profile (`compute_pool_id`). You can override the pool per model — for example to isolate a heavy model or to manage resources — with the `compute_pool_id` config:
@@ -215,7 +214,7 @@ select order_id, price from {{ ref('orders') }}
 
 On the next `dbt run` (no `--full-refresh`), the adapter looks up both by name and takes over their lifecycle:
 
-- If the statement is **healthy** (`RUNNING`), it is adopted as-is — the run skips creation and leaves the statement untouched.
+- If the statement is **healthy** — `RUNNING`, an in-flight transition (`PENDING`, `STOPPING`, `DELETING`), or `DEGRADED` (any non-terminal phase) — it is adopted as-is: the run skips creation and leaves the statement untouched.
 - If the statement is **missing or terminal** (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), it is re-submitted under the same name (see [Statement Lifecycle](#statement-lifecycle)).
 - The existing **table is never dropped** (only `--full-refresh` drops and recreates).
 
