@@ -105,3 +105,29 @@ class TestRetryBehavior:
         _run(cursor, statement_name="dbt-fixed-name")
         for call in cursor.execute.call_args_list:
             assert call.kwargs["statement_name"] == "dbt-fixed-name"
+
+
+class TestComputePoolForwarding:
+    def test_compute_pool_id_defaults_to_none(self):
+        """When unset, cursor.execute receives compute_pool_id=None (connection default)."""
+        cursor = MagicMock()
+        _run(cursor)
+        assert cursor.execute.call_args.kwargs["compute_pool_id"] is None
+
+    def test_compute_pool_id_is_forwarded(self):
+        """A per-model compute_pool_id reaches cursor.execute."""
+        cursor = MagicMock()
+        _run(cursor, compute_pool_id="lfcp-override")
+        assert cursor.execute.call_args.kwargs["compute_pool_id"] == "lfcp-override"
+
+    def test_compute_pool_id_preserved_across_retries(self):
+        """The same compute_pool_id must be passed to each cursor.execute attempt."""
+        cursor = MagicMock()
+        cursor.execute.side_effect = [
+            OperationalError("name in use", http_status_code=409),
+            None,
+        ]
+        _run(cursor, compute_pool_id="lfcp-override")
+        assert cursor.execute.call_count == 2
+        for call in cursor.execute.call_args_list:
+            assert call.kwargs["compute_pool_id"] == "lfcp-override"

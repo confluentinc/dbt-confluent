@@ -171,6 +171,30 @@ For `streaming_table`, the adapter additionally checks the long-running INSERT s
 
 For `streaming_source`, automatic recovery is **not** supported: the CREATE statement also attaches the connector, and Flink does not allow re-attaching a connector to an existing table. If the connector statement is dead, run with `--full-refresh` (which drops and recreates the table). Tracked as a follow-up.
 
+## Compute Pool
+
+By default, every statement runs on the compute pool configured in your profile (`compute_pool_id`). You can override the pool per model — for example to isolate a heavy model or to manage resources — with the `compute_pool_id` config:
+
+```sql
+{{ config(materialized='streaming_table', compute_pool_id='lfcp-abc123') }}
+```
+
+The override applies to all statements a model submits (DDL, the long-running INSERT, and metadata/drift-check queries). The pool must exist in the same environment and region as the profile, and the API key used must have access to it; Confluent Cloud validates this at submission time. When `compute_pool_id` is omitted, the profile default is used. If the profile sets no default pool either, Confluent Cloud Flink runs the statement on the environment+region default pool.
+
+Statement recovery and cleanup (see [Statement Lifecycle](#statement-lifecycle)) operate by statement name and are pool-agnostic: a model's statement is found, inspected, and — when dead — resubmitted on the model's configured pool regardless of the profile default.
+
+Changing `compute_pool_id` on an existing, healthy model takes effect **only** on the next `--full-refresh` or statement restart — a running statement is not migrated to a new pool, since the pool is a property of the statement (not the table) and isn't part of drift detection.
+
+### Per-environment pools in CI/CD
+
+The same model is often deployed to different compute pools across environments (dev / staging / prod) or regions. Rather than hard-coding a pool, inject it at deploy time with an environment variable:
+
+```sql
+{{ config(materialized='streaming_table', compute_pool_id=env_var('FLINK_COMPUTE_POOL')) }}
+```
+
+Your CI/CD pipeline sets `FLINK_COMPUTE_POOL` (and typically `statement_name`) per target, keeping a single Git source of truth.
+
 ## Not Supported
 
 | Materialization | Reason |
