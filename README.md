@@ -14,6 +14,7 @@ Features:
 - Integration with Confluent Cloud connectors (e.g., Datagen/Faker) via `streaming_source`
 - `distributed_by` config to control Kafka partitioning via the `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause
 - Schema drift detection on re-runs (columns, WITH options, `distributed_by`) — surfaces every violation in one error
+- Adopt existing tables and statements deployed outside dbt via the `alias` and `statement_name` configs
 
 See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 
