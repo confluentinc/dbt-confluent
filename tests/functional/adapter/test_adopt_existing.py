@@ -34,7 +34,7 @@ STATEMENT_NAME_OVERRIDE = "adopted-orders-insert"
 # Deliberately UNBOUNDED (no number-of-rows): the adopted INSERT must stay
 # non-terminal so the re-run classifies it as healthy and skips. A bounded
 # source would let the INSERT reach COMPLETED (terminal), and dbt would restart
-# it instead of adopting it. See [[project_bounded_source_restart_collision]].
+# it instead of adopting it.
 MY_STREAMING_SOURCE = """
 {{ config(
     materialized='streaming_source',

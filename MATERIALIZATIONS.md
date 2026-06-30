@@ -222,7 +222,9 @@ Adoption is purely name-based — the adapter does not track which tool created 
 
 ### Preconditions
 
-- **Schema must match.** Before skipping, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT; a mismatch fails the run. Align the model to the existing schema, or set `config(on_schema_drift='ignore')` to relax non-column drift (a column mismatch still fails, because the re-submitted INSERT would be rejected by Flink).
+- **Schema should match.** Under the default `on_schema_drift='fail'`, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT before adopting; any mismatch fails the run. With `config(on_schema_drift='ignore')`, enforcement depends on the adoption path:
+    - **Healthy statement → skip:** the running statement is left untouched and nothing is re-submitted, so **no drift is enforced at all, including columns.** A mismatch is silently tolerated — you must align the model to the existing schema yourself.
+    - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs (a column mismatch would also be rejected by Flink); benign options/distribution drift is relaxed.
 - **Names are sanitized.** The `statement_name` you configure is normalized to Flink's constraints (see [Flink Naming Constraints](#flink-naming-constraints)) before lookup, so it must match the existing statement's actual name. Statements already named within those constraints (lowercase alphanumeric + hyphens) match verbatim.
 - **`streaming_source` cannot recover a dead connector statement** (see above); adoption of a source means pointing `alias` at the existing table, after which re-runs skip while the connector statement is healthy.
 
