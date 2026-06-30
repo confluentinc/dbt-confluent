@@ -21,7 +21,7 @@ import pytest
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
-from dbt.tests.util import relation_from_name, run_dbt
+from dbt.tests.util import relation_from_name, run_dbt, set_model_file
 from tests.functional.adapter._helpers import wait_for_absent, wait_for_running
 from tests.functional.adapter.fixtures import ClassScopedCleanup
 
@@ -69,6 +69,23 @@ models:
         data_type: bigint
       - name: price
         data_type: decimal(10,2)
+"""
+
+# Same mapping (alias + statement_name) as ADOPTED_STREAMING_TABLE, but with a
+# column dropped (`price`) so the model no longer matches the adopted table, and
+# on_schema_drift='ignore'. On the skip path the running statement is left
+# untouched and nothing is re-submitted, so this column drift must be silently
+# tolerated — the run skips, never raising. See the "Preconditions" note in
+# MATERIALIZATIONS.md.
+ADOPTED_STREAMING_TABLE_DRIFTED_IGNORE = """
+{{ config(
+    materialized='streaming_table',
+    alias='adopted_orders',
+    statement_name='adopted-orders-insert',
+    with={'changelog.mode': 'append'},
+    on_schema_drift='ignore',
+) }}
+select order_id from {{ ref('my_streaming_source') }}
 """
 
 
@@ -190,3 +207,25 @@ class TestAdoptExistingPipeline(ClassScopedCleanup):
         assert restarted.name == insert_name
         assert restarted.statement_id != planted_id
         assert not restarted.phase.is_terminal
+
+        # Adopt under on_schema_drift='ignore' with a column mismatch: drop a
+        # column from the model and relax to 'ignore'. On the skip path no drift
+        # check runs, so the mismatch must be silently tolerated — the run skips
+        # and leaves the running statement untouched (not re-submitted). Pins the
+        # "Healthy statement -> skip" row of the Preconditions table in
+        # MATERIALIZATIONS.md. Settle on a stably-healthy statement first so we
+        # can prove the skip left it unchanged.
+        healthy_id = wait_for_running(adapter, insert_name).statement_id
+        model = relation_from_name(adapter, "adopted_streaming_table")
+        set_model_file(project, model, ADOPTED_STREAMING_TABLE_DRIFTED_IGNORE)
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results)
+        skipped = next(r for r in results if r.node.name == "adopted_streaming_table")
+        assert skipped.message == "SKIP", (
+            f"expected adopted_streaming_table to skip, got {skipped.message!r}"
+        )
+        untouched = self._get_statement(adapter, insert_name)
+        assert untouched.statement_id == healthy_id, (
+            "dbt re-submitted the statement instead of skipping under ignore"
+        )
+        assert not untouched.phase.is_terminal
