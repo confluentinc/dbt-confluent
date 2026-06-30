@@ -3,6 +3,8 @@
 Underscore-prefixed so pytest does not treat it as a test module.
 """
 
+import time
+
 
 def relation(project, name):
     """Build a Relation for a model that lives in the test project's schema."""
@@ -73,3 +75,30 @@ def drop_tables(project, *names):
     so teardown removes both the statements and the relations they created."""
     for name in names:
         project.run_sql(f"drop table if exists {name}")
+
+
+def drop_materialized_table(project, name, attempts=16, interval=10):
+    """Best-effort drop of a materialized table; returns True if it's gone.
+
+    A materialized table can't be dropped with `DROP TABLE` ("not a regular
+    table"), so teardown for MT models must use `DROP MATERIALIZED TABLE`. This
+    waits out the transient state ("being modified" / "Could not execute
+    DropTable") that occurs while a prior CREATE OR ALTER is still establishing.
+
+    Ordering matters: an MT stays tied to its defining statement, so the table
+    must be dropped *before* any statement is deleted — deleting the statement
+    while the table still exists orphans (wedges) it. Callers should therefore
+    only delete statements when this returns True.
+    """
+    for i in range(attempts):
+        try:
+            project.run_sql(f"drop materialized table `{name}`")
+            return True
+        except Exception as e:
+            msg = str(e).lower()
+            if "does not exist" in msg:
+                return True
+            if i < attempts - 1 and ("being modified" in msg or "could not execute" in msg):
+                time.sleep(interval)
+                continue
+            return False  # give up; do NOT delete statements (would wedge it)

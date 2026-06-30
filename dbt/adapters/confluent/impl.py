@@ -140,6 +140,24 @@ class ConfluentAdapter(SQLAdapter):
         )
 
     @available
+    def drop_materialized_table(self, relation) -> None:
+        """DROP MATERIALIZED TABLE, tolerating a missing table.
+
+        Flink has no `DROP MATERIALIZED TABLE IF EXISTS`, and a materialized
+        table cannot be dropped with `DROP TABLE` ("not a regular table"). We
+        swallow the "does not exist" error so a stale relation cache or an
+        externally-dropped table doesn't fail the run — matching the resilience
+        of drop_relation_if_exists used by the other materializations.
+        """
+        try:
+            self.execute(f"DROP MATERIALIZED TABLE {relation}", execution_mode="streaming_ddl")
+        except (OperationalError, DbtDatabaseError) as e:
+            if "does not exist" in str(e).lower():
+                logger.debug(f"Materialized table {relation} already absent; skipping drop.")
+                return
+            raise
+
+    @available
     def get_statement_name(
         self,
         model_name: str,
