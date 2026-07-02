@@ -543,6 +543,22 @@ class ConfluentAdapter(SQLAdapter):
                 f"run with `--full-refresh` or file a bug."
             )
 
+        # Same guard, existing side: the drift check only runs when dbt's
+        # cache says the relation exists, so zero COLUMNS rows for it means
+        # the same metadata propagation lag (or the table was dropped
+        # externally mid-run). Without this guard the check would report
+        # every model column as "column added" and steer the user toward a
+        # needless --full-refresh.
+        if not existing_columns:
+            raise DbtDatabaseError(
+                f"Drift check could not introspect the existing schema for "
+                f"'{existing_relation}': the table returned no columns from "
+                f"INFORMATION_SCHEMA. This usually indicates a transient "
+                f"Confluent Cloud metadata propagation lag (or the table was "
+                f"dropped outside dbt during the run). Retry with `dbt retry`; "
+                f"if it persists, run with `--full-refresh` or file a bug."
+            )
+
         violations: list[str] = []
         violations.extend(self._check_column_drift(existing_columns, expected_columns))
         if enforce == "all":

@@ -643,6 +643,45 @@ class TestCheckSchemaDriftOrchestrator:
         # Must not look like a regular column-list drift error.
         assert "drift detected" not in msg.lower()
 
+    def test_empty_existing_columns_raises_distinct_error(self):
+        """An empty existing_columns must NOT masquerade as a column-list drift.
+
+        The drift check only runs when dbt's cache says the relation exists,
+        so the existing table coming back with zero COLUMNS rows is the same
+        metadata propagation lag as the temp-table case (or an external drop
+        mid-run) — not "every column was added". It must surface as a
+        retriable DbtDatabaseError, not a CompilationError advising a
+        destructive --full-refresh.
+        """
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="value",
+                    data_type="STRING",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtDatabaseError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                catalog,
+                expected_with={},
+            )
+        msg = str(excinfo.value)
+        assert "INFORMATION_SCHEMA" in msg
+        # Must not look like a regular column-list drift error.
+        assert "drift detected" not in msg.lower()
+
     def test_enforce_columns_ignores_options_and_distribution_drift(self):
         """With enforce='columns', only column violations should raise."""
         catalog = _make_catalog(
