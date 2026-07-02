@@ -63,7 +63,7 @@ Flink only supports the `HASH` distribution strategy today, so the adapter alway
 
 When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation. The check compares **columns**, **WITH options**, and **`distributed_by`** in a single pass and raises one error listing every violation, so you don't have to fix them one at a time.
 
-To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>_<invocation_id>`) and issues a single `UNION ALL` query against `INFORMATION_SCHEMA.COLUMNS`, `TABLES`, and `TABLE_OPTIONS` to fetch every piece of metadata at once. For `table` and `streaming_table`, the temp table is created from the model's SELECT query; for `streaming_source`, from the model's column definitions (without the connector). The temp table is dropped immediately after the schema is read.
+To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>`) and issues a single `UNION ALL` query against `INFORMATION_SCHEMA.COLUMNS`, `TABLES`, and `TABLE_OPTIONS` to fetch every piece of metadata at once. For `table` and `streaming_table`, the temp table is created from the model's SELECT query; for `streaming_source`, from the model's column definitions (without the connector). The temp table is dropped immediately after the schema is read. The name is deterministic per model, and the check drops any leftover temp table before creating a new one — so if an interrupted run leaks the table, the next drift check reclaims it.
 
 ### Configuration
 

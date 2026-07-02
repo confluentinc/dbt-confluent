@@ -437,9 +437,18 @@ class ConfluentAdapter(SQLAdapter):
         return {"ctes": ctes, "main_sql": main_sql}
 
     @available
-    def generate_schema_check_temp_name(self, identifier: str, invocation_id: str) -> str:
-        """Generate a unique temporary table name for schema drift checks."""
-        return "__dbt_tmp_schema_check_" + identifier + "_" + invocation_id.replace("-", "")
+    def generate_schema_check_temp_name(self, identifier: str) -> str:
+        """Generate the temporary table name for a model's schema drift check.
+
+        Deterministic per model, on purpose: Jinja has no try/finally, so a
+        run that dies between creating and dropping the temp table leaks it
+        as a real Kafka-backed topic. With a stable name, the next drift
+        check reclaims the leak via its DROP TABLE IF EXISTS before
+        recreating. (Concurrent runs of the same project would collide on
+        this name, but they already collide on the deterministic Flink
+        statement names, so this adds no new hazard.)
+        """
+        return "__dbt_tmp_schema_check_" + identifier
 
     @available
     def escape_string_literal(self, value: object) -> str:
