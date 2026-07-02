@@ -202,13 +202,17 @@
     DROP TABLE IF EXISTS {{ temp_relation }}
   {% endcall %}
 
+  {# `connector` (streaming_source) is rendered into the DDL's WITH clause
+     but configured outside `with` — pass it along so a connector change is
+     caught as options drift. None for the other materializations. #}
   {% do adapter.check_schema_drift(
     existing_relation,
     temp_relation,
     load_result('get_drift_catalog').table,
     config.get('with', {}),
     config.get('distributed_by'),
-    enforce
+    enforce,
+    config.get('connector')
   ) %}
 {% endmacro %}
 

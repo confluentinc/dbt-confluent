@@ -536,6 +536,77 @@ class TestCheckSchemaDriftOrchestrator:
         assert "column" not in violation_section.lower()
         assert "distribution" not in violation_section.lower()
 
+    def test_connector_change_detected(self):
+        """streaming_source's `connector` config is rendered into the DDL's
+        WITH clause but lives outside the `with` config — the orchestrator
+        must merge it into the expected options so changing it is caught."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="TABLE_OPTIONS",
+                    table_name=self.EXISTING_ID,
+                    option_key="connector",
+                    option_value="faker",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                catalog,
+                expected_with={},
+                expected_connector="datagen",
+            )
+        msg = str(excinfo.value)
+        assert "option: 'connector' existing='faker', expected='datagen'" in msg
+
+    def test_matching_connector_passes(self):
+        """A connector that matches the existing table's option is no drift."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="TABLE_OPTIONS",
+                    table_name=self.EXISTING_ID,
+                    option_key="connector",
+                    option_value="faker",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            _relation(self.TEMP_ID),
+            catalog,
+            expected_with={},
+            expected_connector="faker",
+        )
+
     def test_no_drift_returns_silently(self):
         """When nothing has drifted the orchestrator returns without raising."""
         catalog = _make_catalog(

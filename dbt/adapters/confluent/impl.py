@@ -520,6 +520,7 @@ class ConfluentAdapter(SQLAdapter):
         expected_with: dict[str, str],
         expected_distribution: dict | None = None,
         enforce: Literal["all", "columns"] = "all",
+        expected_connector: str | None = None,
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
@@ -539,6 +540,13 @@ class ConfluentAdapter(SQLAdapter):
                         restart path under `on_schema_drift='ignore'`, where
                         options/distribution drift is fine but a column
                         mismatch would cause Flink to reject the INSERT.
+
+        `expected_connector` is streaming_source's mandatory `connector`
+        config. The materialization renders it into the DDL's WITH clause
+        (where the existing table's INFORMATION_SCHEMA options report it),
+        but it lives outside the `with` config — so it's merged into the
+        expected options here to participate in options drift like any
+        other option. None for materializations without a connector.
         """
         existing_columns, expected_columns, existing_options, existing_distribution = (
             self._partition_drift_catalog(
@@ -582,7 +590,10 @@ class ConfluentAdapter(SQLAdapter):
         violations: list[str] = []
         violations.extend(self._check_column_drift(existing_columns, expected_columns))
         if enforce == "all":
-            violations.extend(self._check_options_drift(expected_with, existing_options))
+            expected_options = dict(expected_with)
+            if expected_connector is not None:
+                expected_options["connector"] = expected_connector
+            violations.extend(self._check_options_drift(expected_options, existing_options))
             violations.extend(
                 self._check_distribution_drift(expected_distribution, existing_distribution)
             )
