@@ -442,6 +442,17 @@ class ConfluentAdapter(SQLAdapter):
         return "__dbt_tmp_schema_check_" + identifier + "_" + invocation_id.replace("-", "")
 
     @available
+    def escape_string_literal(self, value: object) -> str:
+        """Escape a value for embedding in a Flink SQL string literal ('...').
+
+        Flink SQL escapes a single quote inside a string literal by doubling
+        it. Used when rendering user-supplied config (WITH option keys/values,
+        `connector`) into DDL, where an unescaped quote would break the
+        statement — or terminate the literal and inject arbitrary clauses.
+        """
+        return str(value).replace("'", "''")
+
+    @available
     def validate_distributed_by_config(self, dist: object) -> None:
         """Raise CompilationError if the `distributed_by` config is malformed.
 
