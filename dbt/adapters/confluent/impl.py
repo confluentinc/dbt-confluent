@@ -437,9 +437,29 @@ class ConfluentAdapter(SQLAdapter):
         return {"ctes": ctes, "main_sql": main_sql}
 
     @available
-    def generate_schema_check_temp_name(self, identifier: str, invocation_id: str) -> str:
-        """Generate a unique temporary table name for schema drift checks."""
-        return "__dbt_tmp_schema_check_" + identifier + "_" + invocation_id.replace("-", "")
+    def generate_schema_check_temp_name(self, identifier: str) -> str:
+        """Generate the temporary table name for a model's schema drift check.
+
+        Deterministic per model, on purpose: Jinja has no try/finally, so a
+        run that dies between creating and dropping the temp table leaks it
+        as a real Kafka-backed topic. With a stable name, the next drift
+        check reclaims the leak via its DROP TABLE IF EXISTS before
+        recreating. (Concurrent runs of the same project would collide on
+        this name, but they already collide on the deterministic Flink
+        statement names, so this adds no new hazard.)
+        """
+        return "__dbt_tmp_schema_check_" + identifier
+
+    @available
+    def escape_string_literal(self, value: object) -> str:
+        """Escape a value for embedding in a Flink SQL string literal ('...').
+
+        Flink SQL escapes a single quote inside a string literal by doubling
+        it. Used when rendering user-supplied config (WITH option keys/values,
+        `connector`) into DDL, where an unescaped quote would break the
+        statement — or terminate the literal and inject arbitrary clauses.
+        """
+        return str(value).replace("'", "''")
 
     @available
     def validate_distributed_by_config(self, dist: object) -> None:
@@ -500,6 +520,7 @@ class ConfluentAdapter(SQLAdapter):
         expected_with: dict[str, str],
         expected_distribution: dict | None = None,
         enforce: Literal["all", "columns"] = "all",
+        expected_connector: str | None = None,
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
@@ -519,6 +540,13 @@ class ConfluentAdapter(SQLAdapter):
                         restart path under `on_schema_drift='ignore'`, where
                         options/distribution drift is fine but a column
                         mismatch would cause Flink to reject the INSERT.
+
+        `expected_connector` is streaming_source's mandatory `connector`
+        config. The materialization renders it into the DDL's WITH clause
+        (where the existing table's INFORMATION_SCHEMA options report it),
+        but it lives outside the `with` config — so it's merged into the
+        expected options here to participate in options drift like any
+        other option. None for materializations without a connector.
         """
         existing_columns, expected_columns, existing_options, existing_distribution = (
             self._partition_drift_catalog(
@@ -543,10 +571,29 @@ class ConfluentAdapter(SQLAdapter):
                 f"run with `--full-refresh` or file a bug."
             )
 
+        # Same guard, existing side: the drift check only runs when dbt's
+        # cache says the relation exists, so zero COLUMNS rows for it means
+        # the same metadata propagation lag (or the table was dropped
+        # externally mid-run). Without this guard the check would report
+        # every model column as "column added" and steer the user toward a
+        # needless --full-refresh.
+        if not existing_columns:
+            raise DbtDatabaseError(
+                f"Drift check could not introspect the existing schema for "
+                f"'{existing_relation}': the table returned no columns from "
+                f"INFORMATION_SCHEMA. This usually indicates a transient "
+                f"Confluent Cloud metadata propagation lag (or the table was "
+                f"dropped outside dbt during the run). Retry with `dbt retry`; "
+                f"if it persists, run with `--full-refresh` or file a bug."
+            )
+
         violations: list[str] = []
         violations.extend(self._check_column_drift(existing_columns, expected_columns))
         if enforce == "all":
-            violations.extend(self._check_options_drift(expected_with, existing_options))
+            expected_options = dict(expected_with)
+            if expected_connector is not None:
+                expected_options["connector"] = expected_connector
+            violations.extend(self._check_options_drift(expected_options, existing_options))
             violations.extend(
                 self._check_distribution_drift(expected_distribution, existing_distribution)
             )

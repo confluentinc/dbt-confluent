@@ -536,6 +536,77 @@ class TestCheckSchemaDriftOrchestrator:
         assert "column" not in violation_section.lower()
         assert "distribution" not in violation_section.lower()
 
+    def test_connector_change_detected(self):
+        """streaming_source's `connector` config is rendered into the DDL's
+        WITH clause but lives outside the `with` config — the orchestrator
+        must merge it into the expected options so changing it is caught."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="TABLE_OPTIONS",
+                    table_name=self.EXISTING_ID,
+                    option_key="connector",
+                    option_value="faker",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                catalog,
+                expected_with={},
+                expected_connector="datagen",
+            )
+        msg = str(excinfo.value)
+        assert "option: 'connector' existing='faker', expected='datagen'" in msg
+
+    def test_matching_connector_passes(self):
+        """A connector that matches the existing table's option is no drift."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="TABLE_OPTIONS",
+                    table_name=self.EXISTING_ID,
+                    option_key="connector",
+                    option_value="faker",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            _relation(self.TEMP_ID),
+            catalog,
+            expected_with={},
+            expected_connector="faker",
+        )
+
     def test_no_drift_returns_silently(self):
         """When nothing has drifted the orchestrator returns without raising."""
         catalog = _make_catalog(
@@ -625,6 +696,45 @@ class TestCheckSchemaDriftOrchestrator:
                 _row(
                     section="COLUMNS",
                     table_name=self.EXISTING_ID,
+                    col_name="value",
+                    data_type="STRING",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtDatabaseError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                catalog,
+                expected_with={},
+            )
+        msg = str(excinfo.value)
+        assert "INFORMATION_SCHEMA" in msg
+        # Must not look like a regular column-list drift error.
+        assert "drift detected" not in msg.lower()
+
+    def test_empty_existing_columns_raises_distinct_error(self):
+        """An empty existing_columns must NOT masquerade as a column-list drift.
+
+        The drift check only runs when dbt's cache says the relation exists,
+        so the existing table coming back with zero COLUMNS rows is the same
+        metadata propagation lag as the temp-table case (or an external drop
+        mid-run) — not "every column was added". It must surface as a
+        retriable DbtDatabaseError, not a CompilationError advising a
+        destructive --full-refresh.
+        """
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
                     col_name="value",
                     data_type="STRING",
                 ),

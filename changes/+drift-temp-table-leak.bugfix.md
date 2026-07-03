@@ -1,0 +1,1 @@
+Schema drift checks no longer permanently leak their temp table (a real Kafka-backed topic) when the run fails between creating and dropping it: the temp name is now deterministic per model (no `invocation_id` suffix) and the check drops any leftover before creating, so the next run reclaims a leak.

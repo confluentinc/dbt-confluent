@@ -40,9 +40,9 @@
     ( {{ sql }})
     {{ get_distributed_by_clause() }}
     WITH (
-      'connector' = '{{ connector }}'
+      'connector' = '{{ adapter.escape_string_literal(connector) }}'
       {%- for key, value in with_options.items() -%}
-      , '{{ key }}' = '{{ value }}'
+      , '{{ adapter.escape_string_literal(key) }}' = '{{ adapter.escape_string_literal(value) }}'
       {%- endfor -%}
     )
   {%- endcall %}

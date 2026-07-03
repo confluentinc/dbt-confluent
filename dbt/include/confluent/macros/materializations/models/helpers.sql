@@ -167,13 +167,20 @@
               restart path under on_schema_drift='ignore' to keep restart
               safe without rejecting benign options/distribution drift. #}
 
-  {% set temp_table_name = adapter.generate_schema_check_temp_name(this.identifier, invocation_id) %}
+  {% set temp_table_name = adapter.generate_schema_check_temp_name(this.identifier) %}
   {% set temp_relation = adapter.Relation.create(
     database=this.database,
     schema=this.schema,
     identifier=temp_table_name,
     type='table'
   ) %}
+
+  {# Jinja has no try/finally, so a run that died between creating and
+     dropping this temp table leaked it. The name is deterministic per
+     model, so reclaim any leftover before creating. #}
+  {% call statement('drop_leaked_temp_table', hidden=True) %}
+    DROP TABLE IF EXISTS {{ temp_relation }}
+  {% endcall %}
 
   {% if has_select_query %}
     {% call statement('create_temp_table', hidden=True) %}
@@ -195,13 +202,17 @@
     DROP TABLE IF EXISTS {{ temp_relation }}
   {% endcall %}
 
+  {# `connector` (streaming_source) is rendered into the DDL's WITH clause
+     but configured outside `with` — pass it along so a connector change is
+     caught as options drift. None for the other materializations. #}
   {% do adapter.check_schema_drift(
     existing_relation,
     temp_relation,
     load_result('get_drift_catalog').table,
     config.get('with', {}),
     config.get('distributed_by'),
-    enforce
+    enforce,
+    config.get('connector')
   ) %}
 {% endmacro %}
 

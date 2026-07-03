@@ -63,7 +63,7 @@ Flink only supports the `HASH` distribution strategy today, so the adapter alway
 
 When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation. The check compares **columns**, **WITH options**, and **`distributed_by`** in a single pass and raises one error listing every violation, so you don't have to fix them one at a time.
 
-To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>_<invocation_id>`) and issues a single `UNION ALL` query against `INFORMATION_SCHEMA.COLUMNS`, `TABLES`, and `TABLE_OPTIONS` to fetch every piece of metadata at once. For `table` and `streaming_table`, the temp table is created from the model's SELECT query; for `streaming_source`, from the model's column definitions (without the connector). The temp table is dropped immediately after the schema is read.
+To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>`) and issues a single `UNION ALL` query against `INFORMATION_SCHEMA.COLUMNS`, `TABLES`, and `TABLE_OPTIONS` to fetch every piece of metadata at once. For `table` and `streaming_table`, the temp table is created from the model's SELECT query; for `streaming_source`, from the model's column definitions (without the connector). The temp table is dropped immediately after the schema is read. The name is deterministic per model, and the check drops any leftover temp table before creating a new one — so if an interrupted run leaks the table, the next drift check reclaims it.
 
 ### Configuration
 
@@ -100,7 +100,7 @@ Compares the user-specified `config(distributed_by={...})` against the existing 
 **Important limitation**: As with WITH options, the adapter only verifies what the user explicitly requested. If `distributed_by` is unset, drift detection is skipped entirely, because Confluent assigns a default distribution (typically derived from the primary key) to every Kafka-backed table, and INFORMATION_SCHEMA does not distinguish user-specified from auto-assigned distribution. Note that you cannot truly *remove* a distribution: every Kafka-backed table has one. To stop the adapter from comparing against a previously-set `distributed_by`, drop the config and use `--full-refresh` to recreate the table — Confluent will then assign its default distribution.
 
 ### WITH Options Drift
-Compares existing `WITH` options against the model's `config(with={...})`. Raises an error if any configured option value has changed.
+Compares existing `WITH` options against the model's `config(with={...})`. Raises an error if any configured option value has changed. For `streaming_source`, the mandatory `config(connector='...')` is included in this comparison (it is rendered as the `connector` WITH option), so changing the connector is detected as drift.
 
 **Important limitation**: The adapter only verifies that user-specified options exist with the correct values. It does **not** detect when options are removed from the config, because connectors may add default options automatically (e.g., `fields.*.expression` from the faker connector), and we cannot distinguish between user-specified and auto-generated options.
 
