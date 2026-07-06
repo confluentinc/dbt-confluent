@@ -1,0 +1,1 @@
+Changing a `streaming_source` model's `connector` config is now detected as schema drift. Previously the drift check only compared the `with` config, so a connector change was silently skipped and the old connector kept running.

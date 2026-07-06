@@ -41,7 +41,7 @@
       {% if with_options %}
       WITH (
         {%- for key, value in with_options.items() -%}
-        '{{ key }}' = '{{ value }}'{%- if not loop.last %},{%- endif %}
+        '{{ adapter.escape_string_literal(key) }}' = '{{ adapter.escape_string_literal(value) }}'{%- if not loop.last %},{%- endif %}
         {%- endfor -%}
       )
       {% endif %}

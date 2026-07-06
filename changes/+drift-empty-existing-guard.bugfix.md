@@ -1,0 +1,1 @@
+The schema drift check now surfaces a retriable error when INFORMATION_SCHEMA returns no columns for the *existing* table (metadata propagation lag), instead of falsely reporting every model column as added and advising a destructive `--full-refresh`. This mirrors the guard that already existed for the temp table.
