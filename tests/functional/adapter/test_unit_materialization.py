@@ -12,6 +12,7 @@ from dbt.tests.util import (
     run_dbt_and_capture,
     set_model_file,
 )
+from tests.functional.adapter._helpers import assert_tables_absent
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 MY_STREAMING_TABLE = """
@@ -203,3 +204,7 @@ class TestStreamingTests(ConfluentFixtures):
     def test_streaming_tests(self, project):
         results = run_dbt(["run"])
         run_dbt(["test"])
+        # Fixture tables are cleaned up by post_model_hook, not inline — prove
+        # the wiring (the unit-test runner also fires the model hooks). The
+        # fixture table is named after the input CTE dbt-core generates.
+        assert_tables_absent(project, "__dbt__cte__my_streaming_source")

@@ -175,12 +175,19 @@
     type='table'
   ) %}
 
-  {# Jinja has no try/finally, so a run that died between creating and
-     dropping this temp table leaked it. The name is deterministic per
-     model, so reclaim any leftover before creating. #}
+  {# Cleanup happens in the adapter's post_model_hook (see defer_drop below),
+     which runs even when this macro raises. This preemptive drop remains as
+     the backstop for the cases the hook can't cover: a hard-killed process,
+     or a cleanup drop that failed for the same reason the run died. The name
+     is deterministic per model, so any leftover is reclaimed here. #}
   {% call statement('drop_leaked_temp_table', hidden=True) %}
     DROP TABLE IF EXISTS {{ temp_relation }}
   {% endcall %}
+
+  {# Registered before the CREATE: the deferred drop is IF EXISTS, so it
+     covers a half-created table (CTAS is not atomic) at no cost when the
+     CREATE never ran. #}
+  {% do adapter.defer_drop(temp_relation) %}
 
   {% if has_select_query %}
     {% call statement('create_temp_table', hidden=True) %}
@@ -196,11 +203,14 @@
     {% endcall %}
   {% endif %}
 
-  {{ get_drift_catalog(existing_relation, temp_relation) }}
+  {# The CTAS statement may still be RUNNING when the temp table is dropped,
+     which would strand it in DEGRADED (DROP TABLE does not stop dependent
+     statements). Delete it in the post-hook, before the table drop. (The
+     plain-DDL branch is already terminal by now; deleting it just keeps it
+     from lingering 30 days in the statement list.) #}
+  {% do adapter.defer_statement_delete(load_result('create_temp_table').response.statement_name) %}
 
-  {% call statement('drop_temp_table', hidden=True) %}
-    DROP TABLE IF EXISTS {{ temp_relation }}
-  {% endcall %}
+  {{ get_drift_catalog(existing_relation, temp_relation) }}
 
   {# `connector` (streaming_source) is rendered into the DDL's WITH clause
      but configured outside `with` — pass it along so a connector change is

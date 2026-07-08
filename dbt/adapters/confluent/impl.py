@@ -1,7 +1,9 @@
 import logging
 import re
+import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 import agate
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
@@ -55,6 +57,15 @@ class ConfluentAdapter(SQLAdapter):
     connections: ConfluentConnectionManager
     Relation: type[ConfluentRelation] = ConfluentRelation
     Column: type[ConfluentColumn] = ConfluentColumn
+
+    def __init__(self, config, mp_context) -> None:
+        super().__init__(config, mp_context)
+        # Deferred-cleanup registry, consumed by post_model_hook. Thread-local
+        # because dbt runs each node on its own thread and both model hooks run
+        # on that same thread. Created eagerly here so concurrent first uses
+        # can't race on the attribute itself; the per-thread lists inside are
+        # lazily initialized (each thread only touches its own).
+        self._deferred_cleanups = threading.local()
 
     @classmethod
     def quote(cls, identifier: str) -> str:
@@ -260,6 +271,100 @@ class ConfluentAdapter(SQLAdapter):
             ):
                 raise
 
+    def _cleanup_registry(self) -> tuple[list[str], list[str]]:
+        """Return this thread's (statement_names, relations) cleanup lists,
+        creating them if the thread hasn't registered anything yet (e.g. a
+        run-operation, where pre_model_hook never ran)."""
+        local = self._deferred_cleanups
+        if not hasattr(local, "statements"):
+            local.statements = []
+            local.relations = []
+        return local.statements, local.relations
+
+    def pre_model_hook(self, config: Mapping[str, Any]) -> None:
+        """Reset this thread's deferred-cleanup registry.
+
+        Worker threads are reused across nodes, so entries left behind by a
+        node that died without reaching its post-hook (e.g. SIGKILL mid-run)
+        must not leak into the next node's cleanup.
+
+        Deliberately ignores `config`: dbt-core's test task passes the whole
+        context dict here instead of the config, so the argument can't be
+        relied on across node types.
+        """
+        local = self._deferred_cleanups
+        local.statements = []
+        local.relations = []
+
+    @available
+    def defer_drop(self, relation) -> None:
+        """Register a relation for post_model_hook to DROP TABLE IF EXISTS.
+
+        dbt calls post_model_hook in a try/finally around the materialization,
+        so registered relations are dropped even when the materialization
+        raises — the closest thing to try/finally that Jinja macros can get.
+        Register temp relations *before* creating them: the drop is IF EXISTS,
+        so a failure before creation makes it a no-op.
+        """
+        statements, relations = self._cleanup_registry()
+        rendered = str(relation)
+        if rendered not in relations:
+            relations.append(rendered)
+
+    @available
+    def defer_statement_delete(self, statement_name: str) -> None:
+        """Register a Flink statement for post_model_hook to delete.
+
+        DROP TABLE does not clean up statements that reference the table —
+        Confluent transitions running dependents to DEGRADED and only reaps
+        *terminal* statements (after 30 days). Statements are deleted before
+        any registered relation is dropped, so nothing is still writing to a
+        table when it goes away.
+        """
+        statements, relations = self._cleanup_registry()
+        if statement_name not in statements:
+            statements.append(statement_name)
+
+    def post_model_hook(self, config: Mapping[str, Any], context: Any) -> None:
+        """Run the deferred cleanups registered by this node, statements first.
+
+        dbt calls this in a try/finally around the materialization, so it also
+        runs when the materialization failed. Cleanup failures are demoted to
+        warnings: raising here would mask the materialization's own error, and
+        a leaked temp object is reclaimed by the next run's preemptive drop.
+
+        Like pre_model_hook, ignores its arguments and relies only on the
+        thread-local registry.
+        """
+        statements, relations = self._cleanup_registry()
+        local = self._deferred_cleanups
+        local.statements = []
+        local.relations = []
+        for statement_name in statements:
+            try:
+                self.delete_statement(statement_name, expect_exists=False)
+            except Exception as e:
+                fire_event(
+                    AdapterEventWarning(
+                        base_msg=(
+                            f"Failed to delete Flink statement '{statement_name}' "
+                            f"during post-model cleanup: {e}"
+                        )
+                    )
+                )
+        for rendered in relations:
+            try:
+                self.execute(f"DROP TABLE IF EXISTS {rendered}", hidden=True)
+            except Exception as e:
+                fire_event(
+                    AdapterEventWarning(
+                        base_msg=(
+                            f"Failed to drop {rendered} during post-model cleanup: {e}. "
+                            f"It will be reclaimed by the next run."
+                        )
+                    )
+                )
+
     @classmethod
     def convert_text_type(cls, agate_table: agate.Table, col_idx: int) -> str:
         return "STRING"
@@ -440,9 +545,10 @@ class ConfluentAdapter(SQLAdapter):
     def generate_schema_check_temp_name(self, identifier: str) -> str:
         """Generate the temporary table name for a model's schema drift check.
 
-        Deterministic per model, on purpose: Jinja has no try/finally, so a
-        run that dies between creating and dropping the temp table leaks it
-        as a real Kafka-backed topic. With a stable name, the next drift
+        Deterministic per model, on purpose: the temp table is normally
+        dropped by post_model_hook (which runs even when the materialization
+        fails), but a hard-killed process or a cleanup drop that fails leaks
+        it as a real Kafka-backed topic. With a stable name, the next drift
         check reclaims the leak via its DROP TABLE IF EXISTS before
         recreating. (Concurrent runs of the same project would collide on
         this name, but they already collide on the deterministic Flink

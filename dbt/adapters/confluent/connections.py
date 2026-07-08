@@ -48,6 +48,15 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class ConfluentAdapterResponse(AdapterResponse):
+    """AdapterResponse carrying the Flink statement name, so callers (including
+    Jinja via `load_result(...).response`) can correlate a dbt query with the
+    Flink statement that executed it."""
+
+    statement_name: str = ""
+
+
+@dataclass
 class ConfluentCredentials(Credentials):
     """
     Defines database specific credentials that get added to
@@ -420,7 +429,10 @@ class ConfluentConnectionManager(SQLConnectionManager):
         if your cursor does not offer rich metadata.
         """
         assert cursor.statement is not None, "Cursor has no active statement"
-        return AdapterResponse(f"{cursor._statement.phase}")
+        return ConfluentAdapterResponse(
+            _message=f"{cursor._statement.phase}",
+            statement_name=cursor._statement.name,
+        )
 
     def cancel(self, connection):
         """
