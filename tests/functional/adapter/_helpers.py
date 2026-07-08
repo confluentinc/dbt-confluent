@@ -141,6 +141,20 @@ def delete_statements_by_label(project, label):
             project.adapter.delete_statement(statement.name)
 
 
+def assert_tables_absent(project, *names):
+    """Assert none of `names` exist in the test schema. Used to prove
+    post_model_hook cleanup: temp tables (schema-check, unit-test fixtures)
+    are dropped by the hook, not inline, so a leftover means the hook didn't
+    run or didn't drop. Exact names rather than a prefix scan on purpose: the
+    shared test schema still holds UUID-suffixed temp tables leaked by
+    pre-deterministic-naming adapter versions, which a prefix match would
+    false-positive on."""
+    rows = project.run_sql("show tables", fetch="all")
+    existing = {row[0] for row in rows}
+    leaked = sorted(set(names) & existing)
+    assert not leaked, f"Temp tables leaked past post_model_hook cleanup: {leaked}"
+
+
 def drop_tables(project, *names):
     """Drop each named table if it exists. Pairs with delete_statements_by_label
     so teardown removes both the statements and the relations they created."""
