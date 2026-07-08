@@ -26,6 +26,7 @@ from dbt.tests.util import run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
     assert_distribution_drift_error,
     assert_drift_error,
+    assert_tables_absent,
     get_result_by_name,
     relation,
 )
@@ -152,6 +153,16 @@ class TestSchemaDriftDetection(ConfluentFixtures):
     check is wired and reaches check_schema_drift through the live catalog query.
     """
 
+    # Every model in this project runs a drift check on a non-full-refresh run;
+    # each check's temp table must be gone afterward (dropped by post_model_hook).
+    DRIFT_CHECKED_MODELS = ("source_for_drift", "my_table", "my_streaming_table", "my_source")
+
+    def _drift_temp_tables(self, project):
+        return [
+            project.adapter.generate_schema_check_temp_name(name)
+            for name in self.DRIFT_CHECKED_MODELS
+        ]
+
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
         return {
@@ -187,6 +198,9 @@ class TestSchemaDriftDetection(ConfluentFixtures):
         assert len(results) == 4
         for r in results:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
+        # Each skip ran a drift check; its temp table is dropped by
+        # post_model_hook, not inline — prove the happy-path cleanup wiring.
+        assert_tables_absent(project, *self._drift_temp_tables(project))
 
     def test_column_drift_detected(self, project):
         """Every materialization drifted at once, asserted in a single run.
@@ -209,6 +223,10 @@ class TestSchemaDriftDetection(ConfluentFixtures):
             assert_drift_error(result, "my_table")
             assert_drift_error(result, "my_streaming_table")
             assert_drift_error(result, "my_source")
+            # The drift error raised mid-materialization, after the temp table
+            # was created — exactly the failure window post_model_hook exists
+            # for. Prove the cleanup-on-failure wiring.
+            assert_tables_absent(project, *self._drift_temp_tables(project))
         finally:
             set_model_file(project, relation(project, "my_table"), TABLE_MODEL)
             set_model_file(project, relation(project, "my_streaming_table"), STREAMING_TABLE_MODEL)

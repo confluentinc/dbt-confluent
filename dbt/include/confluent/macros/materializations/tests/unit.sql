@@ -12,8 +12,6 @@
     {%- set tested_expected_column_names = get_columns_in_query(sql) -%}
   {%- endif -%}
 
-  {%- set temp_tables = [] -%}
-
   {# Parse CTEs and extract main query in Python #}
   {%- set parsed = adapter.parse_unit_test_ctes(model['extra_ctes'], sql) -%}
   {%- set main_sql = parsed['main_sql'] -%}
@@ -36,6 +34,12 @@
 
     {{ drop_relation_if_exists(temp_relation) }}
 
+    {# Fixture cleanup runs in the adapter's post_model_hook, which fires even
+       when a later fixture or the main query fails — inline cleanup at the end
+       of this materialization would leak every fixture created so far.
+       Registered before the CREATE (the deferred drop is IF EXISTS). #}
+    {%- do adapter.defer_drop(temp_relation) -%}
+
     {% call statement('create_' ~ loop.index, execution_mode="streaming_ddl") -%}
       {# Exclude options to avoid copying connector settings (e.g. 'faker')
          that would prevent the table from being used as a sink for INSERT. #}
@@ -45,8 +49,6 @@
     {% call statement('insert_' ~ loop.index) -%}
       INSERT INTO {{ temp_relation }} {{ cte['body'] }}
     {%- endcall %}
-
-    {%- do temp_tables.append(temp_relation) -%}
   {%- endfor -%}
 
   {# Get column metadata from the TESTED MODEL (not 'this', which is the unit test node) #}
@@ -75,11 +77,6 @@
   {%- call statement('main', fetch_result=True) -%}
 {{ unit_test_sql }}
   {%- endcall -%}
-
-  {# Clean up temp tables #}
-  {%- for temp_relation in temp_tables -%}
-    {%- do adapter.drop_relation(temp_relation) -%}
-  {%- endfor -%}
 
   {{ return({'relations': relations}) }}
 {%- endmaterialization -%}

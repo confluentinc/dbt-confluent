@@ -17,7 +17,8 @@ import agate
 import pytest
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
-from dbt.adapters.confluent.impl import ConfluentAdapter, ConfluentRelation
+from dbt.adapters.confluent.impl import ConfluentAdapter
+from tests.unit._helpers import relation as _relation
 
 # ---------------------------------------------------------------------------
 # _check_column_drift
@@ -420,12 +421,6 @@ class TestPartitionDriftCatalog:
 # ---------------------------------------------------------------------------
 # check_schema_drift (orchestrator)
 # ---------------------------------------------------------------------------
-
-
-def _relation(identifier):
-    return ConfluentRelation.create(
-        database="env-1", schema="cluster-a", identifier=identifier, type="table"
-    )
 
 
 class TestCheckSchemaDriftOrchestrator:
