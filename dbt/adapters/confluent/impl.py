@@ -48,6 +48,20 @@ class ConfluentRelation(BaseRelation):
         return ".".join([f"`{p}`" for p in [self.database, self.schema, self.identifier] if p])
 
 
+class _CleanupRegistry(threading.local):
+    """Thread-local registry of temp relations to drop in post_model_hook.
+
+    Subclassing threading.local runs __init__ once per thread, so every worker
+    thread dbt spins up starts with its own empty list. A bare threading.local()
+    with `.relations` assigned on the main thread (where the adapter is
+    constructed) would be invisible to dbt's worker threads, which is where the
+    model hooks actually run.
+    """
+
+    def __init__(self) -> None:
+        self.relations: list = []
+
+
 class ConfluentAdapter(SQLAdapter):
     """
     Controls actual implementation of adapter, and ability to override certain methods.
@@ -61,11 +75,10 @@ class ConfluentAdapter(SQLAdapter):
     def __init__(self, config, mp_context) -> None:
         super().__init__(config, mp_context)
         # Deferred-cleanup registry, consumed by post_model_hook. Thread-local
-        # because dbt runs each node on its own thread and both model hooks run
-        # on that same thread. Created eagerly here so concurrent first uses
-        # can't race on the attribute itself; the per-thread list inside is
-        # lazily initialized (each thread only touches its own).
-        self._deferred_cleanups = threading.local()
+        # because dbt runs each node — and both its model hooks — on its own
+        # worker thread; _CleanupRegistry.__init__ gives each of those threads
+        # its own empty list on first access.
+        self._deferred_cleanups = _CleanupRegistry()
 
     @classmethod
     def quote(cls, identifier: str) -> str:
@@ -271,15 +284,6 @@ class ConfluentAdapter(SQLAdapter):
             ):
                 raise
 
-    def _cleanup_registry(self) -> list[str]:
-        """Return this thread's list of relations to drop, creating it if the
-        thread hasn't registered anything yet (e.g. a run-operation, where
-        pre_model_hook never ran)."""
-        local = self._deferred_cleanups
-        if not hasattr(local, "relations"):
-            local.relations = []
-        return local.relations
-
     def pre_model_hook(self, config: Mapping[str, Any]) -> None:
         """Reset this thread's deferred-cleanup registry.
 
@@ -291,32 +295,34 @@ class ConfluentAdapter(SQLAdapter):
         context dict here instead of the config, so the argument can't be
         relied on across node types.
         """
-        self._deferred_cleanups.relations = []
+        self._deferred_cleanups.relations.clear()
 
     @available
     def defer_drop(self, relation) -> None:
-        """Register a relation for post_model_hook to DROP TABLE IF EXISTS.
+        """Register a relation for post_model_hook to drop.
 
         dbt calls post_model_hook in a try/finally around the materialization,
         so registered relations are dropped even when the materialization
         raises — the closest thing to try/finally that Jinja macros can get.
-        Register temp relations *before* creating them: the drop is IF EXISTS,
-        so a failure before creation makes it a no-op.
+        Register temp relations *before* creating them: the drop goes through
+        `drop_relation` (IF EXISTS), so a failure before creation is a no-op.
 
         Statements are intentionally not registered for deletion here: the temp
         objects are created by bounded statements (drift check appends
         `WHERE FALSE`; unit-test fixtures are bounded INSERTs), which reach a
         terminal phase immediately and are reaped by the cursor.close() in
-        ConfluentConnectionManager.execute(). DROP TABLE also succeeds without
-        first stopping any dependent statement.
+        ConfluentConnectionManager.execute(). DROP also succeeds without first
+        stopping any dependent statement.
         """
-        relations = self._cleanup_registry()
-        rendered = str(relation)
-        if rendered not in relations:
-            relations.append(rendered)
+        if relation not in self._deferred_cleanups.relations:
+            self._deferred_cleanups.relations.append(relation)
 
     def post_model_hook(self, config: Mapping[str, Any], context: Any) -> None:
         """Drop the temp relations registered by this node.
+
+        Uses `drop_relation` so cleanup is relation-type aware (table, view,
+        materialized view — each `drop ... if exists`) and keeps dbt's relation
+        cache consistent, rather than hardcoding DROP TABLE.
 
         dbt calls this in a try/finally around the materialization, so it also
         runs when the materialization failed. Cleanup failures are demoted to
@@ -326,20 +332,20 @@ class ConfluentAdapter(SQLAdapter):
         Like pre_model_hook, ignores its arguments and relies only on the
         thread-local registry.
         """
-        relations = self._cleanup_registry()
-        self._deferred_cleanups.relations = []
-        for rendered in relations:
+        relations = self._deferred_cleanups.relations
+        for relation in relations:
             try:
-                self.execute(f"DROP TABLE IF EXISTS {rendered}", hidden=True)
+                self.drop_relation(relation)
             except Exception as e:
                 fire_event(
                     AdapterEventWarning(
                         base_msg=(
-                            f"Failed to drop {rendered} during post-model cleanup: {e}. "
+                            f"Failed to drop {relation} during post-model cleanup: {e}. "
                             f"It will be reclaimed by the next run."
                         )
                     )
                 )
+        self._deferred_cleanups.relations.clear()
 
     @classmethod
     def convert_text_type(cls, agate_table: agate.Table, col_idx: int) -> str:
