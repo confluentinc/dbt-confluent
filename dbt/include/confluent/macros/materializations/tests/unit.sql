@@ -45,16 +45,10 @@
          that would prevent the table from being used as a sink for INSERT. #}
       CREATE TABLE {{ temp_relation }} LIKE {{ original_relation }} ( EXCLUDING OPTIONS )
     {%- endcall %}
-    {%- do adapter.defer_statement_delete(load_result('create_' ~ loop.index).response.statement_name) -%}
 
     {% call statement('insert_' ~ loop.index) -%}
       INSERT INTO {{ temp_relation }} {{ cte['body'] }}
     {%- endcall %}
-    {# Deleting the fixture statements (before the deferred drops run) avoids
-       stranding a still-RUNNING INSERT in DEGRADED when its table is dropped,
-       and keeps per-test-run statements from lingering 30 days in the
-       statement list. #}
-    {%- do adapter.defer_statement_delete(load_result('insert_' ~ loop.index).response.statement_name) -%}
   {%- endfor -%}
 
   {# Get column metadata from the TESTED MODEL (not 'this', which is the unit test node) #}

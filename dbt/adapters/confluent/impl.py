@@ -63,7 +63,7 @@ class ConfluentAdapter(SQLAdapter):
         # Deferred-cleanup registry, consumed by post_model_hook. Thread-local
         # because dbt runs each node on its own thread and both model hooks run
         # on that same thread. Created eagerly here so concurrent first uses
-        # can't race on the attribute itself; the per-thread lists inside are
+        # can't race on the attribute itself; the per-thread list inside is
         # lazily initialized (each thread only touches its own).
         self._deferred_cleanups = threading.local()
 
@@ -271,15 +271,14 @@ class ConfluentAdapter(SQLAdapter):
             ):
                 raise
 
-    def _cleanup_registry(self) -> tuple[list[str], list[str]]:
-        """Return this thread's (statement_names, relations) cleanup lists,
-        creating them if the thread hasn't registered anything yet (e.g. a
-        run-operation, where pre_model_hook never ran)."""
+    def _cleanup_registry(self) -> list[str]:
+        """Return this thread's list of relations to drop, creating it if the
+        thread hasn't registered anything yet (e.g. a run-operation, where
+        pre_model_hook never ran)."""
         local = self._deferred_cleanups
-        if not hasattr(local, "statements"):
-            local.statements = []
+        if not hasattr(local, "relations"):
             local.relations = []
-        return local.statements, local.relations
+        return local.relations
 
     def pre_model_hook(self, config: Mapping[str, Any]) -> None:
         """Reset this thread's deferred-cleanup registry.
@@ -292,9 +291,7 @@ class ConfluentAdapter(SQLAdapter):
         context dict here instead of the config, so the argument can't be
         relied on across node types.
         """
-        local = self._deferred_cleanups
-        local.statements = []
-        local.relations = []
+        self._deferred_cleanups.relations = []
 
     @available
     def defer_drop(self, relation) -> None:
@@ -305,28 +302,21 @@ class ConfluentAdapter(SQLAdapter):
         raises — the closest thing to try/finally that Jinja macros can get.
         Register temp relations *before* creating them: the drop is IF EXISTS,
         so a failure before creation makes it a no-op.
+
+        Statements are intentionally not registered for deletion here: the temp
+        objects are created by bounded statements (drift check appends
+        `WHERE FALSE`; unit-test fixtures are bounded INSERTs), which reach a
+        terminal phase immediately and are reaped by the cursor.close() in
+        ConfluentConnectionManager.execute(). DROP TABLE also succeeds without
+        first stopping any dependent statement.
         """
-        statements, relations = self._cleanup_registry()
+        relations = self._cleanup_registry()
         rendered = str(relation)
         if rendered not in relations:
             relations.append(rendered)
 
-    @available
-    def defer_statement_delete(self, statement_name: str) -> None:
-        """Register a Flink statement for post_model_hook to delete.
-
-        DROP TABLE does not clean up statements that reference the table —
-        Confluent transitions running dependents to DEGRADED and only reaps
-        *terminal* statements (after 30 days). Statements are deleted before
-        any registered relation is dropped, so nothing is still writing to a
-        table when it goes away.
-        """
-        statements, relations = self._cleanup_registry()
-        if statement_name not in statements:
-            statements.append(statement_name)
-
     def post_model_hook(self, config: Mapping[str, Any], context: Any) -> None:
-        """Run the deferred cleanups registered by this node, statements first.
+        """Drop the temp relations registered by this node.
 
         dbt calls this in a try/finally around the materialization, so it also
         runs when the materialization failed. Cleanup failures are demoted to
@@ -336,22 +326,8 @@ class ConfluentAdapter(SQLAdapter):
         Like pre_model_hook, ignores its arguments and relies only on the
         thread-local registry.
         """
-        statements, relations = self._cleanup_registry()
-        local = self._deferred_cleanups
-        local.statements = []
-        local.relations = []
-        for statement_name in statements:
-            try:
-                self.delete_statement(statement_name, expect_exists=False)
-            except Exception as e:
-                fire_event(
-                    AdapterEventWarning(
-                        base_msg=(
-                            f"Failed to delete Flink statement '{statement_name}' "
-                            f"during post-model cleanup: {e}"
-                        )
-                    )
-                )
+        relations = self._cleanup_registry()
+        self._deferred_cleanups.relations = []
         for rendered in relations:
             try:
                 self.execute(f"DROP TABLE IF EXISTS {rendered}", hidden=True)

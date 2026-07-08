@@ -203,13 +203,6 @@
     {% endcall %}
   {% endif %}
 
-  {# The CTAS statement may still be RUNNING when the temp table is dropped,
-     which would strand it in DEGRADED (DROP TABLE does not stop dependent
-     statements). Delete it in the post-hook, before the table drop. (The
-     plain-DDL branch is already terminal by now; deleting it just keeps it
-     from lingering 30 days in the statement list.) #}
-  {% do adapter.defer_statement_delete(load_result('create_temp_table').response.statement_name) %}
-
   {{ get_drift_catalog(existing_relation, temp_relation) }}
 
   {# `connector` (streaming_source) is rendered into the DDL's WITH clause
