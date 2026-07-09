@@ -1,1 +1,0 @@
-Single quotes in `with` option keys/values and in the `connector` config are now escaped (doubled) when rendered into `streaming_table`/`streaming_source` DDL, instead of breaking the statement or escaping the string literal.
