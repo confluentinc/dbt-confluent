@@ -173,21 +173,46 @@ def _execute_query_with_retry(
             compute_pool_id=compute_pool_id,
         )
     except OperationalError as e:
-        # "Statement with name X already exists" — happens when a prior
-        # statement with the same name is still tearing down asynchronously
-        # after a DELETE. We retry until the name frees up.
-        if getattr(e, "http_status_code", None) != 409:
-            raise
-        if attempt >= retry_limit:
+        # Two transient conditions we wait out by retrying:
+        #  - "being modified": a materialized table's prior CREATE OR ALTER is
+        #    still establishing/evolving, so a new CREATE OR ALTER (or DROP)
+        #    against it is rejected until that settles. We must NOT force it by
+        #    deleting the prior statement — that orphans the MT — so we wait.
+        #  - 409: a prior statement with the same name is still tearing down
+        #    asynchronously after a DELETE; we retry until the name frees up.
+        # "being modified" is checked first and classified by message, not
+        # status, because Confluent may surface it with a 409 too — keying off
+        # the status would misreport it (and mis-budget it) as a name-reuse race.
+        is_being_modified = "being modified" in str(e).lower()
+        is_409 = getattr(e, "http_status_code", None) == 409
+        if not (is_being_modified or is_409):
             raise
 
-        backoff = min(attempt * 3, 15)
-        retries_left = retry_limit - attempt
+        # A materialized table's CREATE OR ALTER establishment/evolution can take
+        # a while and is variable, so "being modified" gets a generous, dedicated
+        # budget (it always clears once the prior statement settles). In normal
+        # use the prior run settled long ago and this never triggers; it only
+        # bites a rapid re-run within the establishment window. The 409 name-reuse
+        # race is quick, so it keeps the smaller default budget.
+        if is_being_modified:
+            limit, backoff = max(retry_limit, 12), 10
+            reason = (
+                "Materialized table is still being modified by a prior statement "
+                "(still establishing/evolving)"
+            )
+        else:
+            limit, backoff = retry_limit, min(attempt * 3, 15)
+            reason = (
+                f"Statement name '{statement_name}' is already in use "
+                f"(prior statement may still be tearing down)"
+            )
+        if attempt >= limit:
+            raise
+
+        retries_left = limit - attempt
         fire_event(
             AdapterEventDebug(
-                base_msg=f"Statement name '{statement_name}' is already in use "
-                f"(prior statement may still be tearing down). "
-                f"{retries_left} retries left. Retrying in {backoff} seconds."
+                base_msg=f"{reason}. {retries_left} retries left. Retrying in {backoff} seconds."
             )
         )
         time.sleep(backoff)
