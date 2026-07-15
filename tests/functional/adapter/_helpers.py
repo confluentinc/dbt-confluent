@@ -166,9 +166,10 @@ def drop_materialized_table(project, name, attempts=16, interval=10):
     """Best-effort drop of a materialized table; returns True if it's gone.
 
     A materialized table can't be dropped with `DROP TABLE` ("not a regular
-    table"), so teardown for MT models must use `DROP MATERIALIZED TABLE`. This
-    waits out the transient state ("being modified" / "Could not execute
-    DropTable") that occurs while a prior CREATE OR ALTER is still establishing.
+    table"), so teardown for MT models must use `DROP MATERIALIZED TABLE IF
+    EXISTS` (missing table = no-op). This waits out the transient state ("being
+    modified" / "Could not execute DropTable") that occurs while a prior CREATE
+    OR ALTER is still establishing.
 
     Ordering matters: an MT stays tied to its defining statement, so the table
     must be dropped *before* any statement is deleted — deleting the statement
@@ -177,12 +178,10 @@ def drop_materialized_table(project, name, attempts=16, interval=10):
     """
     for i in range(attempts):
         try:
-            project.run_sql(f"drop materialized table `{name}`")
+            project.run_sql(f"drop materialized table if exists `{name}`")
             return True
         except Exception as e:
             msg = str(e).lower()
-            if "does not exist" in msg:
-                return True
             if i < attempts - 1 and ("being modified" in msg or "could not execute" in msg):
                 time.sleep(interval)
                 continue
