@@ -61,16 +61,8 @@ Supported config options are: distributed_by, with, start_mode.
     {% do exceptions.raise_compiler_error(msg) %}
   {%- endif -%}
 
-  {# start_mode must be one of the documented values. #}
-  {%- set start_mode = config.get('start_mode') -%}
-  {%- set valid_start_modes = ['FROM_BEGINNING', 'FROM_NOW', 'RESUME_OR_FROM_BEGINNING'] -%}
-  {%- if start_mode is not none and (start_mode | string | upper) not in valid_start_modes -%}
-    {% set msg %}
-'{{ start_mode }}' is not a valid value for 'start_mode'.
-Accepted values are: {{ valid_start_modes | join(', ') }}.
-    {% endset %}
-    {% do exceptions.raise_compiler_error(msg) %}
-  {%- endif -%}
+  {# start_mode is validated (and rendered) by adapter.render_start_mode,
+     called from the materialization. #}
 {% endmacro %}
 
 
