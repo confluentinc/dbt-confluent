@@ -5,7 +5,9 @@ CREATE OR ALTER MATERIALIZED TABLE and lets Flink reconcile it —
 - new relation -> create,
 - any change (columns, WITH options, query logic) -> evolve in place,
 - unchanged -> cheap no-op,
-- --full-refresh -> DROP MATERIALIZED TABLE then recreate.
+- --full-refresh -> DROP MATERIALIZED TABLE then recreate,
+- existing regular table/view (materialization switch) -> guarded: plain run
+  errors with guidance, --full-refresh drops through the regular path first.
 Config is validated (fail-fast) for unsupported options and start_mode; the
 shared distributed_by validation (delegated to validate_distributed_by_config)
 is exercised here only for end-to-end wiring — its per-case behavior lives in
@@ -228,6 +230,74 @@ class TestMaterializedTableFullRefreshRecreates(_MTFixtures):
         # --full-refresh must drop and recreate without error.
         results = run_dbt(["run", "--full-refresh", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
+
+
+# -- Materialization switch --
+
+TABLE_BEFORE_SWITCH = """
+{{ config(materialized='table') }}
+select order_id, price from {{ ref('__SOURCE__') }}
+"""
+
+
+class TestMaterializedTableSwitchGuard(_MTFixtures):
+    """A model that already exists as a regular table cannot be converted to a
+    materialized table in place (Confluent restriction): a plain run fails with
+    a clear error before any DDL; --full-refresh drops the regular table (and
+    its statements) through the regular drop path and creates the MT."""
+
+    NAME = "matswitch"
+    SRC = "src_switch"
+    MT = "mt_switch"
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        # Drop the forced +full_refresh: the guard only triggers on a plain run.
+        return {"name": self.NAME, "models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield _models(self.SRC, self.MT, TABLE_BEFORE_SWITCH)
+
+    @pytest.fixture(autouse=True, scope="class")
+    def class_clean_up(self, project, dbt_profile_data):
+        yield
+        # Depending on how far the test got, the relation is a regular table
+        # (guard-error path) or an MT (--full-refresh path). Try the regular
+        # drop first (fails fast on an MT), then the MT drop.
+        try:
+            project.run_sql(f"drop table if exists `{self.MT}`")
+        except Exception:
+            pass
+        if drop_materialized_table(project, self.MT):
+            delete_statements_by_label(project, _statement_label(dbt_profile_data))
+        project.run_sql(f"drop table if exists {self.SRC}")
+
+    def test_switch_guard(self, project):
+        # Build as a regular table first.
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results)
+
+        # Re-point the model at the materialized_table materialization.
+        set_model_file(project, relation(project, self.MT), MT.replace("__SOURCE__", self.SRC))
+
+        # Plain run: the switch is rejected with guidance, before any DDL.
+        results = run_dbt(["run", "-s", self.MT], expect_pass=False)
+        r = get_result_by_name(results, self.MT)
+        assert r is not None
+        assert r.status.name == "Error"
+        assert "cannot be converted" in r.message
+        assert "--full-refresh" in r.message
+
+        # --full-refresh: the regular table is dropped and the MT created.
+        results = run_dbt(["run", "--full-refresh", "-s", self.MT])
+        assert all(r.status.name == "Success" for r in results)
+        row = project.run_sql(
+            "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "
+            f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{self.MT}'",
+            fetch="one",
+        )
+        assert row is not None and row[0] == "YES"
 
 
 # -- Invalid config models --
