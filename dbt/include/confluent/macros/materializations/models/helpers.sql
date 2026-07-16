@@ -72,13 +72,13 @@ Supported config options are: distributed_by, with, start_mode.
 
 
 {% macro render_with_options(with_options) %}
-  {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping single
-     quotes in values. Renders nothing when with_options is empty. Reusable by any
-     materialization that accepts config(with={...}). -#}
+  {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping
+     single quotes in keys and values. Renders nothing when with_options is
+     empty. Shared by every materialization that accepts config(with={...}). -#}
 {%- if with_options -%}
 WITH (
 {%- for key, value in with_options.items() %}
-      '{{ key }}' = '{{ value | replace("'", "''") }}'{{ "," if not loop.last }}
+      '{{ adapter.escape_string_literal(key) }}' = '{{ adapter.escape_string_literal(value) }}'{{ "," if not loop.last }}
 {%- endfor %}
     )
 {%- endif -%}

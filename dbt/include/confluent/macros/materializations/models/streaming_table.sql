@@ -38,13 +38,7 @@
       {{ get_assert_columns_equivalent(sql) }}
       {{ get_table_columns_and_constraints() }}
       {{ get_distributed_by_clause() }}
-      {% if with_options %}
-      WITH (
-        {%- for key, value in with_options.items() -%}
-        '{{ adapter.escape_string_literal(key) }}' = '{{ adapter.escape_string_literal(value) }}'{%- if not loop.last %},{%- endif %}
-        {%- endfor -%}
-      )
-      {% endif %}
+      {{ render_with_options(with_options) }}
     {%- endcall -%}
   {% endif %}
 
