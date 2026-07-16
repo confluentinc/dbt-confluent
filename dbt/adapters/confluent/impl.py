@@ -25,6 +25,35 @@ from .utils import fetch_from_cursor
 
 logger = logging.getLogger(__name__)
 
+# start_mode keyword → argument arity. Confluent documents eight forms: four
+# bare keywords, plus *_TIMESTAMP with a required argument and *_NOW with an
+# optional one (FROM_NOW doubles as bare "now" and parameterized "now minus
+# interval").
+_START_MODE_ARITY = {
+    "FROM_BEGINNING": "none",
+    "RESUME_OR_FROM_BEGINNING": "none",
+    "FROM_NOW": "optional",
+    "RESUME_OR_FROM_NOW": "optional",
+    "FROM_TIMESTAMP": "required",
+    "RESUME_OR_FROM_TIMESTAMP": "required",
+}
+
+_START_MODE_FORMS = (
+    "FROM_BEGINNING, FROM_NOW, FROM_NOW('<interval>'), FROM_TIMESTAMP('<timestamp>'), "
+    "RESUME_OR_FROM_BEGINNING, RESUME_OR_FROM_NOW, RESUME_OR_FROM_NOW('<interval>'), "
+    "RESUME_OR_FROM_TIMESTAMP('<timestamp>')"
+)
+
+# A start_mode string: a keyword, optionally followed by a parenthesized
+# argument that is either a well-formed single-quoted SQL literal (quotes
+# escaped by doubling) or bare text without quotes/parens (we add the quotes).
+# Anything else — e.g. a stray quote that would terminate the rendered literal
+# early — fails the match and is rejected as invalid.
+_START_MODE_RE = re.compile(
+    r"\s*(?P<kw>[A-Za-z_]+)\s*"
+    r"(?:\(\s*(?:'(?P<quoted>(?:[^']|'')*)'|(?P<bare>[^'()]*?))\s*\)\s*)?"
+)
+
 
 @dataclass(frozen=True, eq=False, repr=False)
 class ConfluentRelation(BaseRelation):
@@ -612,6 +641,41 @@ class ConfluentAdapter(SQLAdapter):
             raise CompilationError(
                 f"'distributed_by' has unknown key '{key}'. Allowed keys: 'columns', 'buckets'"
             )
+
+    @available
+    def render_start_mode(self, value: object) -> str:
+        """Validate the `start_mode` config and render the START_MODE value.
+
+        Accepts the eight documented Confluent forms as a plain string (what
+        users paste from the docs): FROM_BEGINNING / RESUME_OR_FROM_BEGINNING
+        (no argument), FROM_TIMESTAMP / RESUME_OR_FROM_TIMESTAMP (argument
+        required), FROM_NOW / RESUME_OR_FROM_NOW (argument optional). The
+        keyword is normalized to uppercase; the argument may be given with or
+        without surrounding single quotes and is re-emitted as an escaped SQL
+        string literal. Returns '' when the config is unset; raises
+        CompilationError on anything else.
+        """
+        if value is None:
+            return ""
+        match = _START_MODE_RE.fullmatch(str(value))
+        keyword = match.group("kw").upper() if match else ""
+        arity = _START_MODE_ARITY.get(keyword)
+        if not match or arity is None:
+            raise CompilationError(
+                f"'{value}' is not a valid value for 'start_mode'.\n"
+                f"Accepted forms are: {_START_MODE_FORMS}."
+            )
+        quoted, bare = match.group("quoted"), match.group("bare")
+        arg = quoted.replace("''", "'") if quoted is not None else bare
+        if not arg:  # None (no parens) or '' (empty parens/literal)
+            if arity == "required":
+                raise CompilationError(
+                    f"'start_mode' {keyword} requires an argument, e.g. {keyword}('...')."
+                )
+            return keyword
+        if arity == "none":
+            raise CompilationError(f"'start_mode' {keyword} does not take an argument.")
+        return f"{keyword}('{self.escape_string_literal(arg)}')"
 
     @available
     def check_schema_drift(

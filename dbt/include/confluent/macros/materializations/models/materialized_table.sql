@@ -2,7 +2,9 @@
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type=this.Table) %}
 
-  {%- set start_mode = config.get('start_mode') -%}
+  {# Validates and renders in one step ('' when unset) — must run up here so a
+     bad start_mode fails before the full-refresh drop below. #}
+  {%- set start_mode = adapter.render_start_mode(config.get('start_mode')) -%}
   {%- set with_options = config.get('with', {}) -%}
 
   {{ validate_distributed_by_config() }}
