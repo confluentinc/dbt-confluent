@@ -14,11 +14,14 @@
 
   {# Declarative lifecycle: we always re-assert the definition with
      CREATE OR ALTER and let Flink reconcile it — a new table is created, any
-     change (columns, WITH options, or query logic) is evolved in place, and an
-     unchanged definition is a cheap no-op. `--full-refresh` drops first so the
-     table is rebuilt from scratch (the way to change distribution). Re-running
-     within Flink's brief establishment window is transiently rejected
-     ("being modified") and retried by the connection manager. #}
+     change (columns, WITH options, or query logic) is evolved in place, and
+     an unchanged definition is a server-side no-op (verified empirically: the
+     server diffs the parsed spec, so state, data, and offsets are untouched —
+     despite Confluent docs claiming every re-assert evolves). `--full-refresh`
+     drops first so the table is rebuilt from scratch (the way to change
+     distribution). Re-running within Flink's brief establishment window is
+     transiently rejected ("being modified") and retried by the connection
+     manager. #}
   {# Pre-flight switch guard: Confluent cannot convert an existing regular
      table/view into a materialized table, so CREATE OR ALTER would fail with
      a confusing server error. Detect the switch up front and either fail with
@@ -47,9 +50,11 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
 
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
-  {# Submit under a per-invocation statement name. An MT stays tied to its
-     defining CREATE OR ALTER statement, so we must not delete-and-reuse a fixed
-     name (that orphans the table); a unique name per run avoids any collision. #}
+  {# Submit under a per-invocation statement name. The CREATE OR ALTER
+     completes immediately (Flink maintains the table server-side, not the
+     statement) and is reaped at cursor close like any bounded statement, but
+     a FAILED submission lingers for debugging and would 409-collide with a
+     reused fixed name — a unique name per run sidesteps that entirely. #}
   {% call statement('main', execution_mode="streaming_ddl",
                     statement_name=get_statement_name('-' ~ invocation_id)) -%}
     CREATE OR ALTER MATERIALIZED TABLE {{ target_relation }}

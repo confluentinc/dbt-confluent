@@ -171,10 +171,9 @@ def drop_materialized_table(project, name, attempts=16, interval=10):
     modified" / "Could not execute DropTable") that occurs while a prior CREATE
     OR ALTER is still establishing.
 
-    Ordering matters: an MT stays tied to its defining statement, so the table
-    must be dropped *before* any statement is deleted — deleting the statement
-    while the table still exists orphans (wedges) it. Callers should therefore
-    only delete statements when this returns True.
+    Callers gate statement deletion on the return value: if the drop kept
+    failing, leave the statements too and let the next run's teardown (or a
+    manual sweep) clean up the lot.
     """
     for i in range(attempts):
         try:
@@ -185,4 +184,4 @@ def drop_materialized_table(project, name, attempts=16, interval=10):
             if i < attempts - 1 and ("being modified" in msg or "could not execute" in msg):
                 time.sleep(interval)
                 continue
-            return False  # give up; do NOT delete statements (would wedge it)
+            return False  # give up; caller leaves statements for a later sweep

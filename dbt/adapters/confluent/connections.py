@@ -182,8 +182,9 @@ def _execute_query_with_retry(
         # Two transient conditions we wait out by retrying:
         #  - "being modified": a materialized table's prior CREATE OR ALTER is
         #    still establishing/evolving, so a new CREATE OR ALTER (or DROP)
-        #    against it is rejected until that settles. We must NOT force it by
-        #    deleting the prior statement — that orphans the MT — so we wait.
+        #    against it is rejected until that settles. It always settles on
+        #    its own; we wait rather than interfere with an in-flight
+        #    evolution.
         #  - 409: a prior statement with the same name is still tearing down
         #    asynchronously after a DELETE; we retry until the name frees up.
         # "being modified" is checked first and classified by message, not

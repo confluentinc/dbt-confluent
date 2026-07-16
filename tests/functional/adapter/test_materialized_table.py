@@ -4,7 +4,7 @@ materialized_table is declarative: every run re-asserts the definition with
 CREATE OR ALTER MATERIALIZED TABLE and lets Flink reconcile it —
 - new relation -> create,
 - any change (columns, WITH options, query logic) -> evolve in place,
-- unchanged -> cheap no-op,
+- unchanged -> server-side no-op (the server diffs the submitted spec),
 - --full-refresh -> DROP MATERIALIZED TABLE then recreate,
 - existing regular table/view (materialization switch) -> guarded: plain run
   errors with guidance, --full-refresh drops through the regular path first.
@@ -85,11 +85,9 @@ def _statement_label(dbt_profile_data):
 class _MTFixtures(ConfluentFixtures):
     """Base for materialized_table test classes.
 
-    Overrides the per-test clean_up so it does NOT delete statements: an MT stays
-    tied to its defining CREATE OR ALTER statement, so deleting that statement
-    orphans (wedges) the table. Class teardown instead drops the MT first (which
-    waits out the transient establishing state), then deletes statements once the
-    table is gone, then drops the source.
+    Overrides the per-test clean_up to do nothing: MT cleanup happens once, at
+    class teardown, which drops the MT first (waiting out the transient
+    establishing state), then deletes statements, then drops the source.
     """
 
     @pytest.fixture(autouse=True)
@@ -99,8 +97,8 @@ class _MTFixtures(ConfluentFixtures):
     @pytest.fixture(autouse=True, scope="class")
     def class_clean_up(self, project, dbt_profile_data):
         yield
-        # Drop the MT first; only delete statements if it's actually gone
-        # (deleting the defining statement of a still-present MT wedges it).
+        # Only delete statements once the MT is confirmed gone; if the drop
+        # kept failing, leave everything for the next run's teardown.
         if drop_materialized_table(project, self.MT):
             delete_statements_by_label(project, _statement_label(dbt_profile_data))
         project.run_sql(f"drop table if exists {self.SRC}")
@@ -132,8 +130,9 @@ class TestMaterializedTable(_MTFixtures):
 
 
 class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
-    """Re-running an unchanged MT is a cheap no-op: dbt re-asserts the same
-    CREATE OR ALTER and Flink reconciles it without rebuilding the table."""
+    """Re-running an unchanged MT is a server-side no-op: dbt re-asserts the
+    same CREATE OR ALTER and the server diffs the spec, leaving the table,
+    its data, and its query state untouched."""
 
     NAME = "matnoop"
     SRC = "src_noop"
@@ -239,6 +238,18 @@ TABLE_BEFORE_SWITCH = """
 select order_id, price from {{ ref('__SOURCE__') }}
 """
 
+# No distributed_by, on purpose: a dropped object's Kafka topic can outlive
+# the catalog drop, and a create under the same name only succeeds if the
+# partition count matches. Keeping both the regular table and the MT on
+# Confluent's default distribution (6 buckets) makes their topics compatible
+# in both directions; a buckets-4 MT here poisoned the relation name for the
+# next run's default-6 CTAS ("topic with the same name already exists with
+# different partitions").
+MT_AFTER_SWITCH = """
+{{ config(materialized='materialized_table') }}
+select order_id, price from {{ ref('__SOURCE__') }}
+"""
+
 
 class TestMaterializedTableSwitchGuard(_MTFixtures):
     """A model that already exists as a regular table cannot be converted to a
@@ -247,8 +258,10 @@ class TestMaterializedTableSwitchGuard(_MTFixtures):
     its statements) through the regular drop path and creates the MT."""
 
     NAME = "matswitch"
-    SRC = "src_switch"
-    MT = "mt_switch"
+    SRC = "src_swguard"
+    # Not "mt_switch": that name's topic is poisoned (4 partitions) in clusters
+    # that ran the pre-fix version of this test.
+    MT = "mt_swguard"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -279,7 +292,9 @@ class TestMaterializedTableSwitchGuard(_MTFixtures):
         assert all(r.status.name == "Success" for r in results)
 
         # Re-point the model at the materialized_table materialization.
-        set_model_file(project, relation(project, self.MT), MT.replace("__SOURCE__", self.SRC))
+        set_model_file(
+            project, relation(project, self.MT), MT_AFTER_SWITCH.replace("__SOURCE__", self.SRC)
+        )
 
         # Plain run: the switch is rejected with guidance, before any DDL.
         results = run_dbt(["run", "-s", self.MT], expect_pass=False)
@@ -297,7 +312,7 @@ class TestMaterializedTableSwitchGuard(_MTFixtures):
             f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{self.MT}'",
             fetch="one",
         )
-        assert row is not None and row[0] == "YES"
+        assert row is not None and row[0][0] == "YES"
 
 
 # -- Invalid config models --
