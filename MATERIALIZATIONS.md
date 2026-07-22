@@ -89,7 +89,11 @@ Flink only supports the `HASH` distribution strategy today, so the adapter alway
 
 > **Warning — data loss**: dropping a materialized table (including via `--full-refresh`) permanently deletes the backing Kafka topic, all of its data, and the associated Schema Registry schema versions.
 
-Note that the backing topic's deletion can lag the catalog drop. Recreating a model under the same name with a **different distribution** while the old topic still exists fails with "a topic with the same name already exists with different partitions or configurations" — re-run once the old topic is fully deleted. (Recreating with the *same* distribution reuses the lingering topic and is unaffected.)
+Note that the backing topic's (and its Schema Registry schemas') deletion is asynchronous and can lag the catalog drop considerably. Observed consequences of recreating a model under the same name while the old topic still exists:
+
+- With a **different distribution**, creation fails with "a topic with the same name already exists with different partitions or configurations" — re-run once the old topic is fully deleted. (Recreating with the *same* distribution reuses the lingering topic.)
+- With **different columns**, creation binds to the lingering topic's registered schema and fails with "Column types of query result and sink ... do not match" — again, re-run once the old topic is gone.
+- A lingering topic can also **resurface in the catalog as an inferred regular table** under the model's name (observed within a day of the drop, with the topic's schema intact). The next plain run then fails with the materialization-switch guard error ("already exists as a regular table or view"); run with `--full-refresh` to drop the inferred table — which deletes the lingering topic — and recreate the materialized table.
 
 **Evolution limits**: not every change can evolve in place — for example, dropping a non-nullable persisted column is rejected at submission with a per-column error. The fix is `--full-refresh`. (Materialized tables don't use [schema drift detection](#schema-drift-detection) — Flink reconciles the definition instead, and a rejected evolution is the analogous failure mode.)
 
