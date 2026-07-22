@@ -17,23 +17,57 @@ Notes:
 - ConfluentFixtures forces models +full_refresh=True, which would make every run a
   recreate. Classes that exercise the in-place evolution / no-op paths override
   project_config_update to drop that flag.
-- Each class uses unique relation names because a schema (Kafka cluster) is shared
-  across the suite.
+- Each class uses unique relation names, suffixed with a per-session tag: the
+  schema (Kafka cluster) is shared, and a dropped relation's Kafka topic and
+  Schema Registry schemas outlive the catalog drop asynchronously (minutes to
+  a day-plus). Reusing a name across runs races that deletion — observed as a
+  lingering topic resurfacing as an inferred table that trips the switch
+  guard, as a recreate binding to the lingering topic's old schema ("Column
+  types of query result and sink ... do not match"), and as an in-flight
+  deletion making an existence check pass and then evaporate.
+- Because names are never reused, leftovers from failed teardowns or
+  hard-killed runs would accumulate forever. Every name therefore lives in a
+  reserved namespace (`dbttest_` prefix + fixed stem + hex epoch-seconds tag)
+  and the first class of each session sweeps stale matches — see
+  _MTFixtures.sweep_leftovers and _helpers.sweep_stale_test_relations.
 - Re-running within Flink's brief establishment window is transiently rejected
-  ("being modified") and retried by the adapter; the tests that re-run an MT
-  back-to-back are marked xfail(strict=False) so that flakiness never gates CI.
+  ("being modified") and retried by the adapter (unit-tested in
+  tests/unit/test_add_query_retry.py); empirically the back-to-back re-runs here
+  never hit that window, so the tests run unquarantined.
 """
+
+import re
+import time
 
 import pytest
 
 from dbt.tests.util import relation_from_name, run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
     delete_statements_by_label,
-    drop_materialized_table,
+    drop_any_relation,
     get_result_by_name,
     relation,
+    sweep_stale_test_relations,
+    sweep_stale_test_statements,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
+
+# Suffix for every relation name in this module, fresh per pytest session:
+# reusing a name across runs races Kafka's asynchronous topic deletion from
+# the previous run's teardown (see the module docstring). Hex epoch-seconds
+# rather than random hex so the leftover sweep can tell how old a stale name
+# is and leave concurrent sessions' relations alone.
+_RUN_TAG = format(int(time.time()), "08x")
+
+# The reserved name shape for every relation in this module. The sweeper
+# deletes ANY stale catalog object matching it, so it must never overlap a
+# name a human or another tool would plausibly pick: literal reserved prefix,
+# one of the fixed stems, and the hex session tag.
+_TEST_RELATION_RE = re.compile(
+    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard)_(?P<tag>[0-9a-f]{8})$"
+)
+
+_leftovers_swept = False
 
 # A bounded faker source (number-of-rows) so the MT refresh settles quickly.
 SOURCE = """
@@ -95,11 +129,29 @@ class _MTFixtures(ConfluentFixtures):
         yield
 
     @pytest.fixture(autouse=True, scope="class")
+    def sweep_leftovers(self, project):
+        # Once per pytest session (dbt's `project` fixture is class-scoped,
+        # so this is a class fixture behind a module flag): reclaim relations
+        # and statements leaked by previous sessions' failed teardowns or
+        # hard-killed runs. Old-tag names are never recreated, so sweeping
+        # them cannot race anything this session does.
+        global _leftovers_swept
+        if not _leftovers_swept:
+            _leftovers_swept = True
+            sweep_stale_test_relations(project, _TEST_RELATION_RE, _RUN_TAG)
+            sweep_stale_test_statements(project)
+        yield
+
+    @pytest.fixture(autouse=True, scope="class")
     def class_clean_up(self, project, dbt_profile_data):
         yield
-        # Only delete statements once the MT is confirmed gone; if the drop
-        # kept failing, leave everything for the next run's teardown.
-        if drop_materialized_table(project, self.MT):
+        # Only delete statements once the relation is confirmed gone; if the
+        # drop kept failing, leave the statements too as a debugging trail —
+        # a later session's sweep_leftovers reclaims the lot once it ages
+        # past the concurrency gate. drop_any_relation rather than the MT
+        # drop because a class can end with the name held by a regular table
+        # (e.g. the switch-guard error path).
+        if drop_any_relation(project, self.MT):
             delete_statements_by_label(project, _statement_label(dbt_profile_data))
         project.run_sql(f"drop table if exists {self.SRC}")
 
@@ -108,8 +160,8 @@ class TestMaterializedTable(_MTFixtures):
     """Happy path: the MT is created and is queryable."""
 
     NAME = "mattable"
-    SRC = "src_create"
-    MT = "mt_create"
+    SRC = f"dbttest_src_create_{_RUN_TAG}"
+    MT = f"dbttest_mt_create_{_RUN_TAG}"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -135,8 +187,8 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
     its data, and its query state untouched."""
 
     NAME = "matnoop"
-    SRC = "src_noop"
-    MT = "mt_noop"
+    SRC = f"dbttest_src_noop_{_RUN_TAG}"
+    MT = f"dbttest_mt_noop_{_RUN_TAG}"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -147,15 +199,6 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
     def models(self):
         yield _models(self.SRC, self.MT)
 
-    # QUARANTINED (non-gating): a rapid unchanged re-run can land within the MT's
-    # establishment window ("being modified"); the adapter retries, but the window
-    # can outlast the budget. At normal cadence it's an instant no-op. See
-    # MATERIALIZATIONS.md.
-    @pytest.mark.xfail(
-        reason="Rapid unchanged re-run can hit the Flink 'being modified' "
-        "establishment window; quarantined, not CI-gating.",
-        strict=False,
-    )
     def test_unchanged_rerun_is_noop(self, project):
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results)
@@ -171,8 +214,8 @@ class TestMaterializedTableEvolvesInPlace(_MTFixtures):
     query-logic changes go through the identical path.)"""
 
     NAME = "matevolve"
-    SRC = "src_alter"
-    MT = "mt_alter"
+    SRC = f"dbttest_src_alter_{_RUN_TAG}"
+    MT = f"dbttest_mt_alter_{_RUN_TAG}"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -184,16 +227,6 @@ class TestMaterializedTableEvolvesInPlace(_MTFixtures):
     def models(self):
         yield _models(self.SRC, self.MT)
 
-    # QUARANTINED (non-gating): in-place evolution works at normal cadence, but a
-    # re-run within the MT's establishment window is rejected with "being modified"
-    # for a variable, sometimes-long time. The adapter retries, but the window can
-    # outlast a practical budget, making this test flaky. xfail(strict=False) keeps
-    # it running for signal without gating CI. See MATERIALIZATIONS.md.
-    @pytest.mark.xfail(
-        reason="In-place MT evolution is flaky on rapid re-run (variable Flink "
-        "'being modified' establishment window); quarantined, not CI-gating.",
-        strict=False,
-    )
     def test_query_change_evolves_in_place(self, project):
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results)
@@ -215,8 +248,8 @@ class TestMaterializedTableFullRefreshRecreates(_MTFixtures):
     distribution, which can't be altered in place)."""
 
     NAME = "matfr"
-    SRC = "src_recreate"
-    MT = "mt_recreate"
+    SRC = f"dbttest_src_recreate_{_RUN_TAG}"
+    MT = f"dbttest_mt_recreate_{_RUN_TAG}"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -238,13 +271,12 @@ TABLE_BEFORE_SWITCH = """
 select order_id, price from {{ ref('__SOURCE__') }}
 """
 
-# No distributed_by, on purpose: a dropped object's Kafka topic can outlive
-# the catalog drop, and a create under the same name only succeeds if the
-# partition count matches. Keeping both the regular table and the MT on
-# Confluent's default distribution (6 buckets) makes their topics compatible
-# in both directions; a buckets-4 MT here poisoned the relation name for the
-# next run's default-6 CTAS ("topic with the same name already exists with
-# different partitions").
+# No distributed_by, on purpose: under --full-refresh the regular table is
+# dropped and the MT created under the same name while the old topic's
+# deletion is still in flight, and the create only tolerates the lingering
+# topic if the partition count matches. Keeping both objects on Confluent's
+# default distribution (6 buckets) keeps their topics compatible ("a topic
+# with the same name already exists with different partitions" otherwise).
 MT_AFTER_SWITCH = """
 {{ config(materialized='materialized_table') }}
 select order_id, price from {{ ref('__SOURCE__') }}
@@ -258,10 +290,8 @@ class TestMaterializedTableSwitchGuard(_MTFixtures):
     its statements) through the regular drop path and creates the MT."""
 
     NAME = "matswitch"
-    SRC = "src_swguard"
-    # Not "mt_switch": that name's topic is poisoned (4 partitions) in clusters
-    # that ran the pre-fix version of this test.
-    MT = "mt_swguard"
+    SRC = f"dbttest_src_swguard_{_RUN_TAG}"
+    MT = f"dbttest_mt_swguard_{_RUN_TAG}"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -271,20 +301,6 @@ class TestMaterializedTableSwitchGuard(_MTFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield _models(self.SRC, self.MT, TABLE_BEFORE_SWITCH)
-
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        # Depending on how far the test got, the relation is a regular table
-        # (guard-error path) or an MT (--full-refresh path). Try the regular
-        # drop first (fails fast on an MT), then the MT drop.
-        try:
-            project.run_sql(f"drop table if exists `{self.MT}`")
-        except Exception:
-            pass
-        if drop_materialized_table(project, self.MT):
-            delete_statements_by_label(project, _statement_label(dbt_profile_data))
-        project.run_sql(f"drop table if exists {self.SRC}")
 
     def test_switch_guard(self, project):
         # Build as a regular table first.
