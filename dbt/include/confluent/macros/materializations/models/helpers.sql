@@ -23,6 +23,68 @@
   {%- endif -%}
 {% endmacro %}
 
+{% macro validate_materialized_table_config() %}
+  {# MT-specific validation only. distributed_by/buckets are validated by
+     validate_distributed_by_config(); the materialization calls both. Confluent
+     MT supports only distributed_by, with, and start_mode (see MATERIALIZATIONS.md). #}
+
+  {# Configs that exist in open-source Flink MT but NOT Confluent's dialect. #}
+  {%- set unsupported = [] -%}
+  {%- for key in ['freshness_interval', 'refresh_mode', 'partition_by'] -%}
+    {%- if config.get(key) is not none -%}{%- do unsupported.append(key) -%}{%- endif -%}
+  {%- endfor -%}
+  {%- if unsupported -%}
+    {% set msg %}
+'{{ unsupported | join("', '") }}' {{ 'is' if unsupported | length == 1 else 'are' }} not supported by the 'materialized_table' materialization for Confluent Flink.
+Supported config options are: distributed_by, with, start_mode.
+    {% endset %}
+    {% do exceptions.raise_compiler_error(msg) %}
+  {%- endif -%}
+
+  {# start_mode is validated (and rendered) by adapter.render_start_mode,
+     called from the materialization. #}
+{% endmacro %}
+
+
+{% macro get_existing_relation_kind(relation) %}
+  {# Classify an existing relation for the materialized_table pre-flight
+     switch guard. Returns 'materialized_table', 'regular' (table or view),
+     or 'absent' (dropped externally since the relation cache was built).
+     A materialized table reports TABLE_TYPE='BASE TABLE' just like a regular
+     table, so the relation cache can't tell them apart — IS_MATERIALIZED in
+     INFORMATION_SCHEMA.TABLES can. #}
+  {% call statement('get_existing_relation_kind', fetch_result=True, hidden=True) %}
+    SELECT IS_MATERIALIZED AS is_materialized
+    FROM INFORMATION_SCHEMA.`TABLES`
+    WHERE TABLE_CATALOG_ID = '{{ relation.database }}'
+      AND TABLE_SCHEMA = '{{ relation.schema }}'
+      AND TABLE_NAME = '{{ relation.identifier }}'
+  {% endcall %}
+  {% set rows = load_result('get_existing_relation_kind').table %}
+  {% if rows | length == 0 %}
+    {{ return('absent') }}
+  {% elif rows[0]['is_materialized'] == 'YES' %}
+    {{ return('materialized_table') }}
+  {% else %}
+    {{ return('regular') }}
+  {% endif %}
+{% endmacro %}
+
+
+{% macro render_with_options(with_options) %}
+  {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping
+     single quotes in keys and values. Renders nothing when with_options is
+     empty. Shared by every materialization that accepts config(with={...}). -#}
+{%- if with_options -%}
+WITH (
+{%- for key, value in with_options.items() %}
+      '{{ adapter.escape_string_literal(key) }}' = '{{ adapter.escape_string_literal(value) }}'{{ "," if not loop.last }}
+{%- endfor %}
+    )
+{%- endif -%}
+{% endmacro %}
+
+
 {% macro delete_statement_if_exists(statement_name, expect_exists=true) %}
   {# Delete an existing Flink statement by name so we can re-create it.
      No-op if the statement doesn't exist (confluent-sql handles 404).
