@@ -125,7 +125,10 @@ FROM {{ ref('orders') }}
 GROUP BY status
 ```
 
-Note that `--full-refresh` drops the materialized table, permanently deleting its backing Kafka topic, all of its data, and the associated Schema Registry schema versions.
+Two caveats worth knowing before changing a materialized table model:
+
+- Changing the definition of a **stateful** model (aggregations, joins, windows) evolves it in place but **silently resets its results**: Flink discards the processing state and resumes from current offsets, so totals restart from the change point and pre-change history is never reprocessed. Use `--full-refresh` to rebuild correct results.
+- `--full-refresh` drops the materialized table, permanently deleting its backing Kafka topic, all of its data, and the associated Schema Registry schema versions.
 
 See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 
@@ -138,6 +141,7 @@ See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 - **No incremental**: dbt's batch-incremental semantics does not map to Flink's continuous processing model. Use `streaming_table` instead.
 - **Drift detection for WITH options**: Schema drift detection only verifies that user-specified `WITH` options exist with correct values. It cannot detect when options are removed from the config (because connectors may add default options that cannot be distinguished from user-specified ones). Use `--full-refresh` to change or remove WITH options. Drift detection can be disabled per-model with `config(on_schema_drift='ignore')`. See [Materializations](MATERIALIZATIONS.md#schema-drift-detection) for details.
 - **Materialized table distribution**: a materialized table's `distributed_by` (columns and buckets) is fixed at creation; changing it requires `--full-refresh` (drop and recreate). Column, `WITH`, and query-logic changes evolve in place. See [Materializations](MATERIALIZATIONS.md#materialized-table).
+- **Materialized table evolution resets state**: evolving a stateful materialized table (aggregations, joins, windows) discards its processing state and resumes from current offsets — results silently restart from the change point and history is not reprocessed. Rebuild with `--full-refresh`. See [Materializations](MATERIALIZATIONS.md#materialized-table).
 
 ## Development
 

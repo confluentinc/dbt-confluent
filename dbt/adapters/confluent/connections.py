@@ -173,33 +173,51 @@ def _execute_query_with_retry(
             compute_pool_id=compute_pool_id,
         )
     except OperationalError as e:
-        # Two transient conditions we wait out by retrying:
+        # Three transient conditions we wait out by retrying:
         #  - "being modified": a materialized table's prior CREATE OR ALTER is
         #    still establishing/evolving, so a new CREATE OR ALTER (or DROP)
         #    against it is rejected until that settles. It always settles on
         #    its own; we wait rather than interfere with an in-flight
         #    evolution.
+        #  - "kafka topic does not exist": the relation was dropped recently
+        #    and the server's catalog and topic views are eventually
+        #    consistent — a recreate can find the dying catalog entry whose
+        #    topic is already gone. The server's own message says "try again
+        #    later"; the entry clears within tens of seconds.
         #  - 409: a prior statement with the same name is still tearing down
         #    asynchronously after a DELETE; we retry until the name frees up.
-        # "being modified" is checked first and classified by message, not
-        # status, because Confluent may surface it with a 409 too — keying off
-        # the status would misreport it (and mis-budget it) as a name-reuse race.
-        is_being_modified = "being modified" in str(e).lower()
+        # "table already exists" is deliberately NOT retried: it looked
+        # transient once, but the real cause was DROP TABLE phantom-dropping a
+        # materialized table (fixed by detection in drop_relation) — the
+        # condition never clears by waiting, and retrying it would delay every
+        # genuine name conflict by the whole budget.
+        # The message-matched conditions are checked before the status because
+        # Confluent may surface them with a 409 too — keying off the status
+        # would misreport them (and mis-budget them) as a name-reuse race.
+        msg = str(e).lower()
+        is_being_modified = "being modified" in msg
+        is_topic_gone = "kafka topic does not exist" in msg
         is_409 = getattr(e, "http_status_code", None) == 409
-        if not (is_being_modified or is_409):
+        if not (is_being_modified or is_topic_gone or is_409):
             raise
 
-        # A materialized table's CREATE OR ALTER establishment/evolution can take
-        # a while and is variable, so "being modified" gets a generous, dedicated
-        # budget (it always clears once the prior statement settles). In normal
-        # use the prior run settled long ago and this never triggers; it only
-        # bites a rapid re-run within the establishment window. The 409 name-reuse
-        # race is quick, so it keeps the smaller default budget.
+        # MT establishment/evolution and post-drop teardown take a while and
+        # are variable, so the message-matched conditions get a generous,
+        # dedicated budget (they always clear once the server settles). In
+        # normal use they never trigger; they bite a rapid re-run within the
+        # establishment window or a recreate shortly after a drop. The 409
+        # name-reuse race is quick, so it keeps the smaller default budget.
         if is_being_modified:
             limit, backoff = max(retry_limit, 12), 10
             reason = (
                 "Materialized table is still being modified by a prior statement "
                 "(still establishing/evolving)"
+            )
+        elif is_topic_gone:
+            limit, backoff = max(retry_limit, 12), 10
+            reason = (
+                "A recently dropped relation with this name has not finished "
+                "tearing down (its Kafka topic is already gone)"
             )
         else:
             limit, backoff = retry_limit, min(attempt * 3, 15)
@@ -209,6 +227,25 @@ def _execute_query_with_retry(
             )
         if attempt >= limit:
             raise
+
+        # A rejection that reached the FAILED phase leaves the statement in
+        # place (confluent-sql only auto-deletes pool-exhausted ones), still
+        # occupying statement_name — without this, the retry would bounce off
+        # 409 name conflicts instead of seeing the condition clear. Freeing
+        # the name is best-effort: after an HTTP-level rejection (the 409
+        # case) no statement was created and this is a no-op, and if the
+        # delete itself fails the retry just surfaces the 409 path. When the
+        # budget is exhausted we skip this and leave the FAILED statement in
+        # place for debugging.
+        try:
+            cursor.delete_statement()
+        except Exception as cleanup_error:  # noqa: BLE001
+            fire_event(
+                AdapterEventDebug(
+                    base_msg=f"Could not delete failed statement "
+                    f"'{statement_name}' before retrying: {cleanup_error}"
+                )
+            )
 
         retries_left = limit - attempt
         fire_event(

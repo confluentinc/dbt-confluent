@@ -171,11 +171,13 @@ def drop_tables(project, *names):
 def drop_materialized_table(project, name, attempts=16, interval=10):
     """Best-effort drop of a materialized table; returns True if it's gone.
 
-    A materialized table can't be dropped with `DROP TABLE` ("not a regular
-    table"), so teardown for MT models must use `DROP MATERIALIZED TABLE IF
-    EXISTS` (missing table = no-op). This waits out the transient state ("being
-    modified" / "Could not execute DropTable") that occurs while a prior CREATE
-    OR ALTER is still establishing.
+    A materialized table must be dropped with `DROP MATERIALIZED TABLE IF
+    EXISTS` (missing table = no-op): the server silently *accepts* `DROP
+    TABLE` against an MT but phantom-drops it — the entry transiently
+    disappears and later resurfaces, with same-name creates failing "table
+    already exists" in between (observed 2026-07-27). This waits out the
+    transient state ("being modified" / "Could not execute DropTable") that
+    occurs while a prior CREATE OR ALTER is still establishing.
 
     Callers gate statement deletion on the return value: if the drop kept
     failing, leave the statements too and let the next run's teardown (or a
@@ -200,9 +202,13 @@ def drop_any_relation(project, name):
     the test got — e.g. the MT switch-guard test ends with either a regular
     table (guard-error path) or a materialized table (--full-refresh path).
 
-    DROP TABLE IF EXISTS handles the absent/regular/inferred cases (and
-    deletes the table's topic); it fails fast on a live MT ("not a regular
-    table"), where DROP MATERIALIZED TABLE takes over.
+    The kind must be checked BEFORE dropping: the server silently accepts
+    DROP TABLE against a live MT and phantom-drops it (the entry resurfaces
+    later — see drop_materialized_table), so "DROP TABLE failed fast" can no
+    longer be used to detect MTs. IS_MATERIALIZED routes MTs to DROP
+    MATERIALIZED TABLE; DROP TABLE IF EXISTS handles the absent/regular/
+    inferred cases (and deletes the table's topic). The rejection fallback
+    stays as a safety net should the server reject the regular drop again.
 
     Note this only removes the *catalog* entry promptly: the backing Kafka
     topic and its Schema Registry schemas are deleted asynchronously and can
@@ -210,6 +216,13 @@ def drop_any_relation(project, name):
     Callers must not recreate the same relation name afterwards — the MT
     tests use per-session unique names for exactly that reason.
     """
+    rows = project.run_sql(
+        "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "
+        f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{name}'",
+        fetch="all",
+    )
+    if rows and str(rows[0][0]).upper() == "YES":
+        return drop_materialized_table(project, name)
     try:
         project.run_sql(f"drop table if exists `{name}`")
         return True
