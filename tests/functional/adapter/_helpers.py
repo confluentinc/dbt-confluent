@@ -175,9 +175,9 @@ def drop_materialized_table(project, name, attempts=16, interval=10):
     EXISTS` (missing table = no-op): the server silently *accepts* `DROP
     TABLE` against an MT but phantom-drops it — the entry transiently
     disappears and later resurfaces, with same-name creates failing "table
-    already exists" in between (observed 2026-07-27). This waits out the
-    transient state ("being modified" / "Could not execute DropTable") that
-    occurs while a prior CREATE OR ALTER is still establishing.
+    already exists" in between. This waits out the transient state ("being
+    modified" / "Could not execute DropTable") that occurs while a prior
+    CREATE OR ALTER is still establishing.
 
     Callers gate statement deletion on the return value: if the drop kept
     failing, leave the statements too and let the next run's teardown (or a
@@ -204,11 +204,10 @@ def drop_any_relation(project, name):
 
     The kind must be checked BEFORE dropping: the server silently accepts
     DROP TABLE against a live MT and phantom-drops it (the entry resurfaces
-    later — see drop_materialized_table), so "DROP TABLE failed fast" can no
-    longer be used to detect MTs. IS_MATERIALIZED routes MTs to DROP
-    MATERIALIZED TABLE; DROP TABLE IF EXISTS handles the absent/regular/
-    inferred cases (and deletes the table's topic). The rejection fallback
-    stays as a safety net should the server reject the regular drop again.
+    later — see drop_materialized_table), so a DROP TABLE rejection can't be
+    used to detect MTs. IS_MATERIALIZED routes MTs to DROP MATERIALIZED
+    TABLE; DROP TABLE IF EXISTS handles the absent/regular/inferred cases
+    (and deletes the table's topic).
 
     Note this only removes the *catalog* entry promptly: the backing Kafka
     topic and its Schema Registry schemas are deleted asynchronously and can
@@ -227,7 +226,7 @@ def drop_any_relation(project, name):
         project.run_sql(f"drop table if exists `{name}`")
         return True
     except Exception:
-        return drop_materialized_table(project, name)
+        return False  # give up; a later session's sweep reclaims the leftovers
 
 
 def sweep_stale_test_relations(project, pattern, current_tag, min_age=SWEEP_MIN_AGE_SECONDS):

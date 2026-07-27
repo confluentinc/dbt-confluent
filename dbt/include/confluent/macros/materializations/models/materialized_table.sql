@@ -15,10 +15,10 @@
   {# Declarative lifecycle: we always re-assert the definition with
      CREATE OR ALTER and let Flink reconcile it — a new table is created, any
      change (columns, WITH options, or query logic) is evolved in place, and
-     an unchanged definition is a server-side no-op (verified empirically with
-     a stateful positive control: the server diffs the parsed spec, so state,
-     data, and offsets are untouched — despite Confluent docs claiming every
-     re-assert evolves). An evolution discards processing state and resumes
+     an unchanged definition is a server-side no-op (the server diffs the
+     parsed spec, so state, data, and offsets are untouched — Confluent docs
+     claim every re-assert evolves, but the server no-ops in practice). An
+     evolution discards processing state and resumes
      from current offsets, so a changed *stateful* model silently resets its
      results (documented with a warning in MATERIALIZATIONS.md — the correct
      rebuild is --full-refresh). `--full-refresh` drops first so the table is

@@ -383,8 +383,8 @@ class TestMaterializedTableReverseSwitch(_MTFixtures):
         assert "materialized table" in r.message
         assert "--full-refresh" in r.message
 
-        # --full-refresh: the MT is dropped (fallback path) and a regular
-        # table is created in its place.
+        # --full-refresh: the MT is dropped (via drop_relation's pre-check)
+        # and a regular table is created in its place.
         results = run_dbt(["run", "--full-refresh", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
         row = project.run_sql(

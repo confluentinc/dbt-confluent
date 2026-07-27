@@ -11,10 +11,8 @@ recreates the name. Errors propagate unmodified.
 IS_MATERIALIZED lookup, skipped for views) and route it to
 `drop_materialized_table`: the server silently accepts DROP TABLE against an
 MT and phantom-drops it — the catalog entry disappears transiently, same-name
-creates fail "table already exists", and the MT resurfaces (observed
-2026-07-27 in the reverse-switch functional test). The old "not a regular
-table" fallback is kept as a safety net in case the server goes back to
-rejecting the regular drop.
+creates fail "table already exists", and the MT resurfaces. The failed drop
+raises no error, so only the pre-check can prevent it.
 """
 
 from unittest.mock import MagicMock, patch
@@ -160,25 +158,3 @@ class TestDropRelationRouting:
         adapter.drop_relation(relation)
         adapter.execute_macro.assert_called_once()
         adapter.execute.assert_not_called()
-
-    def test_falls_back_to_materialized_drop_on_not_a_regular_table(self, adapter, relation):
-        """Safety net: if the server rejects the regular drop again, the
-        rejection still routes to the MT drop even when the pre-check missed."""
-        _wire_execute(adapter, [_is_materialized_result("NO"), _catalog_result(0)])
-        adapter.execute_macro = MagicMock(
-            side_effect=DbtDatabaseError(
-                "Table `env-x`.`sch`.`my_mt` is not a regular table. "
-                "Use DROP MATERIALIZED TABLE instead."
-            )
-        )
-        adapter.drop_relation(relation)
-        assert len(_mt_drop_sqls(adapter)) == 1
-
-    def test_other_database_errors_re_raise(self, adapter, relation):
-        err = DbtDatabaseError("Table `env-x`.`sch`.`my_mt` does something else entirely")
-        _wire_execute(adapter, [_is_materialized_result("NO")])
-        adapter.execute_macro = MagicMock(side_effect=err)
-        with pytest.raises(DbtDatabaseError) as exc_info:
-            adapter.drop_relation(relation)
-        assert exc_info.value is err
-        assert _mt_drop_sqls(adapter) == []

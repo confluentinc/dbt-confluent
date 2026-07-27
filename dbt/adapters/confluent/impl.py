@@ -221,13 +221,13 @@ class ConfluentAdapter(SQLAdapter):
     def drop_materialized_table(self, relation: BaseRelation) -> None:
         """DROP MATERIALIZED TABLE IF EXISTS, then wait for the catalog to agree.
 
-        A materialized table cannot be dropped with `DROP TABLE` ("not a
-        regular table"). IF EXISTS makes a missing table a no-op, so a stale
-        relation cache or an externally-dropped table doesn't fail the run —
-        matching the resilience of drop_relation_if_exists used by the other
-        materializations. The cache is evicted first, mirroring
-        SQLAdapter.drop_relation (cache.drop tolerates a key that was already
-        evicted, so the drop_relation fallback can call this safely).
+        A materialized table must be dropped with DROP MATERIALIZED TABLE —
+        the server silently accepts a regular DROP TABLE against an MT but
+        phantom-drops it (see drop_relation). IF EXISTS makes a missing table
+        a no-op, so a stale relation cache or an externally-dropped table
+        doesn't fail the run — matching the resilience of
+        drop_relation_if_exists used by the other materializations. The cache
+        is evicted first, mirroring SQLAdapter.drop_relation.
 
         Unlike a regular DROP TABLE, the MT drop removes its catalog entry
         asynchronously (the server tears down the managed query, topic, and
@@ -287,31 +287,19 @@ class ConfluentAdapter(SQLAdapter):
         TABLE against an MT and phantom-drops it — the catalog entry
         disappears transiently, but the table's backing resources survive,
         same-name creates keep failing with "table already exists", and the
-        MT later resurfaces in the catalog (established 2026-07-27: the
-        failing reverse-switch run's debug log shows the DROP TABLE accepted
-        with no error, and probes showed an explicit DROP MATERIALIZED TABLE
-        issued afterwards still tears the MT down properly). So materialized
-        tables are detected *before* the drop — one IS_MATERIALIZED lookup,
-        skipped for views, which can't be MTs — and routed to
-        drop_materialized_table. This is what lets --full-refresh replace a
-        materialized table after a model switches away from the
-        materialized_table materialization.
-
-        The "not a regular table" fallback is kept as a safety net for the
-        server rejecting DROP TABLE against an MT again (SHOW CREATE TABLE
-        still rejects with that message, and the drop did too at some point).
+        MT later resurfaces in the catalog. Because the failed drop raises no
+        error, no fallback can catch it: materialized tables must be detected
+        *before* the drop — one IS_MATERIALIZED lookup, skipped for views,
+        which can't be MTs — and routed to drop_materialized_table. This is
+        what lets --full-refresh replace a materialized table after a model
+        switches away from the materialized_table materialization.
         """
         # RelationType subclasses str, so this compares the enum's value; a
         # None type (unknown) conservatively still gets the pre-check.
         if relation.type != "view" and self._is_materialized_table(relation):
             self.drop_materialized_table(relation)
             return
-        try:
-            super().drop_relation(relation)
-        except DbtDatabaseError as e:
-            if "not a regular table" not in str(e).lower():
-                raise
-            self.drop_materialized_table(relation)
+        super().drop_relation(relation)
 
     @available
     def get_statement_name(
