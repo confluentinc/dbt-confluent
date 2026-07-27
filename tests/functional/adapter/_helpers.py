@@ -4,8 +4,14 @@ Underscore-prefixed so pytest does not treat it as a test module.
 """
 
 import time
+from datetime import datetime, timezone
 
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
+
+# Leftovers younger than this may belong to a session still running on the
+# shared cluster (a full suite run takes minutes; two hours is a generous
+# margin), so the sweepers below leave them for a later sweep.
+SWEEP_MIN_AGE_SECONDS = 2 * 60 * 60
 
 
 def wait_for_absent(adapter, name, timeout=60):
@@ -160,3 +166,120 @@ def drop_tables(project, *names):
     so teardown removes both the statements and the relations they created."""
     for name in names:
         project.run_sql(f"drop table if exists {name}")
+
+
+def drop_materialized_table(project, name, attempts=16, interval=10):
+    """Best-effort drop of a materialized table; returns True if it's gone.
+
+    A materialized table must be dropped with `DROP MATERIALIZED TABLE IF
+    EXISTS` (missing table = no-op): the server silently *accepts* `DROP
+    TABLE` against an MT but phantom-drops it — the entry transiently
+    disappears and later resurfaces, with same-name creates failing "table
+    already exists" in between (observed 2026-07-27). This waits out the
+    transient state ("being modified" / "Could not execute DropTable") that
+    occurs while a prior CREATE OR ALTER is still establishing.
+
+    Callers gate statement deletion on the return value: if the drop kept
+    failing, leave the statements too and let the next run's teardown (or a
+    manual sweep) clean up the lot.
+    """
+    for i in range(attempts):
+        try:
+            project.run_sql(f"drop materialized table if exists `{name}`")
+            return True
+        except Exception as e:
+            msg = str(e).lower()
+            if i < attempts - 1 and ("being modified" in msg or "could not execute" in msg):
+                time.sleep(interval)
+                continue
+            return False  # give up; caller leaves statements for a later sweep
+
+
+def drop_any_relation(project, name):
+    """Drop `name` whatever it currently is; returns True if it's gone.
+
+    Used by teardown in test classes where the name's kind depends on how far
+    the test got — e.g. the MT switch-guard test ends with either a regular
+    table (guard-error path) or a materialized table (--full-refresh path).
+
+    The kind must be checked BEFORE dropping: the server silently accepts
+    DROP TABLE against a live MT and phantom-drops it (the entry resurfaces
+    later — see drop_materialized_table), so "DROP TABLE failed fast" can no
+    longer be used to detect MTs. IS_MATERIALIZED routes MTs to DROP
+    MATERIALIZED TABLE; DROP TABLE IF EXISTS handles the absent/regular/
+    inferred cases (and deletes the table's topic). The rejection fallback
+    stays as a safety net should the server reject the regular drop again.
+
+    Note this only removes the *catalog* entry promptly: the backing Kafka
+    topic and its Schema Registry schemas are deleted asynchronously and can
+    linger long after (even resurfacing in the catalog as an inferred table).
+    Callers must not recreate the same relation name afterwards — the MT
+    tests use per-session unique names for exactly that reason.
+    """
+    rows = project.run_sql(
+        "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "
+        f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{name}'",
+        fetch="all",
+    )
+    if rows and str(rows[0][0]).upper() == "YES":
+        return drop_materialized_table(project, name)
+    try:
+        project.run_sql(f"drop table if exists `{name}`")
+        return True
+    except Exception:
+        return drop_materialized_table(project, name)
+
+
+def sweep_stale_test_relations(project, pattern, current_tag, min_age=SWEEP_MIN_AGE_SECONDS):
+    """Reclaim relations leaked by previous test sessions.
+
+    Test relation names carry a reserved prefix plus a hex epoch-seconds
+    session tag (see test_materialized_table.py) and are never reused across
+    sessions, so a failed teardown or a hard-killed run would otherwise leak
+    its relations forever. This scans SHOW TABLES for names matching
+    `pattern` — which must be anchored, cover only the reserved name shape,
+    and expose a `tag` group — and drops every match that is not this
+    session's and is older than `min_age` (younger ones may belong to a
+    concurrently running session).
+
+    Only catalog entries are visible here: a lingering topic whose entry
+    hasn't resurfaced yet is untouchable by design and gets reclaimed by a
+    later sweep once it resurfaces (or finishes deleting on its own).
+    """
+    now = time.time()
+    for row in project.run_sql("show tables", fetch="all"):
+        match = pattern.match(row[0])
+        if not match or match.group("tag") == current_tag:
+            continue
+        if now - int(match.group("tag"), 16) < min_age:
+            continue
+        drop_any_relation(project, row[0])
+
+
+def sweep_stale_test_statements(
+    project, prefix="dbt-adapter-test-", min_age=SWEEP_MIN_AGE_SECONDS
+):
+    """Delete statements leaked by previous test sessions.
+
+    Statement labels are fresh UUIDs per test class, so a crashed run's
+    statements are only discoverable by the suite-reserved
+    `statement_name_prefix` every test profile sets. Deletes every statement
+    under that prefix older than `min_age` (creation time from statement
+    metadata; statements without one are left alone). Terminal statements
+    are auto-purged by Confluent after 30 days anyway — the ones that matter
+    here are leaked RUNNING statements, which hold compute-pool resources.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - min_age
+    with project.adapter.connection_named("sweep"):
+        conn = project.adapter.connections.get_thread_connection()
+        # name_contains is a server-side substring filter; anchor client-side.
+        for statement in conn.handle.list_statements(name_contains=prefix):
+            if not statement.name.startswith(prefix):
+                continue
+            created_at = statement.metadata.get("created_at")
+            if not created_at:
+                continue
+            if datetime.fromisoformat(created_at).timestamp() >= cutoff:
+                continue
+            # The adapter helper swallows missing-statement / pool-scoped 403s.
+            project.adapter.delete_statement(statement.name)

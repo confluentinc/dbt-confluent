@@ -23,6 +23,68 @@
   {%- endif -%}
 {% endmacro %}
 
+{% macro validate_materialized_table_config() %}
+  {# MT-specific validation only. distributed_by/buckets are validated by
+     validate_distributed_by_config(); the materialization calls both. Confluent
+     MT supports only distributed_by, with, and start_mode (see MATERIALIZATIONS.md). #}
+
+  {# Configs that exist in open-source Flink MT but NOT Confluent's dialect. #}
+  {%- set unsupported = [] -%}
+  {%- for key in ['freshness_interval', 'refresh_mode', 'partition_by'] -%}
+    {%- if config.get(key) is not none -%}{%- do unsupported.append(key) -%}{%- endif -%}
+  {%- endfor -%}
+  {%- if unsupported -%}
+    {% set msg %}
+'{{ unsupported | join("', '") }}' {{ 'is' if unsupported | length == 1 else 'are' }} not supported by the 'materialized_table' materialization for Confluent Flink.
+Supported config options are: distributed_by, with, start_mode.
+    {% endset %}
+    {% do exceptions.raise_compiler_error(msg) %}
+  {%- endif -%}
+
+  {# start_mode is validated (and rendered) by adapter.render_start_mode,
+     called from the materialization. #}
+{% endmacro %}
+
+
+{% macro get_existing_relation_kind(relation) %}
+  {# Classify an existing relation for the materialized_table pre-flight
+     switch guard. Returns 'materialized_table', 'regular' (table or view),
+     or 'absent' (dropped externally since the relation cache was built).
+     A materialized table reports TABLE_TYPE='BASE TABLE' just like a regular
+     table, so the relation cache can't tell them apart — IS_MATERIALIZED in
+     INFORMATION_SCHEMA.TABLES can. #}
+  {% call statement('get_existing_relation_kind', fetch_result=True, hidden=True) %}
+    SELECT IS_MATERIALIZED AS is_materialized
+    FROM INFORMATION_SCHEMA.`TABLES`
+    WHERE TABLE_CATALOG_ID = '{{ relation.database }}'
+      AND TABLE_SCHEMA = '{{ relation.schema }}'
+      AND TABLE_NAME = '{{ relation.identifier }}'
+  {% endcall %}
+  {% set rows = load_result('get_existing_relation_kind').table %}
+  {% if rows | length == 0 %}
+    {{ return('absent') }}
+  {% elif rows[0]['is_materialized'] == 'YES' %}
+    {{ return('materialized_table') }}
+  {% else %}
+    {{ return('regular') }}
+  {% endif %}
+{% endmacro %}
+
+
+{% macro render_with_options(with_options) %}
+  {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping
+     single quotes in keys and values. Renders nothing when with_options is
+     empty. Shared by every materialization that accepts config(with={...}). -#}
+{%- if with_options -%}
+WITH (
+{%- for key, value in with_options.items() %}
+      '{{ adapter.escape_string_literal(key) }}' = '{{ adapter.escape_string_literal(value) }}'{{ "," if not loop.last }}
+{%- endfor %}
+    )
+{%- endif -%}
+{% endmacro %}
+
+
 {% macro delete_statement_if_exists(statement_name, expect_exists=true) %}
   {# Delete an existing Flink statement by name so we can re-create it.
      No-op if the statement doesn't exist (confluent-sql handles 404).
@@ -232,15 +294,19 @@
      with WITH(changelog.mode='upsert') being compared against a temp table
      `tmp`(id BIGINT, v STRING, x INT). Columns shown left-to-right are:
      section, table_name, col_name, data_type, dist_position, option_key,
-     option_value, is_distributed, dist_buckets.
+     option_value, is_distributed, dist_buckets, is_materialized.
 
-       ('COLUMNS',       'my_table', 'id', 'BIGINT', 1,    NULL,             NULL,     NULL,  NULL)
-       ('COLUMNS',       'my_table', 'v',  'STRING', NULL, NULL,             NULL,     NULL,  NULL)
-       ('COLUMNS',       'tmp',      'id', 'BIGINT', NULL, NULL,             NULL,     NULL,  NULL)
-       ('COLUMNS',       'tmp',      'v',  'STRING', NULL, NULL,             NULL,     NULL,  NULL)
-       ('COLUMNS',       'tmp',      'x',  'INT',    NULL, NULL,             NULL,     NULL,  NULL)
-       ('TABLES',        'my_table', NULL, NULL,     NULL, NULL,             NULL,     'YES', 4)
-       ('TABLE_OPTIONS', 'my_table', NULL, NULL,     NULL, 'changelog.mode', 'upsert', NULL,  NULL)
+       ('COLUMNS',       'my_table', 'id', 'BIGINT', 1,    NULL,             NULL,     NULL,  NULL, NULL)
+       ('COLUMNS',       'my_table', 'v',  'STRING', NULL, NULL,             NULL,     NULL,  NULL, NULL)
+       ('COLUMNS',       'tmp',      'id', 'BIGINT', NULL, NULL,             NULL,     NULL,  NULL, NULL)
+       ('COLUMNS',       'tmp',      'v',  'STRING', NULL, NULL,             NULL,     NULL,  NULL, NULL)
+       ('COLUMNS',       'tmp',      'x',  'INT',    NULL, NULL,             NULL,     NULL,  NULL, NULL)
+       ('TABLES',        'my_table', NULL, NULL,     NULL, NULL,             NULL,     'YES', 4,    'NO')
+       ('TABLE_OPTIONS', 'my_table', NULL, NULL,     NULL, 'changelog.mode', 'upsert', NULL,  NULL, NULL)
+
+     is_materialized (TABLES section) flags a Flink materialized table under
+     the model's name — a reverse materialization switch the drop-and-recreate
+     flow must reject rather than skip or restart over.
 
      `_partition_drift_catalog` (Python) splits this back into per-concern
      dicts before any drift check runs. #}
@@ -254,7 +320,8 @@
       CAST(NULL AS STRING) AS option_key,
       CAST(NULL AS STRING) AS option_value,
       CAST(NULL AS STRING) AS is_distributed,
-      CAST(NULL AS INT) AS dist_buckets
+      CAST(NULL AS INT) AS dist_buckets,
+      CAST(NULL AS STRING) AS is_materialized
     FROM INFORMATION_SCHEMA.`COLUMNS`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
       AND TABLE_SCHEMA = '{{ existing_relation.schema }}'
@@ -271,7 +338,8 @@
       CAST(NULL AS STRING) AS option_key,
       CAST(NULL AS STRING) AS option_value,
       IS_DISTRIBUTED AS is_distributed,
-      DISTRIBUTION_BUCKETS AS dist_buckets
+      DISTRIBUTION_BUCKETS AS dist_buckets,
+      IS_MATERIALIZED AS is_materialized
     FROM INFORMATION_SCHEMA.`TABLES`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
       AND TABLE_SCHEMA = '{{ existing_relation.schema }}'
@@ -286,7 +354,8 @@
       OPTION_KEY AS option_key,
       OPTION_VALUE AS option_value,
       CAST(NULL AS STRING) AS is_distributed,
-      CAST(NULL AS INT) AS dist_buckets
+      CAST(NULL AS INT) AS dist_buckets,
+      CAST(NULL AS STRING) AS is_materialized
     FROM INFORMATION_SCHEMA.`TABLE_OPTIONS`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
       AND TABLE_SCHEMA = '{{ existing_relation.schema }}'

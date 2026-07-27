@@ -252,6 +252,7 @@ def _row(
     option_value=None,
     is_distributed=None,
     dist_buckets=None,
+    is_materialized=None,
 ):
     return (
         section,
@@ -263,6 +264,7 @@ def _row(
         option_value,
         is_distributed,
         dist_buckets,
+        is_materialized,
     )
 
 
@@ -276,6 +278,7 @@ _CATALOG_COLUMNS = [
     "option_value",
     "is_distributed",
     "dist_buckets",
+    "is_materialized",
 ]
 
 # Pin types so agate's inference doesn't coerce "YES" to a boolean (Confluent
@@ -290,6 +293,7 @@ _CATALOG_TYPES = [
     agate.Text(),  # option_value
     agate.Text(),  # is_distributed
     agate.Number(),  # dist_buckets
+    agate.Text(),  # is_materialized
 ]
 
 
@@ -311,7 +315,7 @@ class TestPartitionDriftCatalog:
                 ),
             ]
         )
-        existing, expected, options, distribution = ConfluentAdapter._partition_drift_catalog(
+        existing, expected, options, distribution, _ = ConfluentAdapter._partition_drift_catalog(
             catalog, "existing", "temp"
         )
         assert existing == {"id": "BIGINT"}
@@ -350,7 +354,7 @@ class TestPartitionDriftCatalog:
                 ),
             ]
         )
-        _, _, _, distribution = ConfluentAdapter._partition_drift_catalog(
+        _, _, _, distribution, _ = ConfluentAdapter._partition_drift_catalog(
             catalog, "existing", "temp"
         )
         # Ordering by DISTRIBUTION_ORDINAL_POSITION: b (pos=1), then a (pos=2)
@@ -367,7 +371,7 @@ class TestPartitionDriftCatalog:
                 ),
             ]
         )
-        _, _, _, distribution = ConfluentAdapter._partition_drift_catalog(
+        _, _, _, distribution, _ = ConfluentAdapter._partition_drift_catalog(
             catalog, "existing", "temp"
         )
         assert distribution is None
@@ -392,7 +396,7 @@ class TestPartitionDriftCatalog:
                 ),
             ]
         )
-        _, _, _, distribution = ConfluentAdapter._partition_drift_catalog(
+        _, _, _, distribution, _ = ConfluentAdapter._partition_drift_catalog(
             catalog, "existing", "temp"
         )
         assert distribution == {"buckets": 4, "columns": ["id"]}
@@ -414,8 +418,45 @@ class TestPartitionDriftCatalog:
                 ),
             ]
         )
-        _, _, options, _ = ConfluentAdapter._partition_drift_catalog(catalog, "existing", "temp")
+        _, _, options, _, _ = ConfluentAdapter._partition_drift_catalog(
+            catalog, "existing", "temp"
+        )
         assert options == {"changelog.mode": "upsert", "connector": "faker"}
+
+    def test_is_materialized_detected(self):
+        """IS_MATERIALIZED='YES' in the TABLES section flags a materialized
+        table; the default distribution flags ('NO') must not mask it."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="TABLES",
+                    table_name="existing",
+                    is_distributed="NO",
+                    is_materialized="YES",
+                ),
+            ]
+        )
+        *_, is_materialized = ConfluentAdapter._partition_drift_catalog(
+            catalog, "existing", "temp"
+        )
+        assert is_materialized is True
+
+    def test_is_materialized_false_for_regular_table(self):
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="TABLES",
+                    table_name="existing",
+                    is_distributed="YES",
+                    dist_buckets=4,
+                    is_materialized="NO",
+                ),
+            ]
+        )
+        *_, is_materialized = ConfluentAdapter._partition_drift_catalog(
+            catalog, "existing", "temp"
+        )
+        assert is_materialized is False
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +668,86 @@ class TestCheckSchemaDriftOrchestrator:
             catalog,
             expected_with={},
         )
+
+    def test_materialized_table_raises_dedicated_error(self):
+        """A reverse materialization switch (the model's name is held by a
+        Flink materialized table) must raise its own error, not a drift list —
+        the MT can't be managed by drop-and-recreate at all, so per-concern
+        guidance would be noise. It takes precedence over other violations."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                # A drifted column that must NOT surface: the MT error wins.
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="renamed",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="TABLES",
+                    table_name=self.EXISTING_ID,
+                    is_distributed="NO",
+                    is_materialized="YES",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                catalog,
+                expected_with={},
+            )
+        msg = str(excinfo.value)
+        assert "materialized table" in msg
+        assert "materialized='materialized_table'" in msg
+        assert "--full-refresh" in msg
+        assert "Schema drift detected" not in msg
+
+    def test_materialized_table_raises_even_under_enforce_columns(self):
+        """enforce='columns' (the streaming restart path under
+        on_schema_drift='ignore') must still reject a materialized table:
+        the restart would submit an INSERT against it."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                # Columns match exactly — only the MT flag differs.
+                _row(
+                    section="COLUMNS",
+                    table_name=self.TEMP_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="TABLES",
+                    table_name=self.EXISTING_ID,
+                    is_distributed="NO",
+                    is_materialized="YES",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                catalog,
+                expected_with={},
+                enforce="columns",
+            )
+        assert "materialized table" in str(excinfo.value)
 
     def test_distribution_added_drift_through_orchestrator(self):
         """When the existing table is not distributed (IS_DISTRIBUTED='NO') but

@@ -7,6 +7,7 @@
 | `table` | Creates a table via `CREATE TABLE ... AS SELECT` (CTAS). Runs in snapshot mode — the query executes once and completes. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
 | `view` | Drop-and-recreate view. |
 | `streaming_table` | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
+| `materialized_table` | Creates and maintains a Flink materialized table via `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. Each run re-asserts the definition and Flink reconciles it: a new table is created, any change (columns, data types, `WITH` options, or query logic) is evolved **in place**, and an unchanged definition is a server-side no-op. `--full-refresh` drops and recreates (permanently deleting the backing topic and its data). Supports `config(distributed_by={...}, with={...}, start_mode='...')`. |
 | `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | `ephemeral` | Standard dbt CTE-based query fragment, not materialized in Flink. |
 
@@ -59,9 +60,47 @@ select customer_id, order_id, price from {{ ref('orders') }}
 
 Flink only supports the `HASH` distribution strategy today, so the adapter always emits `HASH(...)`. See the [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html#distributed-by-clause) for details.
 
+## Materialized Table
+
+`materialized_table` is declarative: every run issues `CREATE OR ALTER MATERIALIZED TABLE` and lets Flink reconcile the table, rather than using the drop/recreate + schema-drift flow that `table`/`streaming_table` use.
+
+- **New table** — created.
+- **Unchanged** — a server-side no-op: Confluent diffs the submitted definition against the current one and leaves the table, its data, and its query state untouched. Re-asserting the definition on every run is safe and is the design. (Observed behavior, verified with a stateful positive control — an unchanged re-assert leaves aggregates growing monotonically while a real evolution visibly resets them. Confluent's docs currently state that every `CREATE OR ALTER` triggers an evolution, which does not match what the server does today.)
+- **Any change** (columns, data types, `WITH` options, or query logic) — evolved **in place**: the table and its topic are kept. For *stateless* queries (projections, filters) the evolution is seamless — no reprocessing, no duplicates. For *stateful* queries, see the warning below. See [Confluent's materialized tables concepts page](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html) for evolution semantics and caveats.
+- **`--full-refresh`** — `DROP MATERIALIZED TABLE IF EXISTS` then recreate. Required to change `distributed_by` (fixed at creation), to apply changes an evolution rejects, and to rebuild correct results for a stateful model after a definition change.
+
+> **Warning — stateful queries silently reset on evolution**: an in-place evolution discards all Flink processing state (aggregation counts, join state, window state) and resumes reading from the previous job's offsets. For a stateful model (`GROUP BY`, joins, windows) this means the results silently restart from the evolution point: in upsert mode the fresh, small values overwrite the old totals per key, and the pre-change history is **not reprocessed — regardless of `start_mode`, which only applies at creation** — so the table is permanently under-counted. The run still reports success. Observed empirically: a running `COUNT(*)` collapsed from ~15,700 to ~140 after an evolution and regrew at the live-source rate only. **To change a stateful model's definition and keep correct results, run with `--full-refresh`** (which reprocesses history per `start_mode`, at the cost of dropping the topic — see the data-loss warning below).
+
+> **Warning — data loss**: dropping a materialized table (including via `--full-refresh`) permanently deletes the backing Kafka topic, all of its data, and the associated Schema Registry schema versions.
+
+Note that the backing topic's (and its Schema Registry schemas') deletion is asynchronous and can lag the catalog drop considerably. Observed consequences of recreating a model under the same name while the old topic still exists:
+
+- Recreating **any relation shortly after a drop** (not just materialized tables) can be rejected with "The table ... was found, but its Kafka topic does not exist; ... try again later" while the dropped entry's teardown settles. The adapter retries this automatically — it clears within tens of seconds. (After dropping a materialized table, the adapter additionally waits for the catalog entry itself to disappear before recreating, since the MT drop removes it asynchronously and an immediate recreate fails with "table already exists".)
+- A materialized table must be dropped with `DROP MATERIALIZED TABLE`: the server silently *accepts* a regular `DROP TABLE` against an MT but phantom-drops it — the catalog entry transiently disappears, same-name creates keep failing with "failed creating table: table already exists", and the MT later resurfaces in the catalog intact. The adapter therefore checks `IS_MATERIALIZED` before every table drop and routes materialized tables to the proper drop (after which the name is immediately reusable). Anything dropping relations outside dbt should do the same — never rely on `DROP TABLE` being rejected.
+- With a **different distribution**, creation fails with "a topic with the same name already exists with different partitions or configurations" — re-run once the old topic is fully deleted. (Recreating with the *same* distribution reuses the lingering topic.)
+- With **different columns**, creation binds to the lingering topic's registered schema and fails with "Column types of query result and sink ... do not match" — again, re-run once the old topic is gone.
+- A lingering topic can also **resurface in the catalog as an inferred regular table** under the model's name (observed within a day of the drop, with the topic's schema intact). The next plain run then fails with the materialization-switch guard error ("already exists as a regular table or view"); run with `--full-refresh` to drop the inferred table — which deletes the lingering topic — and recreate the materialized table.
+
+**Evolution limits**: not every change can evolve in place — dropping columns is rejected at submission, observed either as a per-column error ("dropping a non-nullable, persisted column is not supported") or as a query/sink schema mismatch ("Column types of query result and sink ... do not match. Cause: Different number of columns."). The fix is `--full-refresh`. (Materialized tables don't use [schema drift detection](#schema-drift-detection) — Flink reconciles the definition instead, and a rejected evolution is the analogous failure mode.)
+
+**Config:**
+
+- `distributed_by` — a `{'columns': [...], 'buckets': N}` mapping, same shape and validation as the other materializations (see [Distributed By](#distributed-by)). Confluent's materialized-table grammar documents `DISTRIBUTED BY (...)` without `HASH`; the adapter emits `DISTRIBUTED BY HASH(...)`, which works in practice.
+- `with` — table options, e.g. `{'key.format': 'avro-registry'}`.
+- `start_mode` — where the query starts reading when the table is **created** (empirically it does not affect evolutions, which always resume from the previous job's offsets — Confluent's docs say otherwise). All eight documented forms are accepted (default: `RESUME_OR_FROM_BEGINNING`): `FROM_BEGINNING`, `FROM_NOW`, `RESUME_OR_FROM_BEGINNING`, `RESUME_OR_FROM_NOW`, `FROM_TIMESTAMP('<timestamp>')`, `RESUME_OR_FROM_TIMESTAMP('<timestamp>')`, `FROM_NOW('<interval>')`, `RESUME_OR_FROM_NOW('<interval>')`.
+
+`freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error.
+
+**Switching materializations**: an existing regular table or view cannot be converted to a materialized table, and a materialized table cannot be adopted by the drop-and-recreate materializations. The adapter detects both switches before submitting anything, and both resolve the same way:
+
+- *To* `materialized_table`: a plain run fails with guidance; `--full-refresh` drops the existing relation (and its Flink statements) through the regular drop path, then creates the materialized table.
+- *From* `materialized_table` (model changed to `table`/`streaming_table`/`streaming_source`): a plain run fails with guidance — this matters because a materialized table looks like a regular table to the catalog, and without the check an unchanged model would silently "succeed" while Flink kept maintaining the old defining query. `--full-refresh` drops the materialized table (the adapter detects it via `IS_MATERIALIZED` before dropping and issues `DROP MATERIALIZED TABLE` — a regular `DROP TABLE` would be silently accepted by the server but only phantom-drop it, leaving the name blocked and the table to resurface) and creates the regular relation. Note the drop permanently deletes the backing topic and its data, and `on_schema_drift='ignore'` skips this detection along with the rest of the drift check.
+
+Re-running while Flink is still establishing a freshly created or evolved table can be transiently rejected (`being modified`) and is retried automatically; the window is brief — probes issuing statements immediately after a create or evolution usually don't hit it at all.
+
 ## Schema Drift Detection
 
-When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation. The check compares **columns**, **WITH options**, and **`distributed_by`** in a single pass and raises one error listing every violation, so you don't have to fix them one at a time.
+When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation. The check compares **columns**, **WITH options**, and **`distributed_by`** in a single pass and raises one error listing every violation, so you don't have to fix them one at a time. It also detects when the existing relation is a **materialized table** (a reverse materialization switch) and fails with dedicated guidance instead of a drift list — see [Switching materializations](#materialized-table). (`materialized_table` models themselves do not use drift detection — Flink reconciles the re-asserted definition instead; see [Materialized Table](#materialized-table).)
 
 To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>`) and issues a single `UNION ALL` query against `INFORMATION_SCHEMA.COLUMNS`, `TABLES`, and `TABLE_OPTIONS` to fetch every piece of metadata at once. For `table` and `streaming_table`, the temp table is created from the model's SELECT query; for `streaming_source`, from the model's column definitions (without the connector). The temp table is dropped in the adapter's post-model hook, which dbt invokes even when the materialization fails (e.g. when drift is detected) — so a run that raises after creating the temp table doesn't leak it. As a backstop for runs that die hard (killed process, lost connectivity) before the hook runs, the temp table name is deterministic per model and the check drops any leftover before creating a new one, so the next drift check reclaims a leak.
 
@@ -146,6 +185,8 @@ Each materialization creates Flink statements with deterministic names derived f
 ```
 
 The default prefix is `dbt-`. For `streaming_table`, which creates two statements (a DDL and an INSERT), the DDL gets a `-ddl` suffix: `dbt-{project}-{model}-ddl`.
+
+`materialized_table` differs in two ways. Its defining `CREATE OR ALTER` statement completes immediately — it is not a long-running maintainer (Flink maintains the table server-side) — so the adapter reaps it like any other bounded statement; a failed submission is left in place for debugging (Confluent purges terminal statements after ~30 days). And each run submits under a unique per-run name (`dbt-{project}-{model}-{invocation_id}`), so a re-assert can never collide (409) with a statement lingering from a previous run.
 
 ### Flink Naming Constraints
 
@@ -232,6 +273,6 @@ Adoption is purely name-based — the adapter does not track which tool created 
 
 | Materialization | Reason |
 |---|---|
-| `materialized_view` | Use `table` instead. In Confluent Flink, materialized views are implemented as CTAS tables that are continuously updated by Flink. |
+| `materialized_view` | dbt's built-in `materialized_view` materialization is not implemented. For a Flink materialized table use the `materialized_table` materialization (declarative, `CREATE OR ALTER MATERIALIZED TABLE`); for a CTAS table that Flink keeps continuously updated use `table`. |
 | `incremental` | dbt's batch-incremental semantics does not map to Flink's continuous processing model. Use `streaming_table` instead. |
 | `snapshot` | Flink SQL lacks the batch operations (MERGE, UPDATE) required by dbt snapshots. |
