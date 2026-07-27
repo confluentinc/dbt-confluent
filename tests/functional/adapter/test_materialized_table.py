@@ -3,11 +3,17 @@
 materialized_table is declarative: every run re-asserts the definition with
 CREATE OR ALTER MATERIALIZED TABLE and lets Flink reconcile it —
 - new relation -> create,
-- any change (columns, WITH options, query logic) -> evolve in place,
-- unchanged -> server-side no-op (the server diffs the submitted spec),
+- any change (columns, WITH options, query logic) -> evolve in place (note:
+  an evolution resets a stateful query's processing state — the MT here is a
+  stateless projection, which evolves seamlessly; see MATERIALIZATIONS.md),
+- unchanged -> server-side no-op (the server diffs the submitted spec;
+  probe-verified against a stateful positive control),
 - --full-refresh -> DROP MATERIALIZED TABLE then recreate,
 - existing regular table/view (materialization switch) -> guarded: plain run
-  errors with guidance, --full-refresh drops through the regular path first.
+  errors with guidance, --full-refresh drops through the regular path first,
+- reverse switch (regular model over a leftover MT) -> the drift check's
+  IS_MATERIALIZED detection errors on a plain run; --full-refresh drops the
+  MT via drop_relation's IS_MATERIALIZED pre-check.
 Config is validated (fail-fast) for unsupported options and start_mode; the
 shared distributed_by validation (delegated to validate_distributed_by_config)
 is exercised here only for end-to-end wiring — its per-case behavior lives in
@@ -64,7 +70,7 @@ _RUN_TAG = format(int(time.time()), "08x")
 # name a human or another tool would plausibly pick: literal reserved prefix,
 # one of the fixed stems, and the hex session tag.
 _TEST_RELATION_RE = re.compile(
-    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard)_(?P<tag>[0-9a-f]{8})$"
+    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch)_(?P<tag>[0-9a-f]{8})$"
 )
 
 _leftovers_swept = False
@@ -329,6 +335,64 @@ class TestMaterializedTableSwitchGuard(_MTFixtures):
             fetch="one",
         )
         assert row is not None and row[0][0] == "YES"
+
+
+class TestMaterializedTableReverseSwitch(_MTFixtures):
+    """A model that already exists as a materialized table cannot be adopted
+    by the drop-and-recreate materializations: a plain run as `table` must
+    fail with a dedicated error (an MT reports TABLE_TYPE='BASE TABLE', so
+    without the IS_MATERIALIZED check the drift check would pass and the run
+    would silently skip, leaving Flink maintaining the old defining query);
+    --full-refresh drops the MT via drop_relation's IS_MATERIALIZED pre-check
+    (a plain DROP TABLE would be silently accepted but phantom-drop the MT,
+    blocking the recreate) and creates the regular table."""
+
+    NAME = "matrevswitch"
+    SRC = f"dbttest_src_revswitch_{_RUN_TAG}"
+    MT = f"dbttest_mt_revswitch_{_RUN_TAG}"
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        # Drop the forced +full_refresh: the guard only triggers on a plain run.
+        return {"name": self.NAME, "models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        # Same shape as the forward switch test, mirrored: both models keep
+        # the default distribution so the recreate under the same name
+        # tolerates the dropped MT's lingering topic.
+        yield _models(self.SRC, self.MT, MT_AFTER_SWITCH)
+
+    def test_reverse_switch(self, project):
+        # Build as a materialized table first.
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results)
+
+        # Re-point the model at the regular table materialization.
+        set_model_file(
+            project,
+            relation(project, self.MT),
+            TABLE_BEFORE_SWITCH.replace("__SOURCE__", self.SRC),
+        )
+
+        # Plain run: rejected with guidance, before any DDL against the MT.
+        results = run_dbt(["run", "-s", self.MT], expect_pass=False)
+        r = get_result_by_name(results, self.MT)
+        assert r is not None
+        assert r.status.name == "Error"
+        assert "materialized table" in r.message
+        assert "--full-refresh" in r.message
+
+        # --full-refresh: the MT is dropped (fallback path) and a regular
+        # table is created in its place.
+        results = run_dbt(["run", "--full-refresh", "-s", self.MT])
+        assert all(r.status.name == "Success" for r in results)
+        row = project.run_sql(
+            "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "
+            f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{self.MT}'",
+            fetch="one",
+        )
+        assert row is not None and row[0][0] == "NO"
 
 
 # -- Invalid config models --
