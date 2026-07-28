@@ -44,25 +44,11 @@
 {% endmacro %}
 
 {% macro validate_materialized_table_config() %}
-  {# MT-specific validation only. distributed_by/buckets are validated by
-     validate_distributed_by_config(); the materialization calls both. Confluent
-     MT supports only distributed_by, with, and start_mode (see MATERIALIZATIONS.md). #}
-
-  {# Configs that exist in open-source Flink MT but NOT Confluent's dialect. #}
-  {%- set unsupported = [] -%}
-  {%- for key in ['freshness_interval', 'refresh_mode', 'partition_by'] -%}
-    {%- if config.get(key) is not none -%}{%- do unsupported.append(key) -%}{%- endif -%}
-  {%- endfor -%}
-  {%- if unsupported -%}
-    {% set msg %}
-'{{ unsupported | join("', '") }}' {{ 'is' if unsupported | length == 1 else 'are' }} not supported by the 'materialized_table' materialization for Confluent Flink.
-Supported config options are: distributed_by, with, start_mode.
-    {% endset %}
-    {% do exceptions.raise_compiler_error(msg) %}
-  {%- endif -%}
-
-  {# start_mode is validated (and rendered) by adapter.render_start_mode,
-     called from the materialization. #}
+  {# Delegate to ConfluentAdapter.validate_materialized_table_config (Python).
+     distributed_by is validated by validate_distributed_by_config() and
+     start_mode by adapter.render_start_mode — the materialization calls all
+     three. #}
+  {% do adapter.validate_materialized_table_config(config) %}
 {% endmacro %}
 
 

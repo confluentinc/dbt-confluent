@@ -815,6 +815,30 @@ class ConfluentAdapter(SQLAdapter):
             )
 
     @available
+    def validate_materialized_table_config(self, model_config: Any) -> None:
+        """Reject configs Confluent's MT dialect doesn't support.
+
+        `freshness_interval`, `refresh_mode`, and `partition_by` exist in
+        open-source Flink materialized tables but not in Confluent's dialect.
+        Collects every offending key into one error. `model_config` is the
+        Jinja config object (anything with `.get`); distributed_by and
+        start_mode are validated by their own helpers.
+        """
+        unsupported = [
+            key
+            for key in ("freshness_interval", "refresh_mode", "partition_by")
+            if model_config.get(key) is not None
+        ]
+        if unsupported:
+            keys = "', '".join(unsupported)
+            verb = "is" if len(unsupported) == 1 else "are"
+            raise CompilationError(
+                f"'{keys}' {verb} not supported by the 'materialized_table' "
+                f"materialization for Confluent Flink.\n"
+                f"Supported config options are: distributed_by, with, start_mode."
+            )
+
+    @available
     def render_start_mode(self, value: object) -> str:
         """Validate the `start_mode` config and render the START_MODE value.
 
