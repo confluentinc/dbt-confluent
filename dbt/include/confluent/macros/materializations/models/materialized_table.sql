@@ -12,26 +12,11 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
-  {# Declarative lifecycle: we always re-assert the definition with
-     CREATE OR ALTER and let Flink reconcile it — a new table is created, any
-     change (columns, WITH options, or query logic) is evolved in place, and
-     an unchanged definition is a server-side no-op (the server diffs the
-     parsed spec, so state, data, and offsets are untouched — Confluent docs
-     claim every re-assert evolves, but the server no-ops in practice). An
-     evolution discards processing state and resumes
-     from current offsets, so a changed *stateful* model silently resets its
-     results (documented with a warning in MATERIALIZATIONS.md — the correct
-     rebuild is --full-refresh). `--full-refresh` drops first so the table is
-     rebuilt from scratch (also the way to change distribution). Re-running
-     within Flink's brief establishment window is transiently rejected
-     ("being modified") and retried by the connection manager. #}
-  {# Pre-flight switch guard: Confluent cannot convert an existing regular
-     table/view into a materialized table, so CREATE OR ALTER would fail with
-     a confusing server error. Detect the switch up front and either fail with
-     guidance or, under --full-refresh, drop through the regular-relation path
-     (deterministic statements included — e.g. a prior `table` model's CTAS)
-     before creating the MT. 'absent' (dropped externally since the cache was
-     built) falls through to a plain create. #}
+  {# Switch guard: the server cannot convert an existing regular table/view
+     into an MT (CREATE OR ALTER fails confusingly), so fail with guidance —
+     or, under --full-refresh, drop the regular relation and its statements
+     first. 'absent' (dropped externally since the cache was built) falls
+     through to a plain create. #}
   {%- if existing_relation -%}
     {%- set existing_kind = adapter.get_relation_kind(existing_relation) -%}
     {%- if existing_kind == 'regular' -%}
@@ -53,11 +38,12 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
 
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
-  {# Submit under a per-invocation statement name. The CREATE OR ALTER
-     completes immediately (Flink maintains the table server-side, not the
-     statement) and is reaped at cursor close like any bounded statement, but
-     a FAILED submission lingers for debugging and would 409-collide with a
-     reused fixed name — a unique name per run sidesteps that entirely. #}
+  {# CREATE OR ALTER re-asserts the definition every run: the server no-ops
+     an unchanged definition and evolves a changed one in place — discarding
+     processing state, so stateful models silently reset (--full-refresh is
+     the true rebuild; see MATERIALIZATIONS.md). Submitted under a per-run
+     statement name: the DDL is bounded and reaped at cursor close, but a
+     FAILED submission lingers and would 409-collide with a reused name. #}
   {% call statement('main', execution_mode="streaming_ddl",
                     statement_name=get_statement_name('-' ~ invocation_id)) -%}
     CREATE OR ALTER MATERIALIZED TABLE {{ target_relation }}
