@@ -1,6 +1,7 @@
 import logging
 import re
 import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -24,6 +25,35 @@ from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
 logger = logging.getLogger(__name__)
+
+# start_mode keyword → argument arity. Confluent documents eight forms: four
+# bare keywords, plus *_TIMESTAMP with a required argument and *_NOW with an
+# optional one (FROM_NOW doubles as bare "now" and parameterized "now minus
+# interval").
+_START_MODE_ARITY = {
+    "FROM_BEGINNING": "none",
+    "RESUME_OR_FROM_BEGINNING": "none",
+    "FROM_NOW": "optional",
+    "RESUME_OR_FROM_NOW": "optional",
+    "FROM_TIMESTAMP": "required",
+    "RESUME_OR_FROM_TIMESTAMP": "required",
+}
+
+_START_MODE_FORMS = (
+    "FROM_BEGINNING, FROM_NOW, FROM_NOW('<interval>'), FROM_TIMESTAMP('<timestamp>'), "
+    "RESUME_OR_FROM_BEGINNING, RESUME_OR_FROM_NOW, RESUME_OR_FROM_NOW('<interval>'), "
+    "RESUME_OR_FROM_TIMESTAMP('<timestamp>')"
+)
+
+# A start_mode string: a keyword, optionally followed by a parenthesized
+# argument that is either a well-formed single-quoted SQL literal (quotes
+# escaped by doubling) or bare text without quotes/parens (we add the quotes).
+# Anything else — e.g. a stray quote that would terminate the rendered literal
+# early — fails the match and is rejected as invalid.
+_START_MODE_RE = re.compile(
+    r"\s*(?P<kw>[A-Za-z_]+)\s*"
+    r"(?:\(\s*(?:'(?P<quoted>(?:[^']|'')*)'|(?P<bare>[^'()]*?))\s*\)\s*)?"
+)
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -162,6 +192,89 @@ class ConfluentAdapter(SQLAdapter):
             statement_name=statement_name,
             compute_pool_id=compute_pool_id,
         )
+
+    @available
+    def drop_materialized_table(self, relation: BaseRelation) -> None:
+        """DROP MATERIALIZED TABLE IF EXISTS, then wait for the catalog to agree.
+
+        MTs need this dedicated drop — a regular DROP TABLE phantom-drops
+        them (see drop_relation). IF EXISTS keeps a stale relation cache or
+        an externally-dropped table from failing the run; the cache is
+        evicted first, mirroring SQLAdapter.drop_relation.
+
+        Unlike a regular DROP TABLE, the MT drop removes its catalog entry
+        asynchronously. Every caller immediately recreates the name, and
+        racing that teardown fails ("table already exists") or, worse — on
+        the CREATE OR ALTER path — silently binds to the dying table. So poll
+        until the entry is gone; on timeout raise a retriable DbtDatabaseError
+        (`dbt retry` picks it up once the teardown finishes).
+        """
+        self.cache_dropped(relation)
+        self.execute(
+            f"DROP MATERIALIZED TABLE IF EXISTS {relation}", execution_mode="streaming_ddl"
+        )
+        self._wait_for_catalog_absence(relation)
+
+    def _wait_for_catalog_absence(self, relation: BaseRelation, timeout: float = 120.0) -> None:
+        """Poll INFORMATION_SCHEMA until `relation` no longer appears."""
+        deadline = time.monotonic() + timeout
+        backoff = 1.0
+        while True:
+            if self.get_relation_kind(relation) == "absent":
+                return
+            if time.monotonic() >= deadline:
+                raise DbtDatabaseError(
+                    f"Dropped materialized table {relation} is still listed in the "
+                    f"catalog after {timeout:.0f}s; its asynchronous teardown is "
+                    f"lagging. Retry with `dbt retry` once it completes."
+                )
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 10.0)
+
+    @available
+    def get_relation_kind(self, relation: BaseRelation) -> str:
+        """Classify what `relation` currently is in the live catalog.
+
+        Returns 'materialized_table', 'regular' (table or view), or 'absent'
+        (no catalog entry). Deliberately a live probe rather than a relation
+        cache lookup: the cache can't tell an MT from a regular table (see
+        drop_relation) and may be stale.
+        """
+        _, table = self.execute(
+            "SELECT IS_MATERIALIZED FROM INFORMATION_SCHEMA.`TABLES` "
+            f"WHERE TABLE_CATALOG_ID = '{relation.database}' "
+            f"AND TABLE_SCHEMA = '{relation.schema}' "
+            f"AND TABLE_NAME = '{relation.identifier}'",
+            fetch=True,
+        )
+        if len(table.rows) == 0:
+            return "absent"
+        if any(str(row[0]).upper() == "YES" for row in table.rows):
+            return "materialized_table"
+        return "regular"
+
+    def drop_relation(self, relation: BaseRelation) -> None:
+        """Drop a relation, routing Flink materialized tables to the MT drop.
+
+        A Flink materialized table reports TABLE_TYPE='BASE TABLE', so dbt's
+        relation cache types it as a regular table and the drop macro renders
+        DROP TABLE. The server does NOT reject that: it silently accepts DROP
+        TABLE against an MT and phantom-drops it — the catalog entry
+        disappears transiently, but the table's backing resources survive,
+        same-name creates keep failing with "table already exists", and the
+        MT later resurfaces in the catalog. Because the failed drop raises no
+        error, no fallback can catch it: materialized tables must be detected
+        *before* the drop — one IS_MATERIALIZED lookup, skipped for views,
+        which can't be MTs — and routed to drop_materialized_table. This is
+        what lets --full-refresh replace a materialized table after a model
+        switches away from the materialized_table materialization.
+        """
+        # RelationType subclasses str, so this compares the enum's value; a
+        # None type (unknown) conservatively still gets the pre-check.
+        if relation.type != "view" and self.get_relation_kind(relation) == "materialized_table":
+            self.drop_materialized_table(relation)
+            return
+        super().drop_relation(relation)
 
     @available
     def get_statement_name(
@@ -600,6 +713,65 @@ class ConfluentAdapter(SQLAdapter):
             )
 
     @available
+    def validate_materialized_table_config(self, model_config: Any) -> None:
+        """Reject configs Confluent's MT dialect doesn't support.
+
+        `freshness_interval`, `refresh_mode`, and `partition_by` exist in
+        open-source Flink materialized tables but not in Confluent's dialect.
+        Collects every offending key into one error. `model_config` is the
+        Jinja config object (anything with `.get`); distributed_by and
+        start_mode are validated by their own helpers.
+        """
+        unsupported = [
+            key
+            for key in ("freshness_interval", "refresh_mode", "partition_by")
+            if model_config.get(key) is not None
+        ]
+        if unsupported:
+            keys = "', '".join(unsupported)
+            verb = "is" if len(unsupported) == 1 else "are"
+            raise CompilationError(
+                f"'{keys}' {verb} not supported by the 'materialized_table' "
+                f"materialization for Confluent Flink.\n"
+                f"Supported config options are: distributed_by, with, start_mode."
+            )
+
+    @available
+    def render_start_mode(self, value: object) -> str:
+        """Validate the `start_mode` config and render the START_MODE value.
+
+        Accepts the eight documented Confluent forms as a plain string (what
+        users paste from the docs): FROM_BEGINNING / RESUME_OR_FROM_BEGINNING
+        (no argument), FROM_TIMESTAMP / RESUME_OR_FROM_TIMESTAMP (argument
+        required), FROM_NOW / RESUME_OR_FROM_NOW (argument optional). The
+        keyword is normalized to uppercase; the argument may be given with or
+        without surrounding single quotes and is re-emitted as an escaped SQL
+        string literal. Returns '' when the config is unset; raises
+        CompilationError on anything else.
+        """
+        if value is None:
+            return ""
+        match = _START_MODE_RE.fullmatch(str(value))
+        keyword = match.group("kw").upper() if match else ""
+        arity = _START_MODE_ARITY.get(keyword)
+        if not match or arity is None:
+            raise CompilationError(
+                f"'{value}' is not a valid value for 'start_mode'.\n"
+                f"Accepted forms are: {_START_MODE_FORMS}."
+            )
+        quoted, bare = match.group("quoted"), match.group("bare")
+        arg = quoted.replace("''", "'") if quoted is not None else bare
+        if not arg:  # None (no parens) or '' (empty parens/literal)
+            if arity == "required":
+                raise CompilationError(
+                    f"'start_mode' {keyword} requires an argument, e.g. {keyword}('...')."
+                )
+            return keyword
+        if arity == "none":
+            raise CompilationError(f"'start_mode' {keyword} does not take an argument.")
+        return f"{keyword}('{self.escape_string_literal(arg)}')"
+
+    @available
     def check_schema_drift(
         self,
         existing_relation: ConfluentRelation,
@@ -636,11 +808,29 @@ class ConfluentAdapter(SQLAdapter):
         expected options here to participate in options drift like any
         other option. None for materializations without a connector.
         """
-        existing_columns, expected_columns, existing_options, existing_distribution = (
-            self._partition_drift_catalog(
-                drift_catalog, existing_relation.identifier, temp_relation.identifier
-            )
+        (
+            existing_columns,
+            expected_columns,
+            existing_options,
+            existing_distribution,
+            existing_is_materialized,
+        ) = self._partition_drift_catalog(
+            drift_catalog, existing_relation.identifier, temp_relation.identifier
         )
+
+        # A materialized table can't be managed by the drop-and-recreate
+        # materializations at all — a skip would silently leave Flink
+        # maintaining the old defining query, and a streaming restart would
+        # submit an INSERT against it.
+        if existing_is_materialized:
+            raise CompilationError(
+                f"{existing_relation} exists as a Flink materialized table, which "
+                f"cannot be managed by this model's materialization. Either set "
+                f"materialized='materialized_table' on the model, or run with "
+                f"--full-refresh to drop it and recreate the relation (dropping a "
+                f"materialized table permanently deletes the backing Kafka topic, "
+                f"its data, and its Schema Registry schemas)."
+            )
 
         # An empty expected_columns means the drift-check temp table came back
         # with zero columns from INFORMATION_SCHEMA. The temp table was just
@@ -698,7 +888,7 @@ class ConfluentAdapter(SQLAdapter):
         drift_catalog,
         existing_identifier: str,
         temp_identifier: str,
-    ) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict | None]:
+    ) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict | None, bool]:
         """Split the unified UNION ALL result into per-concern structures.
 
         Returns:
@@ -706,6 +896,8 @@ class ConfluentAdapter(SQLAdapter):
             expected_columns: {column_name: data_type} for the temp table
             existing_options: {option_key: option_value}
             existing_distribution: {buckets, columns} or None
+            existing_is_materialized: True if the existing relation is a
+                Flink materialized table (IS_MATERIALIZED='YES')
         """
         columns_by_table: dict[str, dict[str, str]] = {
             existing_identifier: {},
@@ -713,6 +905,7 @@ class ConfluentAdapter(SQLAdapter):
         }
         existing_options: dict[str, str] = {}
         is_distributed = False
+        is_materialized = False
         buckets: int | None = None
         positions: list[tuple[int, str]] = []
 
@@ -736,9 +929,12 @@ class ConfluentAdapter(SQLAdapter):
                 target[row["col_name"]] = row["data_type"]
                 if row["table_name"] == existing_identifier and row["dist_position"] is not None:
                     positions.append((row["dist_position"], row["col_name"]))
-            elif section == "TABLES" and str(row["is_distributed"]).upper() == "YES":
-                is_distributed = True
-                buckets = row["dist_buckets"]
+            elif section == "TABLES":
+                if str(row["is_materialized"]).upper() == "YES":
+                    is_materialized = True
+                if str(row["is_distributed"]).upper() == "YES":
+                    is_distributed = True
+                    buckets = row["dist_buckets"]
             elif section == "TABLE_OPTIONS":
                 existing_options[row["option_key"]] = row["option_value"]
 
@@ -753,6 +949,7 @@ class ConfluentAdapter(SQLAdapter):
             columns_by_table[temp_identifier],
             existing_options,
             existing_distribution,
+            is_materialized,
         )
 
     @staticmethod
