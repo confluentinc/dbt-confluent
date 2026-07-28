@@ -221,22 +221,17 @@ class ConfluentAdapter(SQLAdapter):
     def drop_materialized_table(self, relation: BaseRelation) -> None:
         """DROP MATERIALIZED TABLE IF EXISTS, then wait for the catalog to agree.
 
-        A materialized table must be dropped with DROP MATERIALIZED TABLE —
-        the server silently accepts a regular DROP TABLE against an MT but
-        phantom-drops it (see drop_relation). IF EXISTS makes a missing table
-        a no-op, so a stale relation cache or an externally-dropped table
-        doesn't fail the run — matching the resilience of
-        drop_relation_if_exists used by the other materializations. The cache
-        is evicted first, mirroring SQLAdapter.drop_relation.
+        MTs need this dedicated drop — a regular DROP TABLE phantom-drops
+        them (see drop_relation). IF EXISTS keeps a stale relation cache or
+        an externally-dropped table from failing the run; the cache is
+        evicted first, mirroring SQLAdapter.drop_relation.
 
         Unlike a regular DROP TABLE, the MT drop removes its catalog entry
-        asynchronously (the server tears down the managed query, topic, and
-        entry in the background). Every caller of this method immediately
-        recreates the name — the MT full-refresh path with CREATE OR ALTER,
-        the reverse-switch full-refresh with CREATE TABLE — and racing that
-        teardown fails ("table already exists") or, worse, binds to the dying
-        table. So poll until the entry is gone; on timeout raise a retriable
-        DbtDatabaseError (`dbt retry` picks it up once the teardown finishes).
+        asynchronously. Every caller immediately recreates the name, and
+        racing that teardown fails ("table already exists") or, worse — on
+        the CREATE OR ALTER path — silently binds to the dying table. So poll
+        until the entry is gone; on timeout raise a retriable DbtDatabaseError
+        (`dbt retry` picks it up once the teardown finishes).
         """
         self.cache_dropped(relation)
         self.execute(
@@ -265,12 +260,9 @@ class ConfluentAdapter(SQLAdapter):
         """Classify what `relation` currently is in the live catalog.
 
         Returns 'materialized_table', 'regular' (table or view), or 'absent'
-        (no catalog entry — e.g. dropped externally since the relation cache
-        was built). A Flink materialized table reports TABLE_TYPE='BASE
-        TABLE', so the relation cache can't tell it apart from a regular
-        table — IS_MATERIALIZED in INFORMATION_SCHEMA.TABLES can. Shared by
-        the materialized_table pre-flight switch guard (via Jinja),
-        drop_relation's MT routing, and the post-drop absence poll.
+        (no catalog entry). Deliberately a live probe rather than a relation
+        cache lookup: the cache can't tell an MT from a regular table (see
+        drop_relation) and may be stale.
         """
         _, table = self.execute(
             "SELECT IS_MATERIALIZED FROM INFORMATION_SCHEMA.`TABLES` "
@@ -923,8 +915,7 @@ class ConfluentAdapter(SQLAdapter):
         # A materialized table can't be managed by the drop-and-recreate
         # materializations at all — a skip would silently leave Flink
         # maintaining the old defining query, and a streaming restart would
-        # submit an INSERT against it. Raised before (and regardless of) the
-        # per-concern checks, whose column/options guidance would be noise.
+        # submit an INSERT against it.
         if existing_is_materialized:
             raise CompilationError(
                 f"{existing_relation} exists as a Flink materialized table, which "
