@@ -1,23 +1,11 @@
 """Functional tests for the materialized_table materialization.
 
-materialized_table is declarative: every run re-asserts the definition with
-CREATE OR ALTER MATERIALIZED TABLE and lets Flink reconcile it —
-- new relation -> create,
-- any change (columns, WITH options, query logic) -> evolve in place (note:
-  an evolution resets a stateful query's processing state — the MT here is a
-  stateless projection, which evolves seamlessly; see MATERIALIZATIONS.md),
-- unchanged -> server-side no-op (the server diffs the submitted spec;
-  probe-verified against a stateful positive control),
-- --full-refresh -> DROP MATERIALIZED TABLE then recreate,
-- existing regular table/view (materialization switch) -> guarded: plain run
-  errors with guidance, --full-refresh drops through the regular path first,
-- reverse switch (regular model over a leftover MT) -> the drift check's
-  IS_MATERIALIZED detection errors on a plain run; --full-refresh drops the
-  MT via drop_relation's IS_MATERIALIZED pre-check.
-Config is validated (fail-fast) for unsupported options and start_mode; the
-shared distributed_by validation (delegated to validate_distributed_by_config)
-is exercised here only for end-to-end wiring — its per-case behavior lives in
-the pure-Python tests/unit/test_validate_distributed_by_config.py.
+Covers the declarative lifecycle — create, in-place evolve, server-side
+no-op, --full-refresh recreate (see MATERIALIZATIONS.md) — plus both
+materialization-switch guards (regular relation under an MT model, and a
+leftover MT under a regular model). Config validation is exercised only for
+end-to-end wiring; per-case behavior lives in the pure-Python tests under
+tests/unit/.
 
 Notes:
 - ConfluentFixtures forces models +full_refresh=True, which would make every run a

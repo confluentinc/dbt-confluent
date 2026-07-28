@@ -171,13 +171,10 @@ def drop_tables(project, *names):
 def drop_materialized_table(project, name, attempts=16, interval=10):
     """Best-effort drop of a materialized table; returns True if it's gone.
 
-    A materialized table must be dropped with `DROP MATERIALIZED TABLE IF
-    EXISTS` (missing table = no-op): the server silently *accepts* `DROP
-    TABLE` against an MT but phantom-drops it — the entry transiently
-    disappears and later resurfaces, with same-name creates failing "table
-    already exists" in between. This waits out the transient state ("being
-    modified" / "Could not execute DropTable") that occurs while a prior
-    CREATE OR ALTER is still establishing.
+    MTs need the dedicated `DROP MATERIALIZED TABLE IF EXISTS` — a regular
+    DROP TABLE phantom-drops them (see ConfluentAdapter.drop_relation). Waits
+    out the transient rejection ("being modified" / "Could not execute
+    DropTable") while a prior CREATE OR ALTER is still establishing.
 
     Callers gate statement deletion on the return value: if the drop kept
     failing, leave the statements too and let the next run's teardown (or a
@@ -201,13 +198,10 @@ def drop_any_relation(project, name):
     Used by teardown in test classes where the name's kind depends on how far
     the test got — e.g. the MT switch-guard test ends with either a regular
     table (guard-error path) or a materialized table (--full-refresh path).
-
-    The kind must be checked BEFORE dropping: the server silently accepts
-    DROP TABLE against a live MT and phantom-drops it (the entry resurfaces
-    later — see drop_materialized_table), so a DROP TABLE rejection can't be
-    used to detect MTs. IS_MATERIALIZED routes MTs to DROP MATERIALIZED
-    TABLE; DROP TABLE IF EXISTS handles the absent/regular/inferred cases
-    (and deletes the table's topic).
+    The IS_MATERIALIZED pre-check routes MTs to DROP MATERIALIZED TABLE — a
+    regular DROP TABLE would phantom-drop them without raising (see
+    ConfluentAdapter.drop_relation); DROP TABLE IF EXISTS handles the
+    absent/regular/inferred cases (and deletes the table's topic).
 
     Note this only removes the *catalog* entry promptly: the backing Kafka
     topic and its Schema Registry schemas are deleted asynchronously and can
