@@ -121,6 +121,23 @@ class TestDropMaterializedTable:
         assert exc_info.value is err
 
 
+class TestGetRelationKind:
+    """The shared catalog probe behind the switch guard, drop_relation's MT
+    routing, and the post-drop absence poll."""
+
+    def test_absent_when_no_catalog_row(self, adapter, relation):
+        _wire_execute(adapter, [_is_materialized_result()])
+        assert adapter.get_relation_kind(relation) == "absent"
+
+    def test_regular_table(self, adapter, relation):
+        _wire_execute(adapter, [_is_materialized_result("NO")])
+        assert adapter.get_relation_kind(relation) == "regular"
+
+    def test_materialized_table(self, adapter, relation):
+        _wire_execute(adapter, [_is_materialized_result("YES")])
+        assert adapter.get_relation_kind(relation) == "materialized_table"
+
+
 class TestDropRelationRouting:
     def test_materialized_table_is_detected_and_routed_before_any_drop_table(
         self, adapter, relation

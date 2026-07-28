@@ -33,7 +33,7 @@
      before creating the MT. 'absent' (dropped externally since the cache was
      built) falls through to a plain create. #}
   {%- if existing_relation -%}
-    {%- set existing_kind = get_existing_relation_kind(existing_relation) -%}
+    {%- set existing_kind = adapter.get_relation_kind(existing_relation) -%}
     {%- if existing_kind == 'regular' -%}
       {%- if should_full_refresh() -%}
         {{ delete_statement_if_exists(get_statement_name()) }}
