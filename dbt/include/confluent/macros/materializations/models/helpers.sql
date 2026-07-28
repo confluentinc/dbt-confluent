@@ -46,31 +46,6 @@ Supported config options are: distributed_by, with, start_mode.
 {% endmacro %}
 
 
-{% macro get_existing_relation_kind(relation) %}
-  {# Classify an existing relation for the materialized_table pre-flight
-     switch guard. Returns 'materialized_table', 'regular' (table or view),
-     or 'absent' (dropped externally since the relation cache was built).
-     A materialized table reports TABLE_TYPE='BASE TABLE' just like a regular
-     table, so the relation cache can't tell them apart — IS_MATERIALIZED in
-     INFORMATION_SCHEMA.TABLES can. #}
-  {% call statement('get_existing_relation_kind', fetch_result=True, hidden=True) %}
-    SELECT IS_MATERIALIZED AS is_materialized
-    FROM INFORMATION_SCHEMA.`TABLES`
-    WHERE TABLE_CATALOG_ID = '{{ relation.database }}'
-      AND TABLE_SCHEMA = '{{ relation.schema }}'
-      AND TABLE_NAME = '{{ relation.identifier }}'
-  {% endcall %}
-  {% set rows = load_result('get_existing_relation_kind').table %}
-  {% if rows | length == 0 %}
-    {{ return('absent') }}
-  {% elif rows[0]['is_materialized'] == 'YES' %}
-    {{ return('materialized_table') }}
-  {% else %}
-    {{ return('regular') }}
-  {% endif %}
-{% endmacro %}
-
-
 {% macro render_with_options(with_options) %}
   {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping
      single quotes in keys and values. Renders nothing when with_options is

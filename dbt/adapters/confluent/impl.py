@@ -225,14 +225,7 @@ class ConfluentAdapter(SQLAdapter):
         deadline = time.monotonic() + timeout
         backoff = 1.0
         while True:
-            _, table = self.execute(
-                "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.`TABLES` "
-                f"WHERE TABLE_CATALOG_ID = '{relation.database}' "
-                f"AND TABLE_SCHEMA = '{relation.schema}' "
-                f"AND TABLE_NAME = '{relation.identifier}'",
-                fetch=True,
-            )
-            if len(table.rows) == 0:
+            if self.get_relation_kind(relation) == "absent":
                 return
             if time.monotonic() >= deadline:
                 raise DbtDatabaseError(
@@ -243,8 +236,18 @@ class ConfluentAdapter(SQLAdapter):
             time.sleep(backoff)
             backoff = min(backoff * 2, 10.0)
 
-    def _is_materialized_table(self, relation: BaseRelation) -> bool:
-        """True if `relation` currently exists as a Flink materialized table."""
+    @available
+    def get_relation_kind(self, relation: BaseRelation) -> str:
+        """Classify what `relation` currently is in the live catalog.
+
+        Returns 'materialized_table', 'regular' (table or view), or 'absent'
+        (no catalog entry — e.g. dropped externally since the relation cache
+        was built). A Flink materialized table reports TABLE_TYPE='BASE
+        TABLE', so the relation cache can't tell it apart from a regular
+        table — IS_MATERIALIZED in INFORMATION_SCHEMA.TABLES can. Shared by
+        the materialized_table pre-flight switch guard (via Jinja),
+        drop_relation's MT routing, and the post-drop absence poll.
+        """
         _, table = self.execute(
             "SELECT IS_MATERIALIZED FROM INFORMATION_SCHEMA.`TABLES` "
             f"WHERE TABLE_CATALOG_ID = '{relation.database}' "
@@ -252,7 +255,11 @@ class ConfluentAdapter(SQLAdapter):
             f"AND TABLE_NAME = '{relation.identifier}'",
             fetch=True,
         )
-        return any(str(row[0]).upper() == "YES" for row in table.rows)
+        if len(table.rows) == 0:
+            return "absent"
+        if any(str(row[0]).upper() == "YES" for row in table.rows):
+            return "materialized_table"
+        return "regular"
 
     def drop_relation(self, relation: BaseRelation) -> None:
         """Drop a relation, routing Flink materialized tables to the MT drop.
@@ -272,7 +279,7 @@ class ConfluentAdapter(SQLAdapter):
         """
         # RelationType subclasses str, so this compares the enum's value; a
         # None type (unknown) conservatively still gets the pre-check.
-        if relation.type != "view" and self._is_materialized_table(relation):
+        if relation.type != "view" and self.get_relation_kind(relation) == "materialized_table":
             self.drop_materialized_table(relation)
             return
         super().drop_relation(relation)
