@@ -194,6 +194,8 @@ def _execute_query_with_retry(
         # them with a 409 too, and keying off the status would misreport (and
         # mis-budget) them as a name-reuse race.
         msg = str(e).lower()
+        if "table already exists" in msg:
+            raise
         is_being_modified = "being modified" in msg
         is_topic_gone = "kafka topic does not exist" in msg
         is_409 = getattr(e, "http_status_code", None) == 409
