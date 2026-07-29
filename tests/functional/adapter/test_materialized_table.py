@@ -61,8 +61,6 @@ _TEST_RELATION_RE = re.compile(
     r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch)_(?P<tag>[0-9a-f]{8})$"
 )
 
-_leftovers_swept = False
-
 # A bounded faker source (number-of-rows) so the MT refresh settles quickly.
 SOURCE = """
 {{ config(
@@ -110,6 +108,28 @@ def _statement_label(dbt_profile_data):
     return dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
 
 
+@pytest.fixture(scope="session")
+def sweep_leftovers_once():
+    """Session-lifetime one-shot gate for the leftover sweep.
+
+    The sweep needs dbt's `project` fixture, which is class-scoped, so it
+    can't run from a session fixture (or a pytest_sessionstart hook) directly.
+    Instead each class's sweep_leftovers fixture passes its project in, and
+    the closure ensures only the first call actually sweeps.
+    """
+    swept = False
+
+    def sweep(project):
+        nonlocal swept
+        if swept:
+            return
+        swept = True
+        sweep_stale_test_relations(project, _TEST_RELATION_RE, _RUN_TAG)
+        sweep_stale_test_statements(project)
+
+    return sweep
+
+
 class _MTFixtures(ConfluentFixtures):
     """Base for materialized_table test classes.
 
@@ -123,18 +143,13 @@ class _MTFixtures(ConfluentFixtures):
         yield
 
     @pytest.fixture(autouse=True, scope="class")
-    def sweep_leftovers(self, project):
-        # Once per pytest session (dbt's `project` fixture is class-scoped,
-        # so this is a class fixture behind a module flag): reclaim relations
+    def sweep_leftovers(self, project, sweep_leftovers_once):
+        # Once per pytest session (this class fixture bridges the class-scoped
+        # `project` to the session-scoped one-shot gate): reclaim relations
         # and statements leaked by previous sessions' failed teardowns or
         # hard-killed runs. Old-tag names are never recreated, so sweeping
         # them cannot race anything this session does.
-        global _leftovers_swept
-        if not _leftovers_swept:
-            _leftovers_swept = True
-            sweep_stale_test_relations(project, _TEST_RELATION_RE, _RUN_TAG)
-            sweep_stale_test_statements(project)
-        yield
+        sweep_leftovers_once(project)
 
     @pytest.fixture(autouse=True, scope="class")
     def class_clean_up(self, project, dbt_profile_data):
