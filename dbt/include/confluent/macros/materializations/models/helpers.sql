@@ -3,7 +3,7 @@
      `distributed_by` config, or nothing if the config is unset.
      Flink only supports the HASH strategy today.
      The materialization is responsible for calling
-     `validate_distributed_by_config()` once before render — we trust the
+     `adapter.validate_distributed_by_config` once before render — we trust the
      config here. #}
   {%- set dist = config.get('distributed_by') -%}
   {%- if dist is not none -%}
