@@ -7,8 +7,8 @@
   {%- set start_mode = adapter.render_start_mode(config.get('start_mode')) -%}
   {%- set with_options = config.get('with', {}) -%}
 
-  {{ validate_distributed_by_config() }}
-  {{ validate_materialized_table_config() }}
+  {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
+  {%- do adapter.validate_materialized_table_config(config) -%}
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 

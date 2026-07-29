@@ -17,7 +17,7 @@
   {%- set with_options = {} -%}
   {%- do with_options.update(config.get('with', {})) -%}
   {%- do with_options.update({'connector': connector}) -%}
-  {% do validate_distributed_by_config() %}
+  {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
 
   -- Run hooks like in the original materializations, so we don't
   -- break any assumption made by the framework.
