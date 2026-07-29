@@ -4,7 +4,7 @@
      already warm) -- neither validator depends on the relation, so a config
      mistake should fail before any warehouse I/O, not after. #}
   {% do validate_materialization_config() %}
-  {% do validate_distributed_by_config() %}
+  {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type='table') %}
 

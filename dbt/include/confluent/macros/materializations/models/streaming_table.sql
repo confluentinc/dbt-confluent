@@ -4,7 +4,7 @@
      already warm) -- it doesn't depend on the relation, so a config mistake
      should fail before any warehouse I/O, not after. #}
   {% do validate_materialization_config() %}
-  {% do validate_distributed_by_config() %}
+  {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
 
   -- Check if the relation exists already, and precreate the target_relation
   {%- set existing_relation = load_cached_relation(this) -%}

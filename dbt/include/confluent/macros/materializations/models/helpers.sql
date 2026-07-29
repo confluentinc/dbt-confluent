@@ -18,22 +18,13 @@
 {% endmacro %}
 
 
-{% macro validate_distributed_by_config() %}
-  {# Delegate to ConfluentAdapter.validate_distributed_by_config (Python).
-     Materializations call this once at the top so downstream consumers
-     (`get_distributed_by_clause`, `check_for_schema_drift`) can read the
-     config directly without re-validating. #}
-  {% do adapter.validate_distributed_by_config(config.get('distributed_by')) %}
-{% endmacro %}
-
-
 {% macro get_distributed_by_clause() %}
   {# Render `DISTRIBUTED BY HASH(col1, ...) [INTO N BUCKETS]` from the
      `distributed_by` config, or nothing if the config is unset.
      Flink only supports the HASH strategy today.
      The materialization is responsible for calling
-     `validate_distributed_by_config()` once before render — we trust the
-     config here. #}
+     `adapter.validate_distributed_by_config()` once before render — we trust
+     the config here. #}
   {%- set dist = config.get('distributed_by') -%}
   {%- if dist is not none -%}
     {%- set columns = dist.get('columns') -%}
@@ -42,15 +33,6 @@
     {%- if buckets %} INTO {{ buckets }} BUCKETS{% endif -%}
   {%- endif -%}
 {% endmacro %}
-
-{% macro validate_materialized_table_config() %}
-  {# Delegate to ConfluentAdapter.validate_materialized_table_config (Python).
-     distributed_by is validated by validate_distributed_by_config() and
-     start_mode by adapter.render_start_mode — the materialization calls all
-     three. #}
-  {% do adapter.validate_materialized_table_config(config) %}
-{% endmacro %}
-
 
 {% macro render_with_options(with_options) %}
   {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping
