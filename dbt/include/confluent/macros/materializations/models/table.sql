@@ -16,7 +16,8 @@
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   -- build model
-  {% call statement('main', statement_name=get_statement_name()) -%}
+  {% call statement('main', execution_mode="snapshot_ddl",
+                    statement_name=get_statement_name()) -%}
     {{ get_create_table_as_sql(False, target_relation, sql) }}
   {%- endcall %}
 

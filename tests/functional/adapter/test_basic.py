@@ -29,6 +29,7 @@ from dbt.tests.util import (
     relation_from_name,
     run_dbt,
 )
+from tests.functional.adapter._helpers import get_result_by_name
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 
@@ -217,6 +218,18 @@ class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMateriali
             "swappable": "table",
         }
         check_relation_types(project.adapter, expected)
+
+        # Regression for #77: table_model's CTAS must complete on its own
+        # (snapshot mode) rather than run indefinitely (streaming mode).
+        # get_response() reports the statement's terminal phase as the
+        # result message, so this needs no post-run statement lookup (which
+        # would race the adapter's own post-execute cleanup of completed
+        # statements).
+        table_model_result = get_result_by_name(results, "table_model")
+        assert table_model_result.message == "Phase.COMPLETED", (
+            "table_model's CTAS did not complete on its own "
+            f"(message: {table_model_result.message}) -- likely submitted as a streaming query"
+        )
 
         # base table rowcount
         relation = relation_from_name(project.adapter, "base")
