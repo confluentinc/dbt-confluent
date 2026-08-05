@@ -46,6 +46,7 @@ class TestTableMaterialization(ConfluentFixtures):
         adapter's own post-execute cleanup of completed statements)."""
         results = run_dbt(["run"])
         result = get_result_by_name(results, "simple_table")
+        assert result is not None, "simple_table not found in run results"
         assert result.message == "Phase.COMPLETED", (
             "simple_table's CTAS did not complete on its own "
             f"(message: {result.message}) -- likely submitted as a streaming query"
