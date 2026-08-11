@@ -52,7 +52,8 @@
   -- artifact written to disk for `dbt show` / debugging, and so the restart
   -- path satisfies dbt's "main result" contract without renaming.
   {%- call statement('main', execution_mode="streaming_query",
-                     statement_name=get_statement_name()) -%}
+                     statement_name=get_statement_name(),
+                     statement_properties=config.get('statement_properties')) -%}
     INSERT INTO {{ target_relation }} {{ sql }}
   {%- endcall -%}
 

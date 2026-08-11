@@ -114,6 +114,7 @@ def _execute_query_with_retry(
     statement_name: str | None = None,
     statement_labels: list[str] | None = None,
     compute_pool_id: str | None = None,
+    statement_properties: dict[str, str | int | bool] | None = None,
 ):
     """Execute the cursor and retry on transient failures.
 
@@ -126,6 +127,9 @@ def _execute_query_with_retry(
     compute_pool_id: if provided, overrides the connection-default compute pool
     for this statement (per-model `compute_pool_id` config). If None, the
     connection's default compute pool is used.
+
+    statement_properties: if provided (per-model `statement_properties` config),
+    passed through to the driver as Flink SET-style statement properties.
     """
     try:
         cursor.execute(
@@ -134,6 +138,7 @@ def _execute_query_with_retry(
             statement_name=statement_name,
             statement_labels=statement_labels,
             compute_pool_id=compute_pool_id,
+            properties=statement_properties,
         )
     except retryable_exceptions as e:
         # Cease retries and fail when limit is hit.
@@ -171,6 +176,7 @@ def _execute_query_with_retry(
             statement_labels=statement_labels,
             statement_name=statement_name,
             compute_pool_id=compute_pool_id,
+            statement_properties=statement_properties,
         )
     except OperationalError as e:
         # "Statement with name X already exists" — happens when a prior
@@ -202,6 +208,7 @@ def _execute_query_with_retry(
             statement_labels=statement_labels,
             statement_name=statement_name,
             compute_pool_id=compute_pool_id,
+            statement_properties=statement_properties,
         )
 
 
@@ -232,9 +239,10 @@ class ConfluentConnectionManager(SQLConnectionManager):
         hidden: bool = False,
         statement_name: str | None = None,
         compute_pool_id: str | None = None,
+        statement_properties: dict[str, str | int | bool] | None = None,
     ) -> tuple[AdapterResponse, "agate.Table"]:
-        """This is customized so we can pass execution_mode, hidden, statement_name and
-        compute_pool_id down the chain."""
+        """This is customized so we can pass execution_mode, hidden, statement_name,
+        compute_pool_id and statement_properties down the chain."""
         from dbt_common.clients.agate_helper import empty_table
 
         sql = self._add_query_comment(sql)
@@ -245,6 +253,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
             statement_name=statement_name,
             hidden=hidden,
             compute_pool_id=compute_pool_id,
+            statement_properties=statement_properties,
         )
         response = self.get_response(cursor)
         if fetch:
@@ -266,6 +275,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         hidden: bool = False,
         statement_name: str | None = None,
         compute_pool_id: str | None = None,
+        statement_properties: dict[str, str | int | bool] | None = None,
     ) -> tuple[Connection, Any]:
         """
         Copied from upstream (in SqlConnectionManager) with handling of cursor's
@@ -278,6 +288,9 @@ class ConfluentConnectionManager(SQLConnectionManager):
         compute_pool_id: if provided (per-model `compute_pool_id` config), overrides the
         connection-default compute pool for this statement. If None, the connection's
         default compute pool (from credentials) is used.
+
+        statement_properties: if provided (per-model `statement_properties` config),
+        passed through to the driver as Flink SET-style statement properties.
         """
         connection = self.get_thread_connection()
         if auto_begin and connection.transaction_open is False:
@@ -331,6 +344,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 statement_name=statement_name,
                 statement_labels=labels,
                 compute_pool_id=compute_pool_id,
+                statement_properties=statement_properties,
             )
 
             result = self.get_response(cursor)
