@@ -131,3 +131,31 @@ class TestComputePoolForwarding:
         assert cursor.execute.call_count == 2
         for call in cursor.execute.call_args_list:
             assert call.kwargs["compute_pool_id"] == "lfcp-override"
+
+
+class TestStatementPropertiesForwarding:
+    def test_statement_properties_defaults_to_none(self):
+        """When unset, cursor.execute receives properties=None."""
+        cursor = MagicMock()
+        _run(cursor)
+        assert cursor.execute.call_args.kwargs["properties"] is None
+
+    def test_statement_properties_is_forwarded(self):
+        """A per-model statement_properties dict reaches cursor.execute as `properties`."""
+        cursor = MagicMock()
+        props = {"sql.tables.scan.idle-timeout": "30 s"}
+        _run(cursor, statement_properties=props)
+        assert cursor.execute.call_args.kwargs["properties"] == props
+
+    def test_statement_properties_preserved_across_retries(self):
+        """The same statement_properties must be passed to each cursor.execute attempt."""
+        cursor = MagicMock()
+        cursor.execute.side_effect = [
+            OperationalError("name in use", http_status_code=409),
+            None,
+        ]
+        props = {"sql.tables.scan.idle-timeout": "30 s"}
+        _run(cursor, statement_properties=props)
+        assert cursor.execute.call_count == 2
+        for call in cursor.execute.call_args_list:
+            assert call.kwargs["properties"] == props

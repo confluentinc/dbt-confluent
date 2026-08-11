@@ -151,6 +151,7 @@ class ConfluentAdapter(SQLAdapter):
         hidden: bool = False,
         statement_name: str | None = None,
         compute_pool_id: str | None = None,
+        statement_properties: dict[str, str | int | bool] | None = None,
     ) -> tuple[AdapterResponse, "agate.Table"]:
         return self.connections.execute(
             sql=sql,
@@ -161,6 +162,7 @@ class ConfluentAdapter(SQLAdapter):
             hidden=hidden,
             statement_name=statement_name,
             compute_pool_id=compute_pool_id,
+            statement_properties=statement_properties,
         )
 
     @available
