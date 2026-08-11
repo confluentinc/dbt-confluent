@@ -195,6 +195,23 @@ The same model is often deployed to different compute pools across environments 
 
 Your CI/CD pipeline sets `FLINK_COMPUTE_POOL` (and typically `statement_name`) per target, keeping a single Git source of truth.
 
+## Statement Properties
+
+Set Flink SET-style statement properties — session/execution-level configuration such as [`sql.tables.scan.idle-timeout`](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html#available-set-options), useful for e.g. tuning progressive idleness detection for a temporal join whose enrichment side rarely changes — with the `statement_properties` config on `streaming_table`:
+
+```sql
+{{ config(
+    materialized='streaming_table',
+    statement_properties={'sql.tables.scan.idle-timeout': '30 s'},
+) }}
+```
+
+This is different from `with`: `with` sets table-level WITH-clause options baked into `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that runs your query. The value is a dict of `string -> string|int|bool`, applied to `streaming_table`'s long-running INSERT statement only — never its separate DDL statement (the plain `CREATE TABLE` half), which has no query to tune. Not currently supported on `table`, `view`, or `streaming_source`; add later if a real need arises (view's `CREATE VIEW` and streaming_source's connector-attach DDL don't execute a query at creation time either, so SET-style properties wouldn't have anything to act on there — `table`'s CTAS does execute a query, so it's the more plausible future candidate).
+
+There's no adapter-side restriction on *which values* you can set — the `confluent_sql` driver validates the dict itself (`string` keys, `string|int|bool` values) and rejects it outright with a clear error if a value doesn't fit, or if a property doesn't apply to the statement it's submitted on.
+
+Three keys are driver-owned and always set automatically — `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any of them yourself fails the run with a "reserved system property" error rather than silently being ignored or overridden.
+
 ## Adopting Existing Tables and Statements
 
 If you already have a Flink pipeline running — deployed by hand, by a previous tool, or by another team — you can bring it under dbt management without recreating it. A pipeline is two things: a **table** (the relation) and a **statement** (the long-running query that populates it). Map your model to each:
