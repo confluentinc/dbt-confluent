@@ -1,4 +1,9 @@
 {%- materialization view, adapter='confluent' -%}
+  {# Pure config validation first, before load_cached_relation (which can be a
+     real INFORMATION_SCHEMA round-trip if this schema's relation cache isn't
+     already warm) -- it doesn't depend on the relation, so a config mistake
+     should fail before any warehouse I/O, not after. #}
+  {% do validate_materialization_config() %}
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type='view') -%}
 

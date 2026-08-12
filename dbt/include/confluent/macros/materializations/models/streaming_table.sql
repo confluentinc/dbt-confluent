@@ -1,4 +1,11 @@
 {% materialization streaming_table, adapter='confluent' %}
+  {# Pure config validation first, before load_cached_relation (which can be a
+     real INFORMATION_SCHEMA round-trip if this schema's relation cache isn't
+     already warm) -- it doesn't depend on the relation, so a config mistake
+     should fail before any warehouse I/O, not after. #}
+  {% do validate_materialization_config() %}
+  {% do validate_distributed_by_config() %}
+
   -- Check if the relation exists already, and precreate the target_relation
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type=this.Table) -%}
@@ -10,7 +17,6 @@
   -- instead of:
   -- config(constraints=[{"type": "custom", "expression": "WITH ('changelog.mode' = 'append')"}])
   {%- set with_options = config.get('with', {}) -%}
-  {% do validate_distributed_by_config() %}
 
   -- Run hooks like in the original materializations, so we don't break
   -- any assumption from the framework
@@ -52,7 +58,8 @@
   -- artifact written to disk for `dbt show` / debugging, and so the restart
   -- path satisfies dbt's "main result" contract without renaming.
   {%- call statement('main', execution_mode="streaming_query",
-                     statement_name=get_statement_name()) -%}
+                     statement_name=get_statement_name(),
+                     statement_properties=config.get('statement_properties')) -%}
     INSERT INTO {{ target_relation }} {{ sql }}
   {%- endcall -%}
 

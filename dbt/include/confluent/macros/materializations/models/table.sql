@@ -1,7 +1,12 @@
 {% materialization table, adapter='confluent' %}
+  {# Pure config validation first, before load_cached_relation (which can be a
+     real INFORMATION_SCHEMA round-trip if this schema's relation cache isn't
+     already warm) -- neither validator depends on the relation, so a config
+     mistake should fail before any warehouse I/O, not after. #}
+  {% do validate_materialization_config() %}
+  {% do validate_distributed_by_config() %}
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type='table') %}
-  {% do validate_distributed_by_config() %}
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
