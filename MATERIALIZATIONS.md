@@ -197,7 +197,7 @@ Your CI/CD pipeline sets `FLINK_COMPUTE_POOL` (and typically `statement_name`) p
 
 ## Statement Properties
 
-Set Flink SET-style statement properties — session/execution-level configuration such as [`sql.tables.scan.idle-timeout`](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html#available-set-options), useful for e.g. tuning progressive idleness detection for a temporal join whose enrichment side rarely changes — with the `statement_properties` config on `streaming_table`:
+Set Flink SET-style statement properties, such as `sql.tables.scan.idle-timeout`, with the `statement_properties` config, currently available only for the `streaming_table` materialization:
 
 ```sql
 {{ config(
@@ -206,11 +206,11 @@ Set Flink SET-style statement properties — session/execution-level configurati
 ) }}
 ```
 
-This is different from `with`: `with` sets table-level WITH-clause options baked into `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that runs your query. The value is a dict of `string -> string|int|bool`, applied to `streaming_table`'s long-running INSERT statement only — never its separate DDL statement (the plain `CREATE TABLE` half), which has no query to tune. Not currently supported on `table`, `view`, or `streaming_source`; add later if a real need arises (view's `CREATE VIEW` and streaming_source's connector-attach DDL don't execute a query at creation time either, so SET-style properties wouldn't have anything to act on there — `table`'s CTAS does execute a query, so it's the more plausible future candidate).
+See the [SET Statement](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html) documentation for all [available options](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html#available-set-options).
 
-There's no adapter-side restriction on *which values* you can set — the `confluent_sql` driver validates the dict itself (`string` keys, `string|int|bool` values) and rejects it outright with a clear error if a value doesn't fit, or if a property doesn't apply to the statement it's submitted on.
+This is different from `with`: `with` sets table-level WITH-clause options baked into the `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that executes the `INSERT INTO ... AS SELECT` statement. The value is a dict of `string -> string|int|bool`.
 
-Three keys are driver-owned and always set automatically — `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any of them yourself fails the run with a "reserved system property" error rather than silently being ignored or overridden.
+Three keys are reserved for use by the driver - `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any reserved properties yourself fails the run with a "reserved system property" error. Confluent Cloud Flink performs the validation of all the provided values at INSERT statement planning time.
 
 ## Adopting Existing Tables and Statements
 
