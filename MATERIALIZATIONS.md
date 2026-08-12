@@ -10,6 +10,24 @@
 | `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | `ephemeral` | Standard dbt CTE-based query fragment, not materialized in Flink. |
 
+## Config Validation
+
+Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing — e.g. `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table`), instead of the value being silently ignored.
+
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`) against the materialization you're using. Any other config key — including your own custom keys read by your own hooks or macros — is never inspected and never affected by this check.
+
+If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
+
+```sql
+{{ config(
+    materialized='table',
+    statement_properties={'my_custom_key': 'value'},  -- not really ours; used by a custom macro
+    ignore_unsupported_config=['statement_properties'],
+) }}
+```
+
+`ignore_unsupported_config` takes a list of specific key names, not a blanket on/off switch — opting out of one false positive doesn't also suppress a real mistake on a different key in the same model.
+
 ## Distributed By
 
 Confluent Flink lets you control how a table's rows are distributed across Kafka partitions with a `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause in the `CREATE TABLE` DDL. The adapter exposes this through a `distributed_by` config on `table`, `streaming_table`, and `streaming_source` models:
@@ -194,6 +212,23 @@ The same model is often deployed to different compute pools across environments 
 ```
 
 Your CI/CD pipeline sets `FLINK_COMPUTE_POOL` (and typically `statement_name`) per target, keeping a single Git source of truth.
+
+## Statement Properties
+
+Set Flink SET-style statement properties, such as `sql.tables.scan.idle-timeout`, with the `statement_properties` config, currently available only for the `streaming_table` materialization:
+
+```sql
+{{ config(
+    materialized='streaming_table',
+    statement_properties={'sql.tables.scan.idle-timeout': '30 s'},
+) }}
+```
+
+See the [SET Statement](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html) documentation for all [available options](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html#available-set-options).
+
+This is different from `with`: `with` sets table-level WITH-clause options baked into the `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that executes the `INSERT INTO ... SELECT` statement. The value is a dict of `string -> string|int|bool`.
+
+Three keys are reserved for use by the driver - `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any reserved properties yourself fails the run with a "reserved system property" error. Confluent Cloud Flink performs the validation of all the provided values at INSERT statement planning time.
 
 ## Adopting Existing Tables and Statements
 

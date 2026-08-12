@@ -4,6 +4,9 @@
 -- `statement_name` allows materializations to pass a deterministic Flink statement name.
 -- `compute_pool_id` lets a model override the connection-default compute pool; when not
 -- passed explicitly it is read from the model's `compute_pool_id` config.
+-- `statement_properties` lets a model set Flink SET-style statement properties (e.g.
+-- `sql.tables.scan.idle-timeout`); passed straight through to the driver, which validates
+-- and rejects driver-owned reserved keys itself.
 {%- macro statement(
   name=None,
   fetch_result=False,
@@ -13,7 +16,8 @@
   execution_mode=None,
   hidden=False,
   statement_name=None,
-  compute_pool_id=None
+  compute_pool_id=None,
+  statement_properties=None
 ) -%}
   {%- if execute: -%}
     {%- set compiled_code = caller() -%}
@@ -29,7 +33,7 @@
       {% if compute_pool_id is none %}
         {% set compute_pool_id = config.get("compute_pool_id", None) %}
       {% endif %}
-      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode, limit=limit, hidden=hidden, statement_name=statement_name, compute_pool_id=compute_pool_id) -%}
+      {%- set res, table = adapter.execute(compiled_code, auto_begin=auto_begin, fetch=fetch_result, execution_mode=execution_mode, limit=limit, hidden=hidden, statement_name=statement_name, compute_pool_id=compute_pool_id, statement_properties=statement_properties) -%}
     {%- elif language == 'python' -%}
       {%- set res = submit_python_job(model, compiled_code) -%}
       {#-- TODO: What should table be for python models? --#}
