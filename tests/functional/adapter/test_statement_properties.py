@@ -156,7 +156,10 @@ class TestReservedStatementPropertyRejected(ClassScopedCleanup):
     """
 
     NAME = "stmtpropsbad"
-    TABLES = ["my_streaming_source"]
+    # my_bad_properties_table's DDL (CREATE TABLE) succeeds -- only the INSERT
+    # is rejected for the reserved property -- so it leaves a real table behind
+    # and must be dropped too.
+    TABLES = ["my_streaming_source", "my_bad_properties_table"]
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):

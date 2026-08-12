@@ -230,6 +230,8 @@ This is different from `with`: `with` sets table-level WITH-clause options baked
 
 Three keys are reserved for use by the driver - `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any reserved properties yourself fails the run with a "reserved system property" error. Confluent Cloud Flink performs the validation of all the provided values at INSERT statement planning time.
 
+Changing `statement_properties` on an existing, healthy model takes effect **only** on the next `--full-refresh` or statement restart — a running statement keeps its original properties, since (like `compute_pool_id`) they're a property of the statement, not the table, and aren't part of drift detection.
+
 ## Adopting Existing Tables and Statements
 
 If you already have a Flink pipeline running — deployed by hand, by a previous tool, or by another team — you can bring it under dbt management without recreating it. A pipeline is two things: a **table** (the relation) and a **statement** (the long-running query that populates it). Map your model to each:
