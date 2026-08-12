@@ -25,6 +25,28 @@ from .utils import fetch_from_cursor
 
 logger = logging.getLogger(__name__)
 
+# Every dbt-confluent-specific config key, keyed by which materializations
+# consume it. This is a closed set we own completely -- validate_materialization_config
+# only ever inspects keys listed here, so a user's own custom config (read by
+# their own hooks/macros) is never touched or second-guessed, no matter which
+# materialization or key name they pick. Keep in sync with what each
+# materialization's Jinja actually reads (grep `config.get` under
+# macros/materializations/models/).
+_UNIVERSAL_CONFIG_KEYS = frozenset(
+    {"statement_name", "compute_pool_id", "ignore_unsupported_config"}
+)
+
+MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
+    "table": _UNIVERSAL_CONFIG_KEYS | {"distributed_by", "on_schema_drift"},
+    "view": _UNIVERSAL_CONFIG_KEYS,
+    "streaming_source": _UNIVERSAL_CONFIG_KEYS
+    | {"connector", "with", "distributed_by", "on_schema_drift"},
+    "streaming_table": _UNIVERSAL_CONFIG_KEYS
+    | {"with", "distributed_by", "on_schema_drift", "statement_properties"},
+}
+
+_ALL_CONFIG_KEYS: frozenset[str] = frozenset().union(*MATERIALIZATION_CONFIG_KEYS.values())
+
 
 @dataclass(frozen=True, eq=False, repr=False)
 class ConfluentRelation(BaseRelation):
@@ -550,6 +572,76 @@ class ConfluentAdapter(SQLAdapter):
         statement — or terminate the literal and inject arbitrary clauses.
         """
         return str(value).replace("'", "''")
+
+    @available
+    def all_confluent_config_keys(self) -> list[str]:
+        """Every dbt-confluent-specific config key any materialization recognizes.
+
+        The Jinja caller (`validate_materialization_config` in helpers.sql)
+        probes exactly these keys via `config.get(...)` -- and no others --
+        so a user's own custom config keys (read by their own hooks/macros)
+        are never inspected or second-guessed by this adapter, regardless of
+        which key name they happen to pick.
+        """
+        return sorted(_ALL_CONFIG_KEYS)
+
+    @available
+    def validate_materialization_config(
+        self, materialization: str, observed_config: dict[str, Any]
+    ) -> None:
+        """Raise CompilationError for a dbt-confluent config key set on a
+        materialization that doesn't consume it.
+
+        observed_config: every key from `all_confluent_config_keys()` that
+        this model actually set (`config.get(key) is not none`), gathered by
+        the calling Jinja macro, mapped to its configured value.
+
+        `ignore_unsupported_config` (a `config(...)` list of key name
+        strings) lets a model opt specific keys out of this check -- e.g. if
+        a key name coincidentally collides with the user's own unrelated
+        custom config read by their own hooks/macros. Deliberately list-based
+        rather than a blanket on/off switch, so opting out of one false
+        positive can't also silently swallow a real future mistake on a
+        different key in the same model.
+        """
+        allowed = MATERIALIZATION_CONFIG_KEYS.get(materialization)
+        if allowed is None:
+            return
+
+        ignore_list = observed_config.get("ignore_unsupported_config") or []
+        if not isinstance(ignore_list, list) or not all(isinstance(k, str) for k in ignore_list):
+            raise CompilationError(
+                "'ignore_unsupported_config' config must be a list of config key name strings."
+            )
+        ignored = set(ignore_list)
+
+        unsupported = sorted(
+            key for key in observed_config if key not in allowed and key not in ignored
+        )
+        if not unsupported:
+            return
+
+        violations = []
+        for key in unsupported:
+            supported_on = sorted(
+                mat for mat, keys in MATERIALIZATION_CONFIG_KEYS.items() if key in keys
+            )
+            supported_str = (
+                ", ".join(f"'{mat}'" for mat in supported_on)
+                if supported_on
+                else "no materialization"
+            )
+            violations.append(
+                f"  - '{key}' is not supported for the '{materialization}' materialization "
+                f"(supported on: {supported_str})."
+            )
+        raise CompilationError(
+            "Unsupported config:\n"
+            + "\n".join(violations)
+            + "\nIf this is intentional (e.g. a coincidental name collision with your own "
+            "custom config read by another macro), add the key to "
+            "config(ignore_unsupported_config=[...])."
+        )
 
     @available
     def validate_distributed_by_config(self, dist: object) -> None:
