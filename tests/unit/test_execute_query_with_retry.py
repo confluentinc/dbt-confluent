@@ -1,12 +1,14 @@
 """Unit tests for _execute_query_with_retry.
 
 Covers:
-- Success on first attempt (no retry).
-- Retry on existing retryable_exceptions class (ComputePoolExhaustedError).
-- Retry on OperationalError with http_status_code=409 (name-conflict
-  during async teardown of a prior statement with the same name).
-- Pass-through on OperationalError with a non-409 status code.
-- Exhaustion: re-raises after retry_limit attempts.
+- Retry behavior: success on first attempt, retry on ComputePoolExhaustedError
+  and on OperationalError with http_status_code=409 (name-conflict during
+  async teardown of a prior statement with the same name), pass-through on a
+  non-409 OperationalError, and exhaustion (re-raises after retry_limit
+  attempts).
+- Parameter forwarding: statement_name, compute_pool_id, and
+  statement_properties all reach cursor.execute() correctly and are
+  preserved across retries (each in its own Test*Forwarding class below).
 """
 
 from unittest.mock import MagicMock, patch
