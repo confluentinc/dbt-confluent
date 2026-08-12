@@ -226,7 +226,7 @@ Set Flink SET-style statement properties, such as `sql.tables.scan.idle-timeout`
 
 See the [SET Statement](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html) documentation for all [available options](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html#available-set-options).
 
-This is different from `with`: `with` sets table-level WITH-clause options baked into the `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that executes the `INSERT INTO ... AS SELECT` statement. The value is a dict of `string -> string|int|bool`.
+This is different from `with`: `with` sets table-level WITH-clause options baked into the `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that executes the `INSERT INTO ... SELECT` statement. The value is a dict of `string -> string|int|bool`.
 
 Three keys are reserved for use by the driver - `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any reserved properties yourself fails the run with a "reserved system property" error. Confluent Cloud Flink performs the validation of all the provided values at INSERT statement planning time.
 
