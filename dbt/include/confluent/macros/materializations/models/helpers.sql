@@ -1,3 +1,23 @@
+{% macro validate_materialization_config() %}
+  {# Raise a clear compile error early if a dbt-confluent config key is set on
+     a materialization that doesn't consume it (e.g. `statement_properties` on
+     `table`), instead of silently no-op'ing it. Only ever probes the closed
+     set of keys dbt-confluent itself defines (adapter.all_confluent_config_keys()),
+     so a user's own custom config -- read by their own hooks/macros -- is
+     never inspected, regardless of key name.
+     Call this once at the top of each materialization, before other config
+     reads, so a mistake here is the first thing a user sees. #}
+  {% set observed_config = {} %}
+  {% for key in adapter.all_confluent_config_keys() %}
+    {% set value = config.get(key) %}
+    {% if value is not none %}
+      {% do observed_config.update({key: value}) %}
+    {% endif %}
+  {% endfor %}
+  {% do adapter.validate_materialization_config(config.get('materialized'), observed_config) %}
+{% endmacro %}
+
+
 {% macro validate_distributed_by_config() %}
   {# Delegate to ConfluentAdapter.validate_distributed_by_config (Python).
      Materializations call this once at the top so downstream consumers
