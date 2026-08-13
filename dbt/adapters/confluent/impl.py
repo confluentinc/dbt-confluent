@@ -62,19 +62,21 @@ _START_MODE_ARITY = {
 }
 
 _START_MODE_FORMS = (
-    "FROM_BEGINNING, FROM_NOW, FROM_NOW('<interval>'), FROM_TIMESTAMP('<timestamp>'), "
-    "RESUME_OR_FROM_BEGINNING, RESUME_OR_FROM_NOW, RESUME_OR_FROM_NOW('<interval>'), "
-    "RESUME_OR_FROM_TIMESTAMP('<timestamp>')"
+    "FROM_BEGINNING, FROM_NOW, FROM_NOW(INTERVAL '<n>' <unit>), "
+    "FROM_TIMESTAMP('<timestamp>'), RESUME_OR_FROM_BEGINNING, RESUME_OR_FROM_NOW, "
+    "RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>), RESUME_OR_FROM_TIMESTAMP('<timestamp>')"
 )
 
 # A start_mode string: a keyword, optionally followed by a parenthesized
-# argument that is either a well-formed single-quoted SQL literal (quotes
-# escaped by doubling) or bare text without quotes/parens (we add the quotes).
-# Anything else — e.g. a stray quote that would terminate the rendered literal
-# early — fails the match and is rejected as invalid.
+# argument. The argument is checked lexically, not structurally: any mix of
+# well-formed single-quoted SQL literals (quotes escaped by doubling) and bare
+# word/space characters, so an interval literal like INTERVAL '7' DAY passes
+# through while a stray quote, paren, or operator — anything that could
+# terminate the rendered DDL early — fails the match. The server is the
+# authority on the argument's structure (see render_start_mode).
 _START_MODE_RE = re.compile(
     r"\s*(?P<kw>[A-Za-z_]+)\s*"
-    r"(?:\(\s*(?:'(?P<quoted>(?:[^']|'')*)'|(?P<bare>[^'()]*?))\s*\)\s*)?"
+    r"(?:\((?P<arg>(?:'(?:[^']|'')*'|[\w \t])*)\)\s*)?"
 )
 
 
@@ -838,10 +840,14 @@ class ConfluentAdapter(SQLAdapter):
         users paste from the docs): FROM_BEGINNING / RESUME_OR_FROM_BEGINNING
         (no argument), FROM_TIMESTAMP / RESUME_OR_FROM_TIMESTAMP (argument
         required), FROM_NOW / RESUME_OR_FROM_NOW (argument optional). The
-        keyword is normalized to uppercase; the argument may be given with or
-        without surrounding single quotes and is re-emitted as an escaped SQL
-        string literal. Returns '' when the config is unset; raises
-        CompilationError on anything else.
+        keyword is normalized to uppercase and its arity enforced; the
+        argument is only checked lexically (see _START_MODE_RE) and passed
+        through verbatim, because the server accepts more than a plain string
+        literal there — FROM_NOW takes an interval literal such as
+        INTERVAL '7' DAY — and is the authority on its structure. Validation
+        is eager on purpose: a bad start_mode must fail before the
+        full-refresh path drops the existing table. Returns '' when the
+        config is unset; raises CompilationError on anything else.
         """
         if value is None:
             return ""
@@ -853,9 +859,8 @@ class ConfluentAdapter(SQLAdapter):
                 f"'{value}' is not a valid value for 'start_mode'.\n"
                 f"Accepted forms are: {_START_MODE_FORMS}."
             )
-        quoted, bare = match.group("quoted"), match.group("bare")
-        arg = quoted.replace("''", "'") if quoted is not None else bare
-        if not arg:  # None (no parens) or '' (empty parens/literal)
+        arg = (match.group("arg") or "").strip()
+        if arg in ("", "''"):  # no parens, empty parens, or empty literal
             if arity == "required":
                 raise CompilationError(
                     f"'start_mode' {keyword} requires an argument, e.g. {keyword}('...')."
@@ -863,7 +868,7 @@ class ConfluentAdapter(SQLAdapter):
             return keyword
         if arity == "none":
             raise CompilationError(f"'start_mode' {keyword} does not take an argument.")
-        return f"{keyword}('{self.escape_string_literal(arg)}')"
+        return f"{keyword}({arg})"
 
     @available
     def check_schema_drift(

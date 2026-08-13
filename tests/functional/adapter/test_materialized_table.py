@@ -79,11 +79,18 @@ WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND,
 PRIMARY KEY(`order_id`) NOT ENFORCED
 """
 
+# start_mode deliberately uses an argument-bearing form: the argument is only
+# lexically checked client-side and passed through verbatim (see
+# render_start_mode), so the server must accept the rendered interval literal —
+# a bare keyword would leave that path untested. RESUME_OR_FROM_NOW(now minus
+# 7 days) covers all test data (generated seconds earlier) and keeps the same
+# RESUME_* resume-on-evolution semantics as the server default, so the
+# lifecycle assertions are unaffected.
 MT = """
 {{ config(
     materialized='materialized_table',
     distributed_by={'columns': ['order_id'], 'buckets': 4},
-    start_mode='RESUME_OR_FROM_BEGINNING',
+    start_mode="RESUME_OR_FROM_NOW(INTERVAL '7' DAY)",
     with={'key.format': 'avro-registry', 'value.format': 'avro-registry'},
 ) }}
 select order_id, price from {{ ref('__SOURCE__') }}
@@ -93,7 +100,7 @@ MT_ADDED_COLUMN = """
 {{ config(
     materialized='materialized_table',
     distributed_by={'columns': ['order_id'], 'buckets': 4},
-    start_mode='RESUME_OR_FROM_BEGINNING',
+    start_mode="RESUME_OR_FROM_NOW(INTERVAL '7' DAY)",
     with={'key.format': 'avro-registry', 'value.format': 'avro-registry'},
 ) }}
 select order_id, price, order_time from {{ ref('__SOURCE__') }}

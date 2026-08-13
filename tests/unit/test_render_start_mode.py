@@ -2,9 +2,12 @@
 
 The helper is the single validate-and-render step for the `start_mode` config
 of the materialized_table materialization: it accepts the eight documented
-Confluent forms as plain strings, normalizes the keyword to uppercase, and
-re-emits any argument as an escaped SQL string literal. The materialization
-trusts its output, so a gap here renders broken (or injectable) DDL.
+Confluent forms as plain strings, normalizes the keyword to uppercase and
+enforces its arity, and passes any parenthesized argument through verbatim
+after a lexical check (quoted literals and bare words only — the server
+validates the argument's structure, e.g. that FROM_NOW gets an interval
+literal like INTERVAL '7' DAY). The materialization trusts its output, so a
+gap here renders broken (or injectable) DDL.
 """
 
 import pytest
@@ -32,8 +35,8 @@ class TestRenderStartMode:
             ("FROM_NOW", "FROM_NOW"),
             ("RESUME_OR_FROM_BEGINNING", "RESUME_OR_FROM_BEGINNING"),
             ("RESUME_OR_FROM_NOW", "RESUME_OR_FROM_NOW"),
-            ("FROM_NOW('1 h')", "FROM_NOW('1 h')"),
-            ("RESUME_OR_FROM_NOW('2 days')", "RESUME_OR_FROM_NOW('2 days')"),
+            ("FROM_NOW(INTERVAL '1' HOUR)", "FROM_NOW(INTERVAL '1' HOUR)"),
+            ("RESUME_OR_FROM_NOW(INTERVAL '7' DAY)", "RESUME_OR_FROM_NOW(INTERVAL '7' DAY)"),
             (
                 "FROM_TIMESTAMP('2024-01-01 00:00:00')",
                 "FROM_TIMESTAMP('2024-01-01 00:00:00')",
@@ -65,9 +68,7 @@ class TestRenderStartMode:
             ("  resume_or_from_now  ", "RESUME_OR_FROM_NOW"),
             ("from_timestamp('2024-01-01 00:00:00')", "FROM_TIMESTAMP('2024-01-01 00:00:00')"),
             # whitespace around parens/argument is tolerated
-            ("FROM_NOW ( '1 h' )", "FROM_NOW('1 h')"),
-            # an unquoted argument gets quoted for the user
-            ("FROM_NOW(1 h)", "FROM_NOW('1 h')"),
+            ("FROM_NOW ( INTERVAL '1' HOUR )", "FROM_NOW(INTERVAL '1' HOUR)"),
             # empty parens collapse to the bare keyword
             ("FROM_NOW()", "FROM_NOW"),
         ],
@@ -76,16 +77,27 @@ class TestRenderStartMode:
             "surrounding_whitespace",
             "lowercase_parameterized",
             "spaced_argument",
-            "unquoted_argument",
             "empty_parens",
         ],
     )
     def test_input_is_normalized(self, adapter, value, expected):
         assert adapter.render_start_mode(value) == expected
 
-    def test_doubled_quotes_in_argument_round_trip(self, adapter):
-        """A well-formed literal with escaped quotes is preserved, not re-escaped."""
-        assert adapter.render_start_mode("FROM_NOW('it''s')") == "FROM_NOW('it''s')"
+    @pytest.mark.parametrize(
+        "value",
+        [
+            # a plain quoted string is lexically fine — the server decides
+            # whether it's an acceptable argument for the keyword
+            "FROM_NOW('1 h')",
+            # bare words without quotes pass through untouched too
+            "FROM_NOW(1 h)",
+            # a well-formed literal with escaped quotes is preserved verbatim
+            "FROM_NOW('it''s')",
+        ],
+        ids=["quoted_string", "bare_words", "doubled_quotes"],
+    )
+    def test_lexically_valid_arguments_pass_through_verbatim(self, adapter, value):
+        assert adapter.render_start_mode(value) == value
 
     @pytest.mark.parametrize(
         "value, expected_substring",
@@ -96,11 +108,14 @@ class TestRenderStartMode:
             # non-string config values stringify into the same rejection
             (True, "not a valid value for 'start_mode'"),
             (42, "not a valid value for 'start_mode'"),
-            # malformed argument: a stray quote could terminate the rendered
-            # literal early, so the whole value is rejected
+            # malformed argument: anything beyond quoted literals and bare
+            # words could break out of the rendered DDL, so the whole value
+            # is rejected
             ("FROM_NOW('1 h' OR '1'='1')", "not a valid value for 'start_mode'"),
             ("FROM_TIMESTAMP('unterminated)", "not a valid value for 'start_mode'"),
             ("FROM_NOW('1 h') garbage", "not a valid value for 'start_mode'"),
+            ("FROM_NOW(INTERVAL '1' HOUR); DROP TABLE t", "not a valid value for 'start_mode'"),
+            ("FROM_NOW(INTERVAL ('1') HOUR)", "not a valid value for 'start_mode'"),
             # arity violations
             ("FROM_BEGINNING('1 h')", "does not take an argument"),
             ("RESUME_OR_FROM_BEGINNING('1 h')", "does not take an argument"),
@@ -116,6 +131,8 @@ class TestRenderStartMode:
             "quote_injection",
             "unterminated_literal",
             "trailing_garbage",
+            "statement_injection",
+            "nested_parens",
             "forbidden_arg",
             "forbidden_arg_resume",
             "missing_required_arg",
