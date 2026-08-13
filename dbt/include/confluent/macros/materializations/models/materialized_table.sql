@@ -40,8 +40,9 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
 
   {# CREATE OR ALTER re-asserts the definition every run: the server no-ops
      an unchanged definition and evolves a changed one in place — discarding
-     processing state, so stateful models silently reset (--full-refresh is
-     the true rebuild; see MATERIALIZATIONS.md). Submitted under a per-run
+     processing state and restarting per start_mode, so stateful models on a
+     RESUME_* start_mode (the default) silently reset; see MATERIALIZATIONS.md.
+     Submitted under a per-run
      statement name: the DDL is bounded and reaped at cursor close, but a
      FAILED submission lingers and would 409-collide with a reused name. #}
   {% call statement('main', execution_mode="streaming_ddl",
