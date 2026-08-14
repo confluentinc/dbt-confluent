@@ -179,21 +179,91 @@ def _execute_query_with_retry(
             statement_properties=statement_properties,
         )
     except OperationalError as e:
-        # "Statement with name X already exists" — happens when a prior
-        # statement with the same name is still tearing down asynchronously
-        # after a DELETE. We retry until the name frees up.
-        if getattr(e, "http_status_code", None) != 409:
+        # Three transient conditions we wait out by retrying:
+        #  - "being modified": a materialized table's prior CREATE OR ALTER is
+        #    still establishing/evolving; it always settles on its own.
+        #  - "kafka topic does not exist": a recreate found the dying catalog
+        #    entry of a recently dropped relation; it clears within tens of
+        #    seconds.
+        #  - 409: a prior statement with the same name is still tearing down
+        #    asynchronously after a DELETE.
+        # "table already exists" is deliberately NOT retried: it never clears
+        # by waiting, and retrying would delay every genuine name conflict by
+        # the whole budget.
+        # Message matches are checked before the status: Confluent may surface
+        # them with a 409 too, and keying off the status would misreport (and
+        # mis-budget) them as a name-reuse race.
+        msg = str(e).lower()
+        if "table already exists" in msg:
             raise
-        if attempt >= retry_limit:
+        if "schema registry subject" in msg and (
+            "doesn't match" in msg or "does not match" in msg
+        ):
+            # Not retried: a dropped relation's Schema Registry subjects are
+            # not deleted with it, so this never clears by waiting. Typical
+            # cause: recreating a dropped relation under the same name with a
+            # differently-shaped schema — e.g. replacing a materialized table
+            # (keyed schema) with a `table` model's snapshot CTAS (keyless).
+            # The raw server message is cryptic, so append recovery guidance.
+            raise OperationalError(
+                f"{e}\nA Schema Registry subject registered by a previously "
+                f"dropped relation with this name still exists and is "
+                f"incompatible with the schema this statement would register "
+                f"(subjects are not deleted when a relation is dropped). "
+                f"Either delete the lingering subject(s) in Schema Registry "
+                f"and re-run, or give the model a different relation name "
+                f"(e.g. via an alias)."
+            ) from e
+        is_being_modified = "being modified" in msg
+        is_topic_gone = "kafka topic does not exist" in msg
+        is_409 = getattr(e, "http_status_code", None) == 409
+        if not (is_being_modified or is_topic_gone or is_409):
             raise
 
-        backoff = min(attempt * 3, 15)
-        retries_left = retry_limit - attempt
+        # The message-matched conditions are slow and variable to clear, so
+        # they get a generous dedicated budget; the 409 name-reuse race is
+        # quick and keeps the smaller default one.
+        if is_being_modified:
+            limit, backoff = max(retry_limit, 12), 10
+            reason = (
+                "Materialized table is still being modified by a prior statement "
+                "(still establishing/evolving)"
+            )
+        elif is_topic_gone:
+            limit, backoff = max(retry_limit, 12), 10
+            reason = (
+                "A recently dropped relation with this name has not finished "
+                "tearing down (its Kafka topic is already gone)"
+            )
+        else:
+            limit, backoff = retry_limit, min(attempt * 3, 15)
+            reason = (
+                f"Statement name '{statement_name}' is already in use "
+                f"(prior statement may still be tearing down)"
+            )
+        if attempt >= limit:
+            raise
+
+        # A rejection that reached the FAILED phase leaves the statement in
+        # place, still occupying statement_name — without this delete the
+        # retry would bounce off 409 name conflicts instead of seeing the
+        # condition clear. Best-effort: after an HTTP-level rejection no
+        # statement exists, and on budget exhaustion (raise above) the FAILED
+        # statement is left in place for debugging.
+        try:
+            cursor.delete_statement()
+        except Exception as cleanup_error:  # noqa: BLE001
+            fire_event(
+                AdapterEventDebug(
+                    base_msg=f"Could not delete failed statement "
+                    f"'{statement_name}' before retrying: {cleanup_error}"
+                )
+            )
+
+        retries_left = limit - attempt
         fire_event(
             AdapterEventDebug(
-                base_msg=f"Statement name '{statement_name}' is already in use "
-                f"(prior statement may still be tearing down). "
-                f"{retries_left} retries left. Retrying in {backoff} seconds."
+                base_msg=f"{reason}. {retries_left} retries left. Retrying in {backoff} seconds."
             )
         )
         time.sleep(backoff)

@@ -4,7 +4,7 @@
      already warm) -- it doesn't depend on the relation, so a config mistake
      should fail before any warehouse I/O, not after. #}
   {% do validate_materialization_config() %}
-  {% do validate_distributed_by_config() %}
+  {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
 
   -- Check if the relation exists already, and precreate the target_relation
   {%- set existing_relation = load_cached_relation(this) -%}
@@ -17,7 +17,13 @@
     {% set msg="'connector' must be specified in 'streaming_source' materialization" %}
     {% do exceptions.raise_compiler_error(msg) %}
   {% endif %}
-  {%- set with_options = config.get('with', {}) -%}
+  {# `connector` is just another WITH option in the DDL. Merging it into a
+     copy of the options dict (mandatory config wins) lets the shared renderer
+     emit the whole clause, and makes a user-supplied 'connector' key in
+     `with` harmless instead of a duplicate-key DDL error. #}
+  {%- set with_options = {} -%}
+  {%- do with_options.update(config.get('with', {})) -%}
+  {%- do with_options.update({'connector': connector}) -%}
 
   -- Run hooks like in the original materializations, so we don't
   -- break any assumption made by the framework.
@@ -45,12 +51,7 @@
     CREATE TABLE {{ target_relation }}
     ( {{ sql }})
     {{ get_distributed_by_clause() }}
-    WITH (
-      'connector' = '{{ adapter.escape_string_literal(connector) }}'
-      {%- for key, value in with_options.items() -%}
-      , '{{ adapter.escape_string_literal(key) }}' = '{{ adapter.escape_string_literal(value) }}'
-      {%- endfor -%}
-    )
+    {{ render_with_options(with_options) }}
   {%- endcall %}
 
   -- See comment above about calling hooks

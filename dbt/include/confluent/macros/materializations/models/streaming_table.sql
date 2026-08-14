@@ -4,7 +4,7 @@
      already warm) -- it doesn't depend on the relation, so a config mistake
      should fail before any warehouse I/O, not after. #}
   {% do validate_materialization_config() %}
-  {% do validate_distributed_by_config() %}
+  {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
 
   -- Check if the relation exists already, and precreate the target_relation
   {%- set existing_relation = load_cached_relation(this) -%}
@@ -44,13 +44,7 @@
       {{ get_assert_columns_equivalent(sql) }}
       {{ get_table_columns_and_constraints() }}
       {{ get_distributed_by_clause() }}
-      {% if with_options %}
-      WITH (
-        {%- for key, value in with_options.items() -%}
-        '{{ adapter.escape_string_literal(key) }}' = '{{ adapter.escape_string_literal(value) }}'{%- if not loop.last %},{%- endif %}
-        {%- endfor -%}
-      )
-      {% endif %}
+      {{ render_with_options(with_options) }}
     {%- endcall -%}
   {% endif %}
 
