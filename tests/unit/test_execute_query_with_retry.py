@@ -10,9 +10,11 @@ Covers:
   budget — pass-through on a non-409 OperationalError, and exhaustion
   (re-raises after retry_limit attempts).
 - No retry on OperationalError "table already exists": it never clears by
-  waiting (its one observed transient-looking cause was DROP TABLE
-  phantom-dropping a materialized table, fixed in drop_relation), and
-  retrying would delay every genuine name conflict by the whole budget.
+  waiting, and retrying would delay every genuine name conflict by the
+  whole budget.
+- No retry on Schema Registry subject "doesn't match" either: subjects are
+  not cleaned up when a relation is dropped, so it never clears by waiting;
+  it is re-raised immediately with recovery guidance appended.
 - Failed-statement cleanup before each retry: a FAILED statement still
   occupies its name (confluent-sql only auto-deletes pool-exhausted ones), so
   the retry path must call cursor.delete_statement() to free it — otherwise
@@ -163,6 +165,36 @@ class TestRetryBehavior:
         with pytest.raises(OperationalError):
             _run(cursor, retry_limit=2)
         assert cursor.execute.call_count == 12
+
+    def test_does_not_retry_sr_subject_mismatch_and_appends_guidance(self):
+        """ "Schema Registry subject ... doesn't match" is not retryable: a
+        dropped relation's SR subjects are not deleted with it, so it never
+        clears by waiting. It surfaces on the first attempt, re-raised with
+        recovery guidance appended (delete the subject or use a different
+        relation name) because the raw server message is cryptic."""
+        cursor = MagicMock()
+        e = OperationalError(
+            "Statement submission failed: Cannot create table because the "
+            "Schema Registry subject 'my_table-value' doesn't match the existing one."
+        )
+        cursor.execute.side_effect = e
+        with pytest.raises(OperationalError) as exc_info:
+            _run(cursor)
+        assert cursor.execute.call_count == 1
+        assert exc_info.value.__cause__ is e
+        assert str(e) in str(exc_info.value)
+        assert "delete the lingering subject" in str(exc_info.value)
+
+    def test_sr_subject_mismatch_guidance_covers_does_not_match_variant(self):
+        cursor = MagicMock()
+        cursor.execute.side_effect = OperationalError(
+            "Cannot create table because the Schema Registry subject "
+            "'my_table-value' does not match the existing one."
+        )
+        with pytest.raises(OperationalError) as exc_info:
+            _run(cursor)
+        assert cursor.execute.call_count == 1
+        assert "delete the lingering subject" in str(exc_info.value)
 
     def test_does_not_retry_table_already_exists(self):
         """ "table already exists" is not a retryable condition: it never

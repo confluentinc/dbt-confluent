@@ -204,10 +204,10 @@ def drop_any_relation(project, name):
     absent/regular/inferred cases (and deletes the table's topic).
 
     Note this only removes the *catalog* entry promptly: the backing Kafka
-    topic and its Schema Registry schemas are deleted asynchronously and can
-    linger long after (even resurfacing in the catalog as an inferred table).
-    Callers must not recreate the same relation name afterwards — the MT
-    tests use per-session unique names for exactly that reason.
+    topic is deleted asynchronously and can linger long after, and Schema
+    Registry subjects are not deleted at all. Callers must not recreate the
+    same relation name afterwards — the MT tests use per-session unique
+    names for exactly that reason.
     """
     rows = project.run_sql(
         "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "

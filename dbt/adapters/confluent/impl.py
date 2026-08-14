@@ -927,8 +927,10 @@ class ConfluentAdapter(SQLAdapter):
                 f"cannot be managed by this model's materialization. Either set "
                 f"materialized='materialized_table' on the model, or run with "
                 f"--full-refresh to drop it and recreate the relation (dropping a "
-                f"materialized table permanently deletes the backing Kafka topic, "
-                f"its data, and its Schema Registry schemas)."
+                f"materialized table permanently deletes the backing Kafka topic "
+                f"and its data; its Schema Registry subjects are NOT deleted and "
+                f"may block the recreate under the same name until removed — see "
+                f"'Switching materializations' in MATERIALIZATIONS.md)."
             )
 
         # An empty expected_columns means the drift-check temp table came back

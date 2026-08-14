@@ -196,6 +196,24 @@ def _execute_query_with_retry(
         msg = str(e).lower()
         if "table already exists" in msg:
             raise
+        if "schema registry subject" in msg and (
+            "doesn't match" in msg or "does not match" in msg
+        ):
+            # Not retried: a dropped relation's Schema Registry subjects are
+            # not deleted with it, so this never clears by waiting. Typical
+            # cause: recreating a dropped relation under the same name with a
+            # differently-shaped schema — e.g. replacing a materialized table
+            # (keyed schema) with a `table` model's snapshot CTAS (keyless).
+            # The raw server message is cryptic, so append recovery guidance.
+            raise OperationalError(
+                f"{e}\nA Schema Registry subject registered by a previously "
+                f"dropped relation with this name still exists and is "
+                f"incompatible with the schema this statement would register "
+                f"(subjects are not deleted when a relation is dropped). "
+                f"Either delete the lingering subject(s) in Schema Registry "
+                f"and re-run, or give the model a different relation name "
+                f"(e.g. via an alias)."
+            ) from e
         is_being_modified = "being modified" in msg
         is_topic_gone = "kafka topic does not exist" in msg
         is_409 = getattr(e, "http_status_code", None) == 409

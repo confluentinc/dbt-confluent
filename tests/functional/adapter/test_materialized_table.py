@@ -12,13 +12,12 @@ Notes:
   recreate. Classes that exercise the in-place evolution / no-op paths override
   project_config_update to drop that flag.
 - Each class uses unique relation names, suffixed with a per-session tag: the
-  schema (Kafka cluster) is shared, and a dropped relation's Kafka topic and
-  Schema Registry schemas outlive the catalog drop asynchronously (minutes to
-  a day-plus). Reusing a name across runs races that deletion — observed as a
-  lingering topic resurfacing as an inferred table that trips the switch
-  guard, as a recreate binding to the lingering topic's old schema ("Column
-  types of query result and sink ... do not match"), and as an in-flight
-  deletion making an existence check pass and then evaporate.
+  schema (Kafka cluster) is shared, a dropped relation's Kafka topic outlives
+  the catalog drop asynchronously (minutes to a day-plus), and its Schema
+  Registry subjects are not deleted at all. Reusing a name across runs races
+  that teardown: a recreate can bind to the lingering topic's old schema
+  ("Column types of query result and sink ... do not match"), and an
+  in-flight deletion can make an existence check pass and then evaporate.
 - Because names are never reused, leftovers from failed teardowns or
   hard-killed runs would accumulate forever. Every name therefore lives in a
   reserved namespace (`dbttest_` prefix + fixed stem + hex epoch-seconds tag)
@@ -26,8 +25,8 @@ Notes:
   _MTFixtures.sweep_leftovers and _helpers.sweep_stale_test_relations.
 - Re-running within Flink's brief establishment window is transiently rejected
   ("being modified") and retried by the adapter (unit-tested in
-  tests/unit/test_add_query_retry.py); empirically the back-to-back re-runs here
-  never hit that window, so the tests run unquarantined.
+  tests/unit/test_execute_query_with_retry.py); the back-to-back re-runs here
+  don't hit that window in practice, so the tests run unquarantined.
 """
 
 import re
@@ -352,10 +351,19 @@ class TestMaterializedTableReverseSwitch(_MTFixtures):
     by the drop-and-recreate materializations: a plain run as `table` must
     fail with a dedicated error (an MT reports TABLE_TYPE='BASE TABLE', so
     without the IS_MATERIALIZED check the drift check would pass and the run
-    would silently skip, leaving Flink maintaining the old defining query);
+    would silently skip, leaving Flink maintaining the old defining query).
+
     --full-refresh drops the MT via drop_relation's IS_MATERIALIZED pre-check
     (a plain DROP TABLE would be silently accepted but phantom-drop the MT,
-    blocking the recreate) and creates the regular table."""
+    blocking the recreate), but the recreate itself is then blocked by the
+    platform: dropping a relation does not delete its Schema Registry
+    subjects, and the `table` snapshot CTAS registers a keyless schema while
+    the MT registered a keyed one, so the lingering '<name>-value' subject is
+    incompatible. The adapter surfaces this with recovery guidance appended
+    (delete the subject, or use a different relation name); this test pins
+    that error and that the MT itself was still dropped. If Confluent starts
+    deleting subjects on drop, the expect_pass=False run below will start
+    succeeding — revisit then (the switch would just work)."""
 
     NAME = "matrevswitch"
     SRC = f"dbttest_src_revswitch_{_RUN_TAG}"
@@ -368,9 +376,7 @@ class TestMaterializedTableReverseSwitch(_MTFixtures):
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
-        # Same shape as the forward switch test, mirrored: both models keep
-        # the default distribution so the recreate under the same name
-        # tolerates the dropped MT's lingering topic.
+        # Same shape as the forward switch test, mirrored.
         yield _models(self.SRC, self.MT, MT_AFTER_SWITCH)
 
     def test_reverse_switch(self, project):
@@ -393,16 +399,25 @@ class TestMaterializedTableReverseSwitch(_MTFixtures):
         assert "materialized table" in r.message
         assert "--full-refresh" in r.message
 
-        # --full-refresh: the MT is dropped (via drop_relation's pre-check)
-        # and a regular table is created in its place.
-        results = run_dbt(["run", "--full-refresh", "-s", self.MT])
-        assert all(r.status.name == "Success" for r in results)
+        # --full-refresh: the MT is dropped (via drop_relation's pre-check),
+        # then the snapshot CTAS is rejected against the MT's lingering
+        # Schema Registry subject (see class docstring) and the adapter
+        # surfaces the enriched, actionable error.
+        results = run_dbt(["run", "--full-refresh", "-s", self.MT], expect_pass=False)
+        r = get_result_by_name(results, self.MT)
+        assert r is not None
+        assert r.status.name == "Error"
+        assert "Schema Registry subject" in r.message
+        assert "delete the lingering subject" in r.message
+
+        # The MT itself is gone — the guard and the MT drop routing worked;
+        # only the platform-blocked recreate failed.
         row = project.run_sql(
             "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "
             f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{self.MT}'",
             fetch="one",
         )
-        assert row is not None and row[0][0] == "NO"
+        assert not row
 
 
 # -- Invalid config models --
