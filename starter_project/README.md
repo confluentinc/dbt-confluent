@@ -22,6 +22,8 @@ cd starter_project
 
 Export this static configuration info to your shell's environment.
 
+_This will point your dbt project to the test environment in the Flink is Fine org, where we have a dedicated cluster and compute pool for this bug bash (each named 2026-08-bug-bash-dbt-mt)._
+
 ```bash
 # `cc-tools` can inject `uv` config that overrides package index
 # resolution and breaks a plain `uv sync`. Sidestep it for this session:
@@ -35,7 +37,7 @@ export CONFLUENT_CLOUD_REGION=us-east-2
 export CONFLUENT_TEST_DBNAME=2026-08-bug-bash-dbt-mt
 ```
 
-Then make sure you have a Flink API key or Global API Key exported. You will need to fill in your own values for these variables:
+Then make sure you have a Flink API key or Global API Key for the "Flink is Fine" organization exported:
 
 ```bash
 export CONFLUENT_FLINK_API_KEY=<your-api-key>
