@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: source_values
+    constraints:
+      - type: primary_key
+        columns: [id]
+        expression: "not enforced"
+    columns:
+      - name: id
+        data_type: int
+        constraints:
+          - type: not_null
+      - name: val
+        data_type: int

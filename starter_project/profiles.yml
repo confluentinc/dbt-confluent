@@ -1,0 +1,17 @@
+example:
+  target: default
+  outputs:
+    default:
+      type: confluent
+      threads: 1
+      host: "https://flink.{{ env_var('CONFLUENT_CLOUD_REGION') }}.{{ env_var('CONFLUENT_CLOUD_PROVIDER') }}.confluent.cloud"
+      cloud_provider: "{{ env_var('CONFLUENT_CLOUD_PROVIDER') }}"
+      cloud_region: "{{ env_var('CONFLUENT_CLOUD_REGION') }}"
+      compute_pool_id: "{{ env_var('CONFLUENT_COMPUTE_POOL_ID') }}"
+      organization_id: "{{ env_var('CONFLUENT_ORG_ID') }}"
+      flink_api_key: "{{ env_var('CONFLUENT_FLINK_API_KEY') }}"
+      flink_api_secret: "{{ env_var('CONFLUENT_FLINK_API_SECRET') }}"
+      database: "{{ env_var('CONFLUENT_ENV_ID') }}"
+      schema: "{{ env_var('CONFLUENT_TEST_DBNAME') }}"
+      statement_name_prefix: "2026-08-bug-bash-dbt-mt-{{ env_var('BUGBASH_USER', env_var('USER')) }}-"
+      statement_label: "2026-08-bug-bash-dbt-mt-{{ env_var('BUGBASH_USER', env_var('USER')) }}"
