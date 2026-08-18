@@ -197,7 +197,7 @@ class TestMaterializedTable(_MTFixtures):
         # Regression for #81: a model with no contract enforced must keep
         # rendering a plain `AS SELECT` — no explicit column-definition or
         # PRIMARY KEY block should be emitted.
-        ddl_rows = project.run_sql(f"SHOW CREATE TABLE {self.MT}", fetch="all")
+        ddl_rows = project.run_sql(f"SHOW CREATE MATERIALIZED TABLE {self.MT}", fetch="all")
         ddl = ddl_rows[0][0]
         assert "PRIMARY KEY" not in ddl.upper(), (
             f"Materialized table without a contract should not have a PRIMARY KEY:\n{ddl}"
@@ -267,7 +267,7 @@ class TestMaterializedTableWithContract(_MTFixtures):
             "dbt run failed for a materialized_table with an enforced contract"
         )
 
-        ddl_rows = project.run_sql(f"SHOW CREATE TABLE {self.MT}", fetch="all")
+        ddl_rows = project.run_sql(f"SHOW CREATE MATERIALIZED TABLE {self.MT}", fetch="all")
         ddl = ddl_rows[0][0]
         assert f"PRIMARY KEY (`{MT_CONTRACT_PK_COLUMN}`) NOT ENFORCED" in ddl, (
             f"Expected primary key constraint not found in materialized table DDL:\n{ddl}"
