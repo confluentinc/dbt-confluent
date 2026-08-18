@@ -249,6 +249,38 @@ def sweep_stale_test_relations(project, pattern, current_tag, min_age=SWEEP_MIN_
         drop_any_relation(project, row[0])
 
 
+def capture_submitted_statement_properties(monkeypatch):
+    """Patch ConfluentConnectionManager.add_query to record every submitted
+    statement's properties, keyed by its (sanitized) statement name, as the
+    caller's `dbt run` executes.
+
+    Some statements are reaped (deleted server-side) the instant they
+    complete -- e.g. materialized_table's DDL, submitted under a per-run name
+    and deleted by the driver as soon as the CREATE OR ALTER finishes (see
+    materialized_table.sql) -- so a post-hoc get_statement() lookup after
+    `dbt run` returns would always 404. Capturing properties here, at
+    add_query's return (after the statement is submitted but before the
+    caller's execute() wrapper closes the cursor and triggers that deletion),
+    is the only way to observe them.
+
+    Returns the dict that accumulates {statement_name: properties} as the
+    run proceeds; call after `run_dbt` and filter by name substring to find
+    the model(s) of interest.
+    """
+    from dbt.adapters.confluent.connections import ConfluentConnectionManager
+
+    captured: dict[str, dict] = {}
+    original_add_query = ConfluentConnectionManager.add_query
+
+    def add_query_and_capture(self, sql, *args, **kwargs):
+        connection, cursor = original_add_query(self, sql, *args, **kwargs)
+        captured[cursor.statement.name] = dict(cursor.statement.properties)
+        return connection, cursor
+
+    monkeypatch.setattr(ConfluentConnectionManager, "add_query", add_query_and_capture)
+    return captured
+
+
 def sweep_stale_test_statements(
     project, prefix="dbt-adapter-test-", min_age=SWEEP_MIN_AGE_SECONDS
 ):
