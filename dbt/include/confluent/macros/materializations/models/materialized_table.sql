@@ -48,6 +48,11 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
   {% call statement('main', execution_mode="streaming_ddl",
                     statement_name=get_statement_name('-' ~ invocation_id)) -%}
     CREATE OR ALTER MATERIALIZED TABLE {{ target_relation }}
+    {% set contract_config = config.get('contract') %}
+    {% if contract_config.enforced %}
+      {{ get_assert_columns_equivalent(sql) }}
+      {{ get_table_columns_and_constraints() }}
+    {% endif %}
     {{ get_distributed_by_clause() }}
     {{ render_with_options(with_options) }}
     {%- if start_mode %}

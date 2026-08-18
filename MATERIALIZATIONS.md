@@ -110,6 +110,8 @@ If you drop relations outside dbt, note that a materialized table must be droppe
 
 `freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error.
 
+**Contracts and primary keys**: with `config(contract={'enforced': true})` and an explicit `columns:`/`constraints:` block in the model's schema.yml, `materialized_table` renders an explicit column-definition list — including a `PRIMARY KEY (...) NOT ENFORCED` clause from a model-level `primary_key` constraint — ahead of `DISTRIBUTED BY`/`WITH`/`START_MODE` in the submitted `CREATE OR ALTER MATERIALIZED TABLE (cols..., PRIMARY KEY(...) NOT ENFORCED) ... AS SELECT ...`, matching Confluent's materialized-table grammar. This is what makes the resulting table usable in **snapshot queries** against its key. As with `table` (see [Config Validation](#config-validation)), the contract's declared columns are checked against the model's compiled SQL and a mismatch fails the run before any DDL is submitted. Without an enforced contract, the materialization keeps rendering a plain `AS SELECT` with no explicit column list, exactly as before.
+
 **Switching materializations**: an existing regular table or view cannot be converted to a materialized table, and a materialized table cannot be adopted by the drop-and-recreate materializations. The adapter detects both switches before submitting anything, and both resolve the same way:
 
 - *To* `materialized_table`: a plain run fails with guidance; `--full-refresh` drops the existing relation (and its Flink statements) through the regular drop path, then creates the materialized table.
