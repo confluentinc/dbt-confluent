@@ -20,9 +20,16 @@ cd starter_project
 
 ## 2. Setup your environment
 
-Export this static configuration info to your shell's environment.
+We have dedicated testing infra setup in the Flink is Fine organization for this bug bash (though squatting in the existing TableAPI env).
 
-_This will point your dbt project to the test environment in the Flink is Fine org, where we have a dedicated cluster and compute pool for this bug bash (each named 2026-08-bug-bash-dbt-mt)._
+You can access this infra in the web UI with the links below, which may be useful during the bug bash:
+
+- **Organization:** Flink is Fine / 7c210ed4-6e1e-4355-abf9-b25e25a8b25a (Ask the bug-bash helpers if you don't have access)
+- **Environment:** [TableAPI / env-d0v2k7](https://confluent.cloud/environments/env-d0v2k7/overview?tab=cloud)
+- **Cluster:** [2026-08-bug-bash-dbt-mt / lkc-6koqqv6](https://confluent.cloud/environments/env-d0v2k7/clusters/lkc-6koqqv6/overview)
+- **Compute Pool:** [2026-08-bug-bash-dbt-mt / lfcp-j58nndq](https://confluent.cloud/environments/env-d0v2k7/flink/pools/lfcp-j58nndq/overview)
+
+Export these environemnt variables to point DBT at this test infra:
 
 ```bash
 # `cc-tools` can inject `uv` config that overrides package index
@@ -46,7 +53,7 @@ export CONFLUENT_FLINK_API_SECRET=<your-api-secret>
 
 _You can make a new key at https://confluent.cloud/settings/api-keys if needed (ensuring you're in the Flink is Fine org)._
 
-## 2. Install dependencies
+## 3. Install dependencies
 
 This command will switch to the repo root temporarily & install required python dependencies:
 
