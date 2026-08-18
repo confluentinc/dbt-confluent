@@ -1,14 +1,20 @@
 {% materialization materialized_table, adapter='confluent' %}
-  {%- set existing_relation = load_cached_relation(this) -%}
-  {%- set target_relation = this.incorporate(type=this.Table) %}
+  {# Pure config validation first, before load_cached_relation (which can be a
+     real INFORMATION_SCHEMA round-trip if this schema's relation cache isn't
+     already warm) -- none of these validators depend on the relation, so a
+     config mistake should fail before any warehouse I/O, not after. #}
+  {% do validate_materialization_config() %}
 
   {# Validates and renders in one step ('' when unset) — must run up here so a
      bad start_mode fails before the full-refresh drop below. #}
   {%- set start_mode = adapter.render_start_mode(config.get('start_mode')) -%}
-  {%- set with_options = config.get('with', {}) -%}
 
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
   {%- do adapter.validate_materialized_table_config(config) -%}
+
+  {%- set existing_relation = load_cached_relation(this) -%}
+  {%- set target_relation = this.incorporate(type=this.Table) %}
+  {%- set with_options = config.get('with', {}) -%}
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
@@ -44,9 +50,13 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
      RESUME_* start_mode (the default) silently reset; see MATERIALIZATIONS.md.
      Submitted under a per-run
      statement name: the DDL is bounded and reaped at cursor close, but a
-     FAILED submission lingers and would 409-collide with a reused name. #}
+     FAILED submission lingers and would 409-collide with a reused name.
+     statement_properties applies here (not a separate INSERT, unlike
+     streaming_table) since this single statement is what runs the model's
+     query. #}
   {% call statement('main', execution_mode="streaming_ddl",
-                    statement_name=get_statement_name('-' ~ invocation_id)) -%}
+                    statement_name=get_statement_name('-' ~ invocation_id),
+                    statement_properties=config.get('statement_properties')) -%}
     CREATE OR ALTER MATERIALIZED TABLE {{ target_relation }}
     {% set contract_config = config.get('contract') %}
     {% if contract_config.enforced %}

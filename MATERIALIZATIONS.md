@@ -7,15 +7,15 @@
 | `table` | Creates a table via `CREATE TABLE ... AS SELECT` (CTAS). Runs in snapshot mode — the query executes once and completes. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
 | `view` | Drop-and-recreate view. |
 | `streaming_table` | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
-| `materialized_table` | Creates and maintains a Flink materialized table via `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. Each run re-asserts the definition and Flink reconciles it: a new table is created, any change (columns, data types, `WITH` options, or query logic) is evolved **in place**, and an unchanged definition is a server-side no-op. `--full-refresh` drops and recreates (permanently deleting the backing topic and its data). Supports `config(distributed_by={...}, with={...}, start_mode='...')`. |
+| `materialized_table` | Creates and maintains a Flink materialized table via `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. Each run re-asserts the definition and Flink reconciles it: a new table is created, any change (columns, data types, `WITH` options, or query logic) is evolved **in place**, and an unchanged definition is a server-side no-op. `--full-refresh` drops and recreates (permanently deleting the backing topic and its data). Supports `config(distributed_by={...}, with={...}, start_mode='...', statement_properties={...})`. |
 | `streaming_source` | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | `ephemeral` | Standard dbt CTE-based query fragment, not materialized in Flink. |
 
 ## Config Validation
 
-Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing — e.g. `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table`), instead of the value being silently ignored.
+Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing — e.g. `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
 
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`) against the materialization you're using. Any other config key — including your own custom keys read by your own hooks or macros — is never inspected and never affected by this check.
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`) against the materialization you're using. Any other config key — including your own custom keys read by your own hooks or macros — is never inspected and never affected by this check.
 
 If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
 
@@ -107,8 +107,9 @@ If you drop relations outside dbt, note that a materialized table must be droppe
 - `distributed_by` — a `{'columns': [...], 'buckets': N}` mapping, same shape and validation as the other materializations (see [Distributed By](#distributed-by)). Confluent's materialized-table grammar documents `DISTRIBUTED BY (...)` without `HASH`; the adapter emits `DISTRIBUTED BY HASH(...)`, which works in practice.
 - `with` — table options, e.g. `{'key.format': 'avro-registry'}`.
 - `start_mode` — where the query starts (or, on an in-place evolution, restarts) reading. It applies when the table is created **and is re-applied on every evolution** — e.g. `FROM_BEGINNING` reprocesses the full input history after each definition change (see the stateful-queries warning above). All eight documented forms are accepted (default: `RESUME_OR_FROM_BEGINNING`): `FROM_BEGINNING`, `FROM_NOW`, `RESUME_OR_FROM_BEGINNING`, `RESUME_OR_FROM_NOW`, `FROM_TIMESTAMP('<timestamp>')`, `RESUME_OR_FROM_TIMESTAMP('<timestamp>')`, `FROM_NOW(INTERVAL '<n>' <unit>)`, `RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>)`. The adapter validates the keyword and its arity but passes the parenthesized argument through verbatim (after rejecting anything that could break out of the DDL — stray quotes, parens, operators); the server validates the argument itself. Note that `FROM_NOW`/`RESUME_OR_FROM_NOW` require a full interval literal — `FROM_NOW(INTERVAL '7' DAY)` — not a plain quoted string, despite what some Confluent docs examples currently show.
+- `statement_properties` — Flink SET-style statement properties for the `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT` statement (e.g. tuning a temporal join's scan idle-timeout). See [Statement Properties](#statement-properties).
 
-`freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error.
+`freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error. Any other dbt-confluent config key this materialization doesn't read (e.g. `connector`, `on_schema_drift`) is also rejected — see [Config Validation](#config-validation).
 
 **Contracts and primary keys**: with `config(contract={'enforced': true})` and an explicit `columns:`/`constraints:` block in the model's schema.yml, `materialized_table` renders an explicit column-definition list — including a `PRIMARY KEY (...) NOT ENFORCED` clause from a model-level `primary_key` constraint — ahead of `DISTRIBUTED BY`/`WITH`/`START_MODE` in the submitted `CREATE OR ALTER MATERIALIZED TABLE (cols..., PRIMARY KEY(...) NOT ENFORCED) ... AS SELECT ...`, matching Confluent's materialized-table grammar. This is what makes the resulting table usable in **snapshot queries** against its key. As with `table` (see [Config Validation](#config-validation)), the contract's declared columns are checked against the model's compiled SQL and a mismatch fails the run before any DDL is submitted. Without an enforced contract, the materialization keeps rendering a plain `AS SELECT` with no explicit column list, exactly as before.
 
@@ -259,7 +260,7 @@ Your CI/CD pipeline sets `FLINK_COMPUTE_POOL` (and typically `statement_name`) p
 
 ## Statement Properties
 
-Set Flink SET-style statement properties, such as `sql.tables.scan.idle-timeout`, with the `statement_properties` config, currently available only for the `streaming_table` materialization:
+Set Flink SET-style statement properties, such as `sql.tables.scan.idle-timeout`, with the `statement_properties` config, available on the `streaming_table` and `materialized_table` materializations:
 
 ```sql
 {{ config(
@@ -270,11 +271,11 @@ Set Flink SET-style statement properties, such as `sql.tables.scan.idle-timeout`
 
 See the [SET Statement](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html) documentation for all [available options](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html#available-set-options).
 
-This is different from `with`: `with` sets table-level WITH-clause options baked into the `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that executes the `INSERT INTO ... SELECT` statement. The value is a dict of `string -> string|int|bool`.
+This is different from `with`: `with` sets table-level WITH-clause options baked into the `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that runs the model's query — `streaming_table`'s long-running `INSERT INTO ... SELECT`, or `materialized_table`'s `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. The value is a dict of `string -> string|int|bool`.
 
-Three keys are reserved for use by the driver - `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any reserved properties yourself fails the run with a "reserved system property" error. Confluent Cloud Flink performs the validation of all the provided values at INSERT statement planning time.
+Three keys are reserved for use by the driver - `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any reserved properties yourself fails the run with a "reserved system property" error. Confluent Cloud Flink performs the validation of all the provided values at statement planning time.
 
-Changing `statement_properties` on an existing, healthy model takes effect **only** on the next `--full-refresh` or statement restart — a running statement keeps its original properties, since (like `compute_pool_id`) they're a property of the statement, not the table, and aren't part of drift detection.
+Changing `statement_properties` on an existing, healthy `streaming_table` takes effect **only** on the next `--full-refresh` or statement restart — a running statement keeps its original properties, since (like `compute_pool_id`) they're a property of the statement, not the table, and aren't part of drift detection. `materialized_table` has no such lag: every run resubmits a fresh `CREATE OR ALTER` statement under a new per-run name (see [Deterministic Statement Names](#deterministic-statement-names)), so a changed value takes effect on the very next run.
 
 ## Adopting Existing Tables and Statements
 
