@@ -85,10 +85,8 @@ Note that all models & their associated tables are namespaced by the current use
 
 If you got this far, congrats! You're ready to make and run some DBT models of your own. Here's a few basics:
 
-| Command | What it does |
-| --- | --- |
-| `dbt run` | Build all models in the project. |
-| `dbt run -s <model_name>` | Select just one model to run instead of the whole project |
-| `dbt run -s +<model_name>` | Also build anything that model `ref()`s first — use this the first time you touch a model whose dependency doesn't exist yet |
-| `dbt run -s <model_name>+` | Also build anything downstream of the selected model — useful for e.g. reprocessing workflows |
-| `dbt run --full-refresh ...` | Drops and recreates instead of evolving in place. Useful you need to make a breaking schema change that can't be made in-place. |
+- **`dbt run`:** Build all models in the project.
+- **`dbt run -s <model_name>`:** Select just one model to run instead of the whole project
+- **`dbt run -s +<model_name>`:** Also build anything that model `ref()`s first — use this the first time you touch a model whose dependency doesn't exist yet
+- **`dbt run -s <model_name>+`:** Also build anything downstream of the selected model — useful for e.g. reprocessing workflows
+- **`dbt run --full-refresh ...`:** Drops and recreates instead of evolving in place. Useful when you need to make a breaking schema change that can't be made in-place.
