@@ -36,6 +36,7 @@ import pytest
 
 from dbt.tests.util import relation_from_name, run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
+    capture_submitted_statement_properties,
     delete_statements_by_label,
     drop_any_relation,
     get_result_by_name,
@@ -57,7 +58,8 @@ _RUN_TAG = format(int(time.time()), "08x")
 # name a human or another tool would plausibly pick: literal reserved prefix,
 # one of the fixed stems, and the hex session tag.
 _TEST_RELATION_RE = re.compile(
-    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch)_(?P<tag>[0-9a-f]{8})$"
+    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch"
+    r"|stmtprops|stmtpropstuned|stmtpropsplain)_(?P<tag>[0-9a-f]{8})$"
 )
 
 # A bounded faker source (number-of-rows) so the MT refresh settles quickly.
@@ -481,3 +483,101 @@ class TestMaterializedTableInvalidConfig(ConfluentFixtures):
         )
         assert "not a valid value for 'start_mode'" in msg("mt_start_mode")
         assert "must be a positive integer" in msg("mt_dist")
+
+
+# -- Statement properties --
+
+IDLE_TIMEOUT_PROPERTY = "sql.tables.scan.idle-timeout"
+IDLE_TIMEOUT_VALUE = "30 s"
+
+# Same distributed_by/with shape as MT above (a known-working combination for
+# this materialization) -- materialized_table has a single statement (the
+# CREATE OR ALTER itself) to target, unlike streaming_table's separate DDL +
+# long-running INSERT.
+MT_TUNED_STATEMENT_PROPERTIES = f"""
+{{{{ config(
+    materialized='materialized_table',
+    distributed_by={{'columns': ['order_id'], 'buckets': 4}},
+    with={{'key.format': 'avro-registry', 'value.format': 'avro-registry'}},
+    statement_properties={{'{IDLE_TIMEOUT_PROPERTY}': '{IDLE_TIMEOUT_VALUE}'}},
+) }}}}
+select order_id, price from {{{{ ref('__SOURCE__') }}}}
+"""
+
+MT_PLAIN_STATEMENT_PROPERTIES = """
+{{ config(
+    materialized='materialized_table',
+    distributed_by={'columns': ['order_id'], 'buckets': 4},
+    with={'key.format': 'avro-registry', 'value.format': 'avro-registry'},
+) }}
+select order_id, price from {{ ref('__SOURCE__') }}
+"""
+
+
+class TestMaterializedTableStatementProperties(_MTFixtures):
+    """`statement_properties` is wired into materialized_table's single DDL
+    statement (there's no separate INSERT to target, unlike streaming_table
+    -- see tests/functional/adapter/test_statement_properties.py).
+
+    That DDL statement is submitted under a unique per-run name and reaped by
+    the driver the instant the CREATE OR ALTER completes (see
+    materialized_table.sql / MATERIALIZATIONS.md#deterministic-statement-names),
+    so a post-run get_statement() lookup would always 404. Its properties are
+    captured mid-flight instead, via capture_submitted_statement_properties.
+    """
+
+    NAME = "mtstmtprops"
+    SRC = f"dbttest_src_stmtprops_{_RUN_TAG}"
+    MT_TUNED = f"dbttest_mt_stmtpropstuned_{_RUN_TAG}"
+    MT_PLAIN = f"dbttest_mt_stmtpropsplain_{_RUN_TAG}"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            f"{self.SRC}.sql": SOURCE,
+            f"{self.MT_TUNED}.sql": MT_TUNED_STATEMENT_PROPERTIES.replace("__SOURCE__", self.SRC),
+            f"{self.MT_PLAIN}.sql": MT_PLAIN_STATEMENT_PROPERTIES.replace("__SOURCE__", self.SRC),
+        }
+
+    @pytest.fixture(autouse=True, scope="class")
+    def class_clean_up(self, project, dbt_profile_data):
+        yield
+        for mt in (self.MT_TUNED, self.MT_PLAIN):
+            drop_any_relation(project, mt)
+        delete_statements_by_label(project, _statement_label(dbt_profile_data))
+        project.run_sql(f"drop table if exists {self.SRC}")
+
+    def test_statement_properties_land_on_the_ddl_statement(self, project, monkeypatch):
+        captured = capture_submitted_statement_properties(monkeypatch)
+
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results)
+
+        # Flink statement names are sanitized (underscores -> hyphens; see
+        # dbt.adapters.confluent.naming.sanitize_statement_name), so match
+        # against the hyphenated form of each relation name.
+        tuned_marker = self.MT_TUNED.replace("_", "-")
+        plain_marker = self.MT_PLAIN.replace("_", "-")
+
+        [tuned_properties] = [
+            properties for name, properties in captured.items() if tuned_marker in name
+        ]
+        assert tuned_properties.get(IDLE_TIMEOUT_PROPERTY) == IDLE_TIMEOUT_VALUE, (
+            f"Expected '{IDLE_TIMEOUT_PROPERTY}' on {self.MT_TUNED}'s DDL statement, "
+            f"got properties: {tuned_properties}"
+        )
+
+        # Control: a model that never sets `statement_properties` must NOT
+        # show our configured value for the same key. Without this, the
+        # assertion above could pass by coincidence if Flink's default
+        # idle-timeout ever happened to equal IDLE_TIMEOUT_VALUE, rather than
+        # because our plumbing actually threaded the configured value through.
+        [plain_properties] = [
+            properties for name, properties in captured.items() if plain_marker in name
+        ]
+        assert plain_properties.get(IDLE_TIMEOUT_PROPERTY) != IDLE_TIMEOUT_VALUE, (
+            f"{self.MT_PLAIN}'s DDL statement (no statement_properties configured) reports "
+            f"{IDLE_TIMEOUT_PROPERTY}={IDLE_TIMEOUT_VALUE!r}, the same value the tuned model "
+            f"configures explicitly -- that assertion wouldn't actually prove our config took "
+            f"effect. Got properties: {plain_properties}"
+        )

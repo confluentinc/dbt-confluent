@@ -44,9 +44,13 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
      RESUME_* start_mode (the default) silently reset; see MATERIALIZATIONS.md.
      Submitted under a per-run
      statement name: the DDL is bounded and reaped at cursor close, but a
-     FAILED submission lingers and would 409-collide with a reused name. #}
+     FAILED submission lingers and would 409-collide with a reused name.
+     statement_properties applies here (not a separate INSERT, unlike
+     streaming_table) since this single statement is what runs the model's
+     query. #}
   {% call statement('main', execution_mode="streaming_ddl",
-                    statement_name=get_statement_name('-' ~ invocation_id)) -%}
+                    statement_name=get_statement_name('-' ~ invocation_id),
+                    statement_properties=config.get('statement_properties')) -%}
     CREATE OR ALTER MATERIALIZED TABLE {{ target_relation }}
     {{ get_distributed_by_clause() }}
     {{ render_with_options(with_options) }}
