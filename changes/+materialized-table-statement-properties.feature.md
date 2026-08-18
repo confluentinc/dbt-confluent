@@ -1,0 +1,1 @@
+Add `statement_properties` config support for the `materialized_table` materialization, matching the `streaming_table` support added in #76. Sets Flink SET-style statement properties (e.g. `sql.tables.scan.idle-timeout`) on the `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT` statement. See MATERIALIZATIONS.md.

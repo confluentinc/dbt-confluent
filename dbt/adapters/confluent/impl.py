@@ -44,6 +44,8 @@ MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
     | {"connector", "with", "distributed_by", "on_schema_drift"},
     "streaming_table": _UNIVERSAL_CONFIG_KEYS
     | {"with", "distributed_by", "on_schema_drift", "statement_properties"},
+    "materialized_table": _UNIVERSAL_CONFIG_KEYS
+    | {"with", "distributed_by", "start_mode", "statement_properties"},
 }
 
 _ALL_CONFIG_KEYS: frozenset[str] = frozenset().union(*MATERIALIZATION_CONFIG_KEYS.values())
@@ -829,7 +831,8 @@ class ConfluentAdapter(SQLAdapter):
             raise CompilationError(
                 f"'{keys}' {verb} not supported by the 'materialized_table' "
                 f"materialization for Confluent Flink.\n"
-                f"Supported config options are: distributed_by, with, start_mode."
+                f"Supported config options are: distributed_by, with, start_mode, "
+                f"statement_properties."
             )
 
     @available
