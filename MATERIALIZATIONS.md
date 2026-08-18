@@ -13,9 +13,9 @@
 
 ## Config Validation
 
-Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing — e.g. `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table`), instead of the value being silently ignored.
+Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing — e.g. `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
 
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`) against the materialization you're using. Any other config key — including your own custom keys read by your own hooks or macros — is never inspected and never affected by this check.
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`) against the materialization you're using. Any other config key — including your own custom keys read by your own hooks or macros — is never inspected and never affected by this check.
 
 If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
 
@@ -109,7 +109,7 @@ If you drop relations outside dbt, note that a materialized table must be droppe
 - `start_mode` — where the query starts (or, on an in-place evolution, restarts) reading. It applies when the table is created **and is re-applied on every evolution** — e.g. `FROM_BEGINNING` reprocesses the full input history after each definition change (see the stateful-queries warning above). All eight documented forms are accepted (default: `RESUME_OR_FROM_BEGINNING`): `FROM_BEGINNING`, `FROM_NOW`, `RESUME_OR_FROM_BEGINNING`, `RESUME_OR_FROM_NOW`, `FROM_TIMESTAMP('<timestamp>')`, `RESUME_OR_FROM_TIMESTAMP('<timestamp>')`, `FROM_NOW(INTERVAL '<n>' <unit>)`, `RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>)`. The adapter validates the keyword and its arity but passes the parenthesized argument through verbatim (after rejecting anything that could break out of the DDL — stray quotes, parens, operators); the server validates the argument itself. Note that `FROM_NOW`/`RESUME_OR_FROM_NOW` require a full interval literal — `FROM_NOW(INTERVAL '7' DAY)` — not a plain quoted string, despite what some Confluent docs examples currently show.
 - `statement_properties` — Flink SET-style statement properties for the `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT` statement (e.g. tuning a temporal join's scan idle-timeout). See [Statement Properties](#statement-properties).
 
-`freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error.
+`freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error. Any other dbt-confluent config key this materialization doesn't read (e.g. `connector`, `on_schema_drift`) is also rejected — see [Config Validation](#config-validation).
 
 **Switching materializations**: an existing regular table or view cannot be converted to a materialized table, and a materialized table cannot be adopted by the drop-and-recreate materializations. The adapter detects both switches before submitting anything, and both resolve the same way:
 

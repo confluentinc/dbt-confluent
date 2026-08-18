@@ -44,6 +44,8 @@ MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
     | {"connector", "with", "distributed_by", "on_schema_drift"},
     "streaming_table": _UNIVERSAL_CONFIG_KEYS
     | {"with", "distributed_by", "on_schema_drift", "statement_properties"},
+    "materialized_table": _UNIVERSAL_CONFIG_KEYS
+    | {"with", "distributed_by", "start_mode", "statement_properties"},
 }
 
 _ALL_CONFIG_KEYS: frozenset[str] = frozenset().union(*MATERIALIZATION_CONFIG_KEYS.values())

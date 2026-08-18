@@ -1,14 +1,20 @@
 {% materialization materialized_table, adapter='confluent' %}
-  {%- set existing_relation = load_cached_relation(this) -%}
-  {%- set target_relation = this.incorporate(type=this.Table) %}
+  {# Pure config validation first, before load_cached_relation (which can be a
+     real INFORMATION_SCHEMA round-trip if this schema's relation cache isn't
+     already warm) -- none of these validators depend on the relation, so a
+     config mistake should fail before any warehouse I/O, not after. #}
+  {% do validate_materialization_config() %}
 
   {# Validates and renders in one step ('' when unset) — must run up here so a
      bad start_mode fails before the full-refresh drop below. #}
   {%- set start_mode = adapter.render_start_mode(config.get('start_mode')) -%}
-  {%- set with_options = config.get('with', {}) -%}
 
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
   {%- do adapter.validate_materialized_table_config(config) -%}
+
+  {%- set existing_relation = load_cached_relation(this) -%}
+  {%- set target_relation = this.incorporate(type=this.Table) %}
+  {%- set with_options = config.get('with', {}) -%}
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 

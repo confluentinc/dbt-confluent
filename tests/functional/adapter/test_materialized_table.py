@@ -446,6 +446,16 @@ MT_INVALID_DISTRIBUTED_BY = """
 select order_id, price from {{ ref('src_inval') }}
 """
 
+# Representative wiring case: materialized_table now also runs through the
+# generic MATERIALIZATION_CONFIG_KEYS check (validate_materialization_config),
+# same as every other materialization -- `connector` is a real dbt-confluent
+# key, just not one materialized_table reads. Exhaustive per-key/per-
+# materialization coverage lives in tests/unit/test_validate_materialization_config.py.
+MT_INVALID_UNSUPPORTED_KEY = """
+{{ config(materialized='materialized_table', connector='faker') }}
+select order_id, price from {{ ref('src_inval') }}
+"""
+
 
 class TestMaterializedTableInvalidConfig(ConfluentFixtures):
     """Config validation fails fast with a clear compiler error before any DDL."""
@@ -460,6 +470,7 @@ class TestMaterializedTableInvalidConfig(ConfluentFixtures):
             "mt_freshness.sql": MT_INVALID_FRESHNESS,
             "mt_start_mode.sql": MT_INVALID_START_MODE,
             "mt_dist.sql": MT_INVALID_DISTRIBUTED_BY,
+            "mt_unsupported_key.sql": MT_INVALID_UNSUPPORTED_KEY,
         }
 
     @pytest.fixture(autouse=True, scope="class")
@@ -483,6 +494,10 @@ class TestMaterializedTableInvalidConfig(ConfluentFixtures):
         )
         assert "not a valid value for 'start_mode'" in msg("mt_start_mode")
         assert "must be a positive integer" in msg("mt_dist")
+
+        unsupported_msg = msg("mt_unsupported_key")
+        assert "connector" in unsupported_msg
+        assert "materialized_table" in unsupported_msg
 
 
 # -- Statement properties --
