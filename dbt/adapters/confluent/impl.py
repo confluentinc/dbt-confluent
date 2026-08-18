@@ -832,7 +832,7 @@ class ConfluentAdapter(SQLAdapter):
                 f"'{keys}' {verb} not supported by the 'materialized_table' "
                 f"materialization for Confluent Flink.\n"
                 f"Supported config options are: distributed_by, with, start_mode, "
-                f"statement_properties."
+                f"statement_properties, contract."
             )
 
     @available
