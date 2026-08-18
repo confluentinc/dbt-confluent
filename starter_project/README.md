@@ -80,3 +80,15 @@ If that works, you should be able to find your new materialized table [here](htt
 Note that all models & their associated tables are namespaced by the current user's `$USER` name. So, this builds `${USER}_source_values` (a regular table), then `$USER_total_val` — a `materialized_table` model (`models/total_val.sql`) that's the actual subject of this bug bash. From here, try the scenarios in the bug bash doc against `$USER_total_val` (or new models of your own).
 
 *WARNING: If your $USER name is not unique (e.g. on a shared machine) or not set, you may hit conflicts with others. You can set `BUGBASH_USER` explicitly to override this value.*
+
+## A few dbt basics
+
+If you got this far, congrats! You're ready to make and run some DBT models of your own. Here's a few basics:
+
+| Command | What it does |
+| --- | --- |
+| `dbt run` | Build all models in the project. |
+| `dbt run -s <model_name>` | Select just one model to run instead of the whole project |
+| `dbt run -s +<model_name>` | Also build anything that model `ref()`s first — use this the first time you touch a model whose dependency doesn't exist yet |
+| `dbt run -s <model_name>+` | Also build anything downstream of the selected model — useful for e.g. reprocessing workflows |
+| `dbt run --full-refresh ...` | Drops and recreates instead of evolving in place. Useful you need to make a breaking schema change that can't be made in-place. |
