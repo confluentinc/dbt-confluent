@@ -58,7 +58,7 @@ _RUN_TAG = format(int(time.time()), "08x")
 # name a human or another tool would plausibly pick: literal reserved prefix,
 # one of the fixed stems, and the hex session tag.
 _TEST_RELATION_RE = re.compile(
-    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch"
+    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch|contract"
     r"|stmtprops|stmtpropstuned|stmtpropsplain)_(?P<tag>[0-9a-f]{8})$"
 )
 
@@ -194,8 +194,84 @@ class TestMaterializedTable(_MTFixtures):
         rel = relation_from_name(project.adapter, self.MT)
         project.run_sql(f"select order_id, price from {rel} limit 1", fetch="one")
 
+        # Regression for #81: a model with no contract enforced must keep
+        # rendering a plain `AS SELECT` — no explicit column-definition or
+        # PRIMARY KEY block should be emitted.
+        ddl_rows = project.run_sql(f"SHOW CREATE TABLE {self.MT}", fetch="all")
+        ddl = ddl_rows[0][0]
+        assert "PRIMARY KEY" not in ddl.upper(), (
+            f"Materialized table without a contract should not have a PRIMARY KEY:\n{ddl}"
+        )
+
         catalog = run_dbt(["docs", "generate"])
         assert len(catalog.nodes) == 2
+
+
+# Feature test for #81 — a materialized_table model with an enforced dbt
+# contract must render an explicit column-definition block ahead of
+# DISTRIBUTED BY/WITH/AS SELECT, including a PRIMARY KEY (...) NOT ENFORCED
+# constraint, so the resulting table's key can back snapshot queries (see
+# MATERIALIZATIONS.md#materialized-table).
+MT_CONTRACT_PK_COLUMN = "order_id"
+
+MT_WITH_CONTRACT = """
+{{ config(
+    materialized='materialized_table',
+    contract={'enforced': true},
+) }}
+select order_id, price from {{ ref('__SOURCE__') }}
+"""
+
+MT_CONTRACT_MODELS_YML = """
+models:
+  - name: __MT__
+    constraints:
+      - type: primary_key
+        columns: [__PK_COLUMN__]
+        expression: "NOT ENFORCED"
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: price
+        data_type: decimal(10,2)
+"""
+
+
+class TestMaterializedTableWithContract(_MTFixtures):
+    """Feature test for #81: a materialized_table model with
+    `contract={'enforced': true}` and a `primary_key` constraint declared in
+    its schema.yml gets an explicit column-definition block and a
+    `PRIMARY KEY (...) NOT ENFORCED` clause in the emitted DDL, matching
+    Confluent's `CREATE MATERIALIZED TABLE (cols..., PRIMARY KEY(...) NOT
+    ENFORCED) DISTRIBUTED BY (...) WITH (...) AS SELECT ...` grammar."""
+
+    NAME = "matcontract"
+    SRC = f"dbttest_src_contract_{_RUN_TAG}"
+    MT = f"dbttest_mt_contract_{_RUN_TAG}"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            f"{self.SRC}.sql": SOURCE,
+            f"{self.MT}.sql": MT_WITH_CONTRACT.replace("__SOURCE__", self.SRC),
+            "models.yml": MT_CONTRACT_MODELS_YML.replace("__MT__", self.MT).replace(
+                "__PK_COLUMN__", MT_CONTRACT_PK_COLUMN
+            ),
+        }
+
+    def test_contract_renders_primary_key(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results), (
+            "dbt run failed for a materialized_table with an enforced contract"
+        )
+
+        ddl_rows = project.run_sql(f"SHOW CREATE TABLE {self.MT}", fetch="all")
+        ddl = ddl_rows[0][0]
+        assert f"PRIMARY KEY (`{MT_CONTRACT_PK_COLUMN}`) NOT ENFORCED" in ddl, (
+            f"Expected primary key constraint not found in materialized table DDL:\n{ddl}"
+        )
 
 
 class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
