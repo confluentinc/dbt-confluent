@@ -27,7 +27,13 @@ class TestAllConfluentConfigKeys:
 
     def test_includes_every_materialization_specific_key(self, adapter):
         keys = set(adapter.all_confluent_config_keys())
-        for expected in ("with", "distributed_by", "connector", "statement_properties"):
+        for expected in (
+            "with",
+            "distributed_by",
+            "connector",
+            "statement_properties",
+            "start_mode",
+        ):
             assert expected in keys
 
 
@@ -50,6 +56,15 @@ class TestValidateMaterializationConfig:
             ("view", {"statement_name": "custom"}),
             ("streaming_source", {"connector": "faker", "with": {"a": "b"}}),
             ("streaming_table", {"with": {"a": "b"}, "statement_properties": {"x": "y"}}),
+            (
+                "materialized_table",
+                {
+                    "with": {"a": "b"},
+                    "distributed_by": {"columns": ["id"]},
+                    "start_mode": "FROM_BEGINNING",
+                    "statement_properties": {"x": "y"},
+                },
+            ),
         ],
     )
     def test_supported_config_passes(self, adapter, materialization, observed_config):
@@ -65,6 +80,8 @@ class TestValidateMaterializationConfig:
             ("view", {"on_schema_drift": "ignore"}),
             ("streaming_source", {"statement_properties": {"x": "y"}}),
             ("streaming_table", {"connector": "faker"}),
+            ("materialized_table", {"on_schema_drift": "ignore"}),
+            ("materialized_table", {"connector": "faker"}),
         ],
         ids=[
             "statement_properties_on_table",
@@ -74,6 +91,8 @@ class TestValidateMaterializationConfig:
             "on_schema_drift_on_view",
             "statement_properties_on_streaming_source",
             "connector_on_streaming_table",
+            "on_schema_drift_on_materialized_table",
+            "connector_on_materialized_table",
         ],
     )
     def test_unsupported_config_raises(self, adapter, materialization, observed_config):
@@ -97,7 +116,9 @@ class TestValidateMaterializationConfig:
     def test_error_names_which_materializations_do_support_it(self, adapter):
         with pytest.raises(CompilationError) as exc_info:
             adapter.validate_materialization_config("table", {"statement_properties": {"x": "y"}})
-        assert "streaming_table" in str(exc_info.value)
+        msg = str(exc_info.value)
+        assert "streaming_table" in msg
+        assert "materialized_table" in msg
 
     def test_ignore_unsupported_config_suppresses_the_error(self, adapter):
         """A model can explicitly opt a specific key out of this check."""

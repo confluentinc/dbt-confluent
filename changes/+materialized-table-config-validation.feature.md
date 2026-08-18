@@ -1,0 +1,1 @@
+Add `materialized_table` to the generic dbt-confluent config-key validator: setting a config key this materialization doesn't read (e.g. `connector`, `on_schema_drift`) now fails the run immediately with a clear error, matching `table`/`view`/`streaming_source`/`streaming_table`. See MATERIALIZATIONS.md#config-validation.
