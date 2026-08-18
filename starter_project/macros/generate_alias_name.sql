@@ -4,7 +4,12 @@
     {%- if raw_user == '' -%}
         {{ exceptions.raise_compiler_error("Could not determine a bug bash username: neither BUGBASH_USER nor USER is set. Export one of them, e.g. `export BUGBASH_USER=yourname`.") }}
     {%- endif -%}
-    {%- set user = raw_user | lower | replace('.', '_') | replace(' ', '_') -%}
+    {%- set allowed = "abcdefghijklmnopqrstuvwxyz0123456789" -%}
+    {%- set ns = namespace(out="") -%}
+    {%- for ch in raw_user | lower -%}
+        {%- set ns.out = ns.out ~ (ch if ch in allowed else "_") -%}
+    {%- endfor -%}
+    {%- set user = ns.out -%}
 
     {%- if custom_alias_name is none -%}
         {{ user }}_{{ node.name }}
