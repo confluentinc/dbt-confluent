@@ -90,3 +90,15 @@ If you got this far, congrats! You're ready to make and run some DBT models of y
 - **`dbt run -s +<model_name>`:** Also build anything that model `ref()`s first — use this the first time you touch a model whose dependency doesn't exist yet
 - **`dbt run -s <model_name>+`:** Also build anything downstream of the selected model — useful for e.g. reprocessing workflows
 - **`dbt run --full-refresh ...`:** Drops and recreates instead of evolving in place. Useful when you need to make a breaking schema change that can't be made in-place.
+
+When you're ready to create your own model by hand, you can use the following SQL to query a live weather data source:
+
+```sql
+SELECT
+    cast(when_reported as date) as day_reported,
+    max(tempf) as max_temp,
+    min(tempf) as min_temp,
+    avg(tempf) as avg_temp
+FROM `TableAPI`.`2026-08-bug-bash-dbt-mt`.`WeatherData`
+GROUP BY cast(when_reported as date)
+```
