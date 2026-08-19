@@ -1,7 +1,7 @@
 version: 2
 
 models:
-  - name: source_values
+  - name: static_ints
     constraints:
       - type: primary_key
         columns: [id]
