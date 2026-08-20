@@ -59,7 +59,7 @@ _RUN_TAG = format(int(time.time()), "08x")
 # one of the fixed stems, and the hex session tag.
 _TEST_RELATION_RE = re.compile(
     r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch|contract"
-    r"|contractorder|stmtprops|stmtpropstuned|stmtpropsplain)_(?P<tag>[0-9a-f]{8})$"
+    r"|contractorder|contractnokey|stmtprops|stmtpropstuned|stmtpropsplain)_(?P<tag>[0-9a-f]{8})$"
 )
 
 # A bounded faker source (number-of-rows) so the MT refresh settles quickly.
@@ -194,15 +194,6 @@ class TestMaterializedTable(_MTFixtures):
         rel = relation_from_name(project.adapter, self.MT)
         project.run_sql(f"select order_id, price from {rel} limit 1", fetch="one")
 
-        # Regression for #81: a model with no contract enforced must keep
-        # rendering a plain `AS SELECT` — no explicit column-definition or
-        # PRIMARY KEY block should be emitted.
-        ddl_rows = project.run_sql(f"SHOW CREATE MATERIALIZED TABLE {self.MT}", fetch="all")
-        ddl = ddl_rows[0][0]
-        assert "PRIMARY KEY" not in ddl.upper(), (
-            f"Materialized table without a contract should not have a PRIMARY KEY:\n{ddl}"
-        )
-
         catalog = run_dbt(["docs", "generate"])
         assert len(catalog.nodes) == 2
 
@@ -238,6 +229,37 @@ models:
         data_type: decimal(10,2)
 """
 
+# Paired against the contract-enforced MT above: a source with no key at all
+# (no PRIMARY KEY declared), feeding an MT that does no grouping either -- so
+# there is nothing anywhere in the pipeline for Confluent to infer a key
+# from. TestMaterializedTable's happy-path MT used to assert this same "no
+# contract -> no PRIMARY KEY" claim via SHOW CREATE, but that MT distributes
+# on a NOT NULL column sourced from an upstream PRIMARY KEY -- Confluent
+# auto-assigns a PRIMARY KEY there regardless of contract, which made that
+# assertion fail for reasons unrelated to contracts. This source/MT avoids
+# that confound entirely, so it's isolated to the same test as the
+# contract-enforced case for a direct with/without comparison.
+NO_KEY_SOURCE = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '5',
+        'number-of-rows': '100',
+        'changelog.mode': 'append',
+    }
+) }}
+order_id BIGINT,
+price DECIMAL(10, 2)
+"""
+
+MT_WITHOUT_CONTRACT_NO_KEY = """
+{{ config(
+    materialized='materialized_table',
+) }}
+select order_id, price from {{ ref('__SOURCE__') }}
+"""
+
 
 class TestMaterializedTableWithContract(_MTFixtures):
     """Feature test for #81: a materialized_table model with
@@ -245,21 +267,41 @@ class TestMaterializedTableWithContract(_MTFixtures):
     its schema.yml gets an explicit column-definition block and a
     `PRIMARY KEY (...) NOT ENFORCED` clause in the emitted DDL, matching
     Confluent's `CREATE MATERIALIZED TABLE (cols..., PRIMARY KEY(...) NOT
-    ENFORCED) DISTRIBUTED BY (...) WITH (...) AS SELECT ...` grammar."""
+    ENFORCED) DISTRIBUTED BY (...) WITH (...) AS SELECT ...` grammar --
+    contrasted against a plain (no contract) MT reading from a keyless,
+    non-grouping source, which must not get a PRIMARY KEY at all."""
 
     NAME = "matcontract"
     SRC = f"dbttest_src_contract_{_RUN_TAG}"
     MT = f"dbttest_mt_contract_{_RUN_TAG}"
+    NO_KEY_SRC = f"dbttest_src_contractnokey_{_RUN_TAG}"
+    MT_NO_CONTRACT = f"dbttest_mt_contractnokey_{_RUN_TAG}"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {
             f"{self.SRC}.sql": SOURCE,
             f"{self.MT}.sql": MT_WITH_CONTRACT.replace("__SOURCE__", self.SRC),
+            f"{self.NO_KEY_SRC}.sql": NO_KEY_SOURCE,
+            f"{self.MT_NO_CONTRACT}.sql": MT_WITHOUT_CONTRACT_NO_KEY.replace(
+                "__SOURCE__", self.NO_KEY_SRC
+            ),
             "models.yml": MT_CONTRACT_MODELS_YML.replace("__MT__", self.MT).replace(
                 "__PK_COLUMN__", MT_CONTRACT_PK_COLUMN
             ),
         }
+
+    @pytest.fixture(autouse=True, scope="class")
+    def class_clean_up(self, project, dbt_profile_data):
+        yield
+        # Only delete statements once the contract MT is confirmed gone; see
+        # _MTFixtures.class_clean_up. The keyless MT/source are additional to
+        # that base cleanup, dropped unconditionally.
+        if drop_any_relation(project, self.MT):
+            delete_statements_by_label(project, _statement_label(dbt_profile_data))
+        project.run_sql(f"drop table if exists {self.SRC}")
+        drop_any_relation(project, self.MT_NO_CONTRACT)
+        project.run_sql(f"drop table if exists {self.NO_KEY_SRC}")
 
     def test_contract_renders_primary_key(self, project):
         results = run_dbt(["run"])
@@ -271,6 +313,16 @@ class TestMaterializedTableWithContract(_MTFixtures):
         ddl = ddl_rows[0][0]
         assert f"PRIMARY KEY (`{MT_CONTRACT_PK_COLUMN}`) NOT ENFORCED" in ddl, (
             f"Expected primary key constraint not found in materialized table DDL:\n{ddl}"
+        )
+
+        no_contract_ddl_rows = project.run_sql(
+            f"SHOW CREATE MATERIALIZED TABLE {self.MT_NO_CONTRACT}", fetch="all"
+        )
+        no_contract_ddl = no_contract_ddl_rows[0][0]
+        assert "PRIMARY KEY" not in no_contract_ddl.upper(), (
+            "Materialized table without a contract, reading from a keyless "
+            "source with no grouping, should not have a PRIMARY KEY:\n"
+            f"{no_contract_ddl}"
         )
 
 
