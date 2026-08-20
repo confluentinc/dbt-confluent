@@ -229,16 +229,15 @@ models:
         data_type: decimal(10,2)
 """
 
-# Paired against the contract-enforced MT above: a source with no key at all
-# (no PRIMARY KEY declared), feeding an MT that does no grouping either -- so
-# there is nothing anywhere in the pipeline for Confluent to infer a key
-# from. TestMaterializedTable's happy-path MT used to assert this same "no
-# contract -> no PRIMARY KEY" claim via SHOW CREATE, but that MT distributes
-# on a NOT NULL column sourced from an upstream PRIMARY KEY -- Confluent
-# auto-assigns a PRIMARY KEY there regardless of contract, which made that
-# assertion fail for reasons unrelated to contracts. This source/MT avoids
-# that confound entirely, so it's isolated to the same test as the
-# contract-enforced case for a direct with/without comparison.
+# A single keyless source (no PRIMARY KEY declared) shared by both MTs below,
+# so the with/without-contract comparison is apples-to-apples -- only the
+# contract config differs. Neither MT sets distributed_by, and neither does
+# any grouping, so there is nothing in this pipeline for Confluent to infer
+# a key from. TestMaterializedTable's happy-path MT used to assert this same
+# "no contract -> no PRIMARY KEY" claim via SHOW CREATE, but that MT
+# distributes on a NOT NULL column sourced from an upstream PRIMARY KEY --
+# Confluent auto-assigns a PRIMARY KEY there regardless of contract, which
+# made that assertion fail for reasons unrelated to contracts.
 NO_KEY_SOURCE = """
 {{ config(
     materialized='streaming_source',
@@ -268,23 +267,21 @@ class TestMaterializedTableWithContract(_MTFixtures):
     `PRIMARY KEY (...) NOT ENFORCED` clause in the emitted DDL, matching
     Confluent's `CREATE MATERIALIZED TABLE (cols..., PRIMARY KEY(...) NOT
     ENFORCED) DISTRIBUTED BY (...) WITH (...) AS SELECT ...` grammar --
-    contrasted against a plain (no contract) MT reading from a keyless,
-    non-grouping source, which must not get a PRIMARY KEY at all."""
+    contrasted against a plain (no contract) MT reading from the same
+    keyless, non-grouping source, which must not get a PRIMARY KEY at all."""
 
     NAME = "matcontract"
-    SRC = f"dbttest_src_contract_{_RUN_TAG}"
+    SRC = f"dbttest_src_contractnokey_{_RUN_TAG}"
     MT = f"dbttest_mt_contract_{_RUN_TAG}"
-    NO_KEY_SRC = f"dbttest_src_contractnokey_{_RUN_TAG}"
     MT_NO_CONTRACT = f"dbttest_mt_contractnokey_{_RUN_TAG}"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {
-            f"{self.SRC}.sql": SOURCE,
+            f"{self.SRC}.sql": NO_KEY_SOURCE,
             f"{self.MT}.sql": MT_WITH_CONTRACT.replace("__SOURCE__", self.SRC),
-            f"{self.NO_KEY_SRC}.sql": NO_KEY_SOURCE,
             f"{self.MT_NO_CONTRACT}.sql": MT_WITHOUT_CONTRACT_NO_KEY.replace(
-                "__SOURCE__", self.NO_KEY_SRC
+                "__SOURCE__", self.SRC
             ),
             "models.yml": MT_CONTRACT_MODELS_YML.replace("__MT__", self.MT).replace(
                 "__PK_COLUMN__", MT_CONTRACT_PK_COLUMN
@@ -295,13 +292,13 @@ class TestMaterializedTableWithContract(_MTFixtures):
     def class_clean_up(self, project, dbt_profile_data):
         yield
         # Only delete statements once the contract MT is confirmed gone; see
-        # _MTFixtures.class_clean_up. The keyless MT/source are additional to
-        # that base cleanup, dropped unconditionally.
+        # _MTFixtures.class_clean_up. MT_NO_CONTRACT is additional to that
+        # base cleanup, dropped unconditionally; both MTs share self.SRC, so
+        # it's dropped once, after both.
         if drop_any_relation(project, self.MT):
             delete_statements_by_label(project, _statement_label(dbt_profile_data))
-        project.run_sql(f"drop table if exists {self.SRC}")
         drop_any_relation(project, self.MT_NO_CONTRACT)
-        project.run_sql(f"drop table if exists {self.NO_KEY_SRC}")
+        project.run_sql(f"drop table if exists {self.SRC}")
 
     def test_contract_renders_primary_key(self, project):
         results = run_dbt(["run"])
