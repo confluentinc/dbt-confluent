@@ -229,15 +229,19 @@ models:
         data_type: decimal(10,2)
 """
 
-# A single keyless source (no PRIMARY KEY declared) shared by both MTs below,
-# so the with/without-contract comparison is apples-to-apples -- only the
-# contract config differs. Neither MT sets distributed_by, and neither does
-# any grouping, so there is nothing in this pipeline for Confluent to infer
-# a key from. TestMaterializedTable's happy-path MT used to assert this same
-# "no contract -> no PRIMARY KEY" claim via SHOW CREATE, but that MT
-# distributes on a NOT NULL column sourced from an upstream PRIMARY KEY --
-# Confluent auto-assigns a PRIMARY KEY there regardless of contract, which
-# made that assertion fail for reasons unrelated to contracts.
+# A single keyless source (NOT NULL order_id, but no PRIMARY KEY declared)
+# shared by both MTs below, so the with/without-contract comparison is
+# apples-to-apples -- only the contract config differs. order_id must be
+# NOT NULL here because the contract-enforced MT declares it NOT NULL
+# (schema.yml constraints below) and Flink rejects a NOT NULL sink column
+# fed by a nullable source ("Incompatible types for sink column 'order_id'
+# ... source column has type 'BIGINT', while the target column has type
+# 'BIGINT NOT NULL'"). Neither MT sets distributed_by, and neither does any
+# grouping, so there is nothing in this pipeline for Confluent to infer a
+# key from -- NOT NULL alone (without a PRIMARY KEY/distributed_by) doesn't
+# trigger the auto-PK-inference confound TestMaterializedTable's happy-path
+# MT hit (that one distributes on a NOT NULL column sourced from an
+# upstream PRIMARY KEY).
 NO_KEY_SOURCE = """
 {{ config(
     materialized='streaming_source',
@@ -248,7 +252,7 @@ NO_KEY_SOURCE = """
         'changelog.mode': 'append',
     }
 ) }}
-order_id BIGINT,
+order_id BIGINT NOT NULL,
 price DECIMAL(10, 2)
 """
 
