@@ -62,6 +62,7 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
     {% if contract_config.enforced %}
       {{ get_assert_columns_equivalent(sql) }}
       {{ get_table_columns_and_constraints() }}
+      {%- set sql = get_select_subquery(sql) %}
     {% endif %}
     {{ get_distributed_by_clause() }}
     {{ render_with_options(with_options) }}

@@ -59,7 +59,7 @@ _RUN_TAG = format(int(time.time()), "08x")
 # one of the fixed stems, and the hex session tag.
 _TEST_RELATION_RE = re.compile(
     r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch|contract"
-    r"|stmtprops|stmtpropstuned|stmtpropsplain)_(?P<tag>[0-9a-f]{8})$"
+    r"|contractorder|stmtprops|stmtpropstuned|stmtpropsplain)_(?P<tag>[0-9a-f]{8})$"
 )
 
 # A bounded faker source (number-of-rows) so the MT refresh settles quickly.
@@ -271,6 +271,68 @@ class TestMaterializedTableWithContract(_MTFixtures):
         ddl = ddl_rows[0][0]
         assert f"PRIMARY KEY (`{MT_CONTRACT_PK_COLUMN}`) NOT ENFORCED" in ddl, (
             f"Expected primary key constraint not found in materialized table DDL:\n{ddl}"
+        )
+
+
+# Regression for the PR #84 review: an enforced contract must re-project the
+# AS SELECT to match schema.yml's *declared* column order, not just validate
+# names/types (get_assert_columns_equivalent does the latter but is
+# order-blind). schema.yml here declares price before order_id while the
+# model's select does the opposite -- without re-projecting (get_select_subquery,
+# mirroring `table`'s create.sql), Flink binds the AS SELECT positionally
+# against the declared column list, pairing the BIGINT order_id value with the
+# DECIMAL price column and vice versa.
+MT_CONTRACT_REORDERED_MODELS_YML = """
+models:
+  - name: __MT__
+    constraints:
+      - type: primary_key
+        columns: [__PK_COLUMN__]
+        expression: "NOT ENFORCED"
+    columns:
+      - name: price
+        data_type: decimal(10,2)
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+"""
+
+
+class TestMaterializedTableContractColumnReorder(_MTFixtures):
+    """schema.yml's declared column order must win over the model SQL's
+    select order in the emitted DDL's AS SELECT, not just its column
+    definitions."""
+
+    NAME = "matcontractorder"
+    SRC = f"dbttest_src_contractorder_{_RUN_TAG}"
+    MT = f"dbttest_mt_contractorder_{_RUN_TAG}"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            f"{self.SRC}.sql": SOURCE,
+            f"{self.MT}.sql": MT_WITH_CONTRACT.replace("__SOURCE__", self.SRC),
+            "models.yml": MT_CONTRACT_REORDERED_MODELS_YML.replace("__MT__", self.MT).replace(
+                "__PK_COLUMN__", MT_CONTRACT_PK_COLUMN
+            ),
+        }
+
+    def test_contract_select_matches_declared_column_order(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results), (
+            "dbt run failed for a materialized_table whose schema.yml column "
+            "order differs from its model SQL's select order -- the AS SELECT "
+            "is likely being bound positionally instead of by declared name"
+        )
+
+        rel = relation_from_name(project.adapter, self.MT)
+        price, order_id = project.run_sql(
+            f"select price, order_id from {rel} limit 1", fetch="one"
+        )
+        assert isinstance(order_id, int), (
+            f"order_id should be a BIGINT, got {order_id!r} -- columns were "
+            "likely bound positionally instead of by declared name"
         )
 
 
