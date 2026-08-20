@@ -31,7 +31,7 @@ or with [uv](https://docs.astral.sh/uv/):
 uv add dbt-confluent
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10–3.13.
 
 ## Configuration
 
