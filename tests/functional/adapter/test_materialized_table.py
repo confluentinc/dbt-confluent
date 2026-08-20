@@ -341,9 +341,10 @@ class TestMaterializedTableContractColumnReorder(_MTFixtures):
         )
 
         rel = relation_from_name(project.adapter, self.MT)
-        order_id, price, order_time = project.run_sql(
+        rows = project.run_sql(
             f"select order_id, price, order_time from {rel} limit 1", fetch="one"
         )
+        order_id, price, order_time = rows[0]
         assert isinstance(order_id, int), (
             f"order_id should be a BIGINT, got {order_id!r} -- columns were "
             "likely bound positionally instead of by declared name"
