@@ -277,11 +277,23 @@ class TestMaterializedTableWithContract(_MTFixtures):
 # Regression for the PR #84 review: an enforced contract must re-project the
 # AS SELECT to match schema.yml's *declared* column order, not just validate
 # names/types (get_assert_columns_equivalent does the latter but is
-# order-blind). schema.yml here declares price before order_id while the
-# model's select does the opposite -- without re-projecting (get_select_subquery,
-# mirroring `table`'s create.sql), Flink binds the AS SELECT positionally
-# against the declared column list, pairing the BIGINT order_id value with the
-# DECIMAL price column and vice versa.
+# order-blind). order_id is the PK, so it must stay first in both the select
+# and schema.yml -- Flink requires key columns at the beginning of the table
+# schema, an unrelated rule (see MATERIALIZATIONS.md's distributed_by column
+# ordering note). The regression is in the other two columns: schema.yml
+# declares price before order_time, while the model's select does the
+# opposite -- without re-projecting (get_select_subquery, mirroring `table`'s
+# create.sql), Flink binds the AS SELECT positionally against the declared
+# column list, pairing the TIMESTAMP order_time value with the DECIMAL price
+# column and vice versa.
+MT_CONTRACT_REORDER_SQL = """
+{{ config(
+    materialized='materialized_table',
+    contract={'enforced': true},
+) }}
+select order_id, order_time, price from {{ ref('__SOURCE__') }}
+"""
+
 MT_CONTRACT_REORDERED_MODELS_YML = """
 models:
   - name: __MT__
@@ -290,12 +302,14 @@ models:
         columns: [__PK_COLUMN__]
         expression: "NOT ENFORCED"
     columns:
-      - name: price
-        data_type: decimal(10,2)
       - name: order_id
         data_type: bigint
         constraints:
           - type: not_null
+      - name: price
+        data_type: decimal(10,2)
+      - name: order_time
+        data_type: timestamp(3)
 """
 
 
@@ -312,7 +326,7 @@ class TestMaterializedTableContractColumnReorder(_MTFixtures):
     def models(self):
         yield {
             f"{self.SRC}.sql": SOURCE,
-            f"{self.MT}.sql": MT_WITH_CONTRACT.replace("__SOURCE__", self.SRC),
+            f"{self.MT}.sql": MT_CONTRACT_REORDER_SQL.replace("__SOURCE__", self.SRC),
             "models.yml": MT_CONTRACT_REORDERED_MODELS_YML.replace("__MT__", self.MT).replace(
                 "__PK_COLUMN__", MT_CONTRACT_PK_COLUMN
             ),
@@ -327,12 +341,16 @@ class TestMaterializedTableContractColumnReorder(_MTFixtures):
         )
 
         rel = relation_from_name(project.adapter, self.MT)
-        price, order_id = project.run_sql(
-            f"select price, order_id from {rel} limit 1", fetch="one"
+        order_id, price, order_time = project.run_sql(
+            f"select order_id, price, order_time from {rel} limit 1", fetch="one"
         )
         assert isinstance(order_id, int), (
             f"order_id should be a BIGINT, got {order_id!r} -- columns were "
             "likely bound positionally instead of by declared name"
+        )
+        assert price is not None and order_time is not None, (
+            "price/order_time should not be null -- columns were likely bound "
+            "positionally instead of by declared name"
         )
 
 
