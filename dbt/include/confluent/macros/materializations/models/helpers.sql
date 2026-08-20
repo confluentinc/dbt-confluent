@@ -34,6 +34,35 @@
   {%- endif -%}
 {% endmacro %}
 
+{% macro render_contract_columns_and_reproject_sql(sql) %}
+  {# When the model has an enforced contract, returns
+       {'ddl': <column-definition + constraints block DDL text>,
+        'sql': sql, re-projected to select columns in schema.yml's declared
+               order>}
+     — or {'ddl': '', 'sql': sql} unchanged if the contract isn't enforced.
+
+     Flink binds a `CREATE ... (<column definitions>) AS <select>`
+     positionally, so the select's column order must match the *declared*
+     column-definition order, not just its names/types — which is all
+     get_assert_columns_equivalent checks. get_select_subquery (dbt-core)
+     re-projects the select to the declared order to guarantee that.
+
+     Shared by `table` (relations/table/create.sql) and `materialized_table`
+     so they can't silently drift apart again — materialized_table's own
+     copy of this logic once omitted the get_select_subquery call (see PR
+     #84 review). #}
+  {%- set contract_config = config.get('contract') -%}
+  {%- if not contract_config.enforced -%}
+    {{ return({'ddl': '', 'sql': sql}) }}
+  {%- endif -%}
+  {%- set ddl -%}
+    {{ get_assert_columns_equivalent(sql) }}
+    {{ get_table_columns_and_constraints() }}
+  {%- endset -%}
+  {{ return({'ddl': ddl, 'sql': get_select_subquery(sql)}) }}
+{% endmacro %}
+
+
 {% macro render_with_options(with_options) %}
   {#- Render a Flink `WITH ( 'k' = 'v', ... )` clause from a dict, escaping
      single quotes in keys and values. Renders nothing when with_options is
