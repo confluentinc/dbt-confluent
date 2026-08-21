@@ -58,6 +58,9 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
                     statement_name=get_statement_name('-' ~ invocation_id),
                     statement_properties=config.get('statement_properties')) -%}
     CREATE OR ALTER MATERIALIZED TABLE {{ target_relation }}
+    {%- set contract = render_contract_columns_and_reproject_sql(sql) -%}
+    {{ contract.ddl }}
+    {%- set sql = contract.sql %}
     {{ get_distributed_by_clause() }}
     {{ render_with_options(with_options) }}
     {%- if start_mode %}

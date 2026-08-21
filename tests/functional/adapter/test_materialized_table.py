@@ -58,8 +58,8 @@ _RUN_TAG = format(int(time.time()), "08x")
 # name a human or another tool would plausibly pick: literal reserved prefix,
 # one of the fixed stems, and the hex session tag.
 _TEST_RELATION_RE = re.compile(
-    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch"
-    r"|stmtprops|stmtpropstuned|stmtpropsplain)_(?P<tag>[0-9a-f]{8})$"
+    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch|contract"
+    r"|contractorder|contractnokey|stmtprops|stmtpropstuned|stmtpropsplain)_(?P<tag>[0-9a-f]{8})$"
 )
 
 # A bounded faker source (number-of-rows) so the MT refresh settles quickly.
@@ -196,6 +196,216 @@ class TestMaterializedTable(_MTFixtures):
 
         catalog = run_dbt(["docs", "generate"])
         assert len(catalog.nodes) == 2
+
+
+# Feature test for #81 — a materialized_table model with an enforced dbt
+# contract must render an explicit column-definition block ahead of
+# DISTRIBUTED BY/WITH/AS SELECT, including a PRIMARY KEY (...) NOT ENFORCED
+# constraint, so the resulting table's key can back snapshot queries (see
+# MATERIALIZATIONS.md#materialized-table).
+MT_CONTRACT_PK_COLUMN = "order_id"
+
+MT_WITH_CONTRACT = """
+{{ config(
+    materialized='materialized_table',
+    contract={'enforced': true},
+) }}
+select order_id, price from {{ ref('__SOURCE__') }}
+"""
+
+MT_CONTRACT_MODELS_YML = """
+models:
+  - name: __MT__
+    constraints:
+      - type: primary_key
+        columns: [__PK_COLUMN__]
+        expression: "NOT ENFORCED"
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: price
+        data_type: decimal(10,2)
+"""
+
+# A single keyless source (NOT NULL order_id, but no PRIMARY KEY declared)
+# shared by both MTs below, so the with/without-contract comparison is
+# apples-to-apples -- only the contract config differs. order_id must be
+# NOT NULL here because the contract-enforced MT declares it NOT NULL
+# (schema.yml constraints below) and Flink rejects a NOT NULL sink column
+# fed by a nullable source ("Incompatible types for sink column 'order_id'
+# ... source column has type 'BIGINT', while the target column has type
+# 'BIGINT NOT NULL'"). Neither MT sets distributed_by, and neither does any
+# grouping, so there is nothing in this pipeline for Confluent to infer a
+# key from -- NOT NULL alone (without a PRIMARY KEY/distributed_by) doesn't
+# trigger the auto-PK-inference confound TestMaterializedTable's happy-path
+# MT hit (that one distributes on a NOT NULL column sourced from an
+# upstream PRIMARY KEY).
+NO_KEY_SOURCE = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '5',
+        'number-of-rows': '100',
+        'changelog.mode': 'append',
+    }
+) }}
+order_id BIGINT NOT NULL,
+price DECIMAL(10, 2)
+"""
+
+MT_WITHOUT_CONTRACT_NO_KEY = """
+{{ config(
+    materialized='materialized_table',
+) }}
+select order_id, price from {{ ref('__SOURCE__') }}
+"""
+
+
+class TestMaterializedTableWithContract(_MTFixtures):
+    """Feature test for #81: a materialized_table model with
+    `contract={'enforced': true}` and a `primary_key` constraint declared in
+    its schema.yml gets an explicit column-definition block and a
+    `PRIMARY KEY (...) NOT ENFORCED` clause in the emitted DDL, matching
+    Confluent's `CREATE MATERIALIZED TABLE (cols..., PRIMARY KEY(...) NOT
+    ENFORCED) DISTRIBUTED BY (...) WITH (...) AS SELECT ...` grammar --
+    contrasted against a plain (no contract) MT reading from the same
+    keyless, non-grouping source, which must not get a PRIMARY KEY at all."""
+
+    NAME = "matcontract"
+    SRC = f"dbttest_src_contractnokey_{_RUN_TAG}"
+    MT = f"dbttest_mt_contract_{_RUN_TAG}"
+    MT_NO_CONTRACT = f"dbttest_mt_contractnokey_{_RUN_TAG}"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            f"{self.SRC}.sql": NO_KEY_SOURCE,
+            f"{self.MT}.sql": MT_WITH_CONTRACT.replace("__SOURCE__", self.SRC),
+            f"{self.MT_NO_CONTRACT}.sql": MT_WITHOUT_CONTRACT_NO_KEY.replace(
+                "__SOURCE__", self.SRC
+            ),
+            "models.yml": MT_CONTRACT_MODELS_YML.replace("__MT__", self.MT).replace(
+                "__PK_COLUMN__", MT_CONTRACT_PK_COLUMN
+            ),
+        }
+
+    @pytest.fixture(autouse=True, scope="class")
+    def class_clean_up(self, project, dbt_profile_data):
+        yield
+        # Only delete statements once the contract MT is confirmed gone; see
+        # _MTFixtures.class_clean_up. MT_NO_CONTRACT is additional to that
+        # base cleanup, dropped unconditionally; both MTs share self.SRC, so
+        # it's dropped once, after both.
+        if drop_any_relation(project, self.MT):
+            delete_statements_by_label(project, _statement_label(dbt_profile_data))
+        drop_any_relation(project, self.MT_NO_CONTRACT)
+        project.run_sql(f"drop table if exists {self.SRC}")
+
+    def test_contract_renders_primary_key(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results), (
+            "dbt run failed for a materialized_table with an enforced contract"
+        )
+
+        ddl_rows = project.run_sql(f"SHOW CREATE MATERIALIZED TABLE {self.MT}", fetch="all")
+        ddl = ddl_rows[0][0]
+        assert f"PRIMARY KEY (`{MT_CONTRACT_PK_COLUMN}`) NOT ENFORCED" in ddl, (
+            f"Expected primary key constraint not found in materialized table DDL:\n{ddl}"
+        )
+
+        no_contract_ddl_rows = project.run_sql(
+            f"SHOW CREATE MATERIALIZED TABLE {self.MT_NO_CONTRACT}", fetch="all"
+        )
+        no_contract_ddl = no_contract_ddl_rows[0][0]
+        assert "PRIMARY KEY" not in no_contract_ddl.upper(), (
+            "Materialized table without a contract, reading from a keyless "
+            "source with no grouping, should not have a PRIMARY KEY:\n"
+            f"{no_contract_ddl}"
+        )
+
+
+# Regression for the PR #84 review: an enforced contract must re-project the
+# AS SELECT to match schema.yml's *declared* column order, not just validate
+# names/types (get_assert_columns_equivalent does the latter but is
+# order-blind). order_id is the PK, so it must stay first in both the select
+# and schema.yml -- Flink requires key columns at the beginning of the table
+# schema, an unrelated rule (see MATERIALIZATIONS.md's distributed_by column
+# ordering note). The regression is in the other two columns: schema.yml
+# declares price before order_time, while the model's select does the
+# opposite -- without re-projecting (get_select_subquery, mirroring `table`'s
+# create.sql), Flink binds the AS SELECT positionally against the declared
+# column list, pairing the TIMESTAMP order_time value with the DECIMAL price
+# column and vice versa.
+MT_CONTRACT_REORDER_SQL = """
+{{ config(
+    materialized='materialized_table',
+    contract={'enforced': true},
+) }}
+select order_id, order_time, price from {{ ref('__SOURCE__') }}
+"""
+
+MT_CONTRACT_REORDERED_MODELS_YML = """
+models:
+  - name: __MT__
+    constraints:
+      - type: primary_key
+        columns: [__PK_COLUMN__]
+        expression: "NOT ENFORCED"
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+      - name: price
+        data_type: decimal(10,2)
+      - name: order_time
+        data_type: timestamp(3)
+"""
+
+
+class TestMaterializedTableContractColumnReorder(_MTFixtures):
+    """schema.yml's declared column order must win over the model SQL's
+    select order in the emitted DDL's AS SELECT, not just its column
+    definitions."""
+
+    NAME = "matcontractorder"
+    SRC = f"dbttest_src_contractorder_{_RUN_TAG}"
+    MT = f"dbttest_mt_contractorder_{_RUN_TAG}"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            f"{self.SRC}.sql": SOURCE,
+            f"{self.MT}.sql": MT_CONTRACT_REORDER_SQL.replace("__SOURCE__", self.SRC),
+            "models.yml": MT_CONTRACT_REORDERED_MODELS_YML.replace("__MT__", self.MT).replace(
+                "__PK_COLUMN__", MT_CONTRACT_PK_COLUMN
+            ),
+        }
+
+    def test_contract_select_matches_declared_column_order(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results), (
+            "dbt run failed for a materialized_table whose schema.yml column "
+            "order differs from its model SQL's select order -- the AS SELECT "
+            "is likely being bound positionally instead of by declared name"
+        )
+
+        rel = relation_from_name(project.adapter, self.MT)
+        rows = project.run_sql(
+            f"select order_id, price, order_time from {rel} limit 1", fetch="one"
+        )
+        order_id, price, order_time = rows[0]
+        assert isinstance(order_id, int), (
+            f"order_id should be a BIGINT, got {order_id!r} -- columns were "
+            "likely bound positionally instead of by declared name"
+        )
+        assert price is not None and order_time is not None, (
+            "price/order_time should not be null -- columns were likely bound "
+            "positionally instead of by declared name"
+        )
 
 
 class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
