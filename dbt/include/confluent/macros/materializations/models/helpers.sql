@@ -274,6 +274,30 @@ WITH (
 {% endmacro %}
 
 
+{% macro _drift_catalog_columns_select(existing_relation, table_identifier) %}
+{#- One COLUMNS-section SELECT scoped to a single TABLE_NAME. Kept as its own
+   macro so the two call sites below can stay independent SELECTs joined by
+   UNION ALL — folding them into one WHERE ... OR ... would defeat the
+   server's predicate push-down on TABLE_NAME. -#}
+    SELECT
+      'COLUMNS' AS section,
+      TABLE_NAME AS table_name,
+      COLUMN_NAME AS col_name,
+      FULL_DATA_TYPE AS data_type,
+      DISTRIBUTION_ORDINAL_POSITION AS dist_position,
+      CAST(NULL AS STRING) AS option_key,
+      CAST(NULL AS STRING) AS option_value,
+      CAST(NULL AS STRING) AS is_distributed,
+      CAST(NULL AS INT) AS dist_buckets,
+      CAST(NULL AS STRING) AS is_materialized
+    FROM INFORMATION_SCHEMA.`COLUMNS`
+    WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
+      AND TABLE_SCHEMA = '{{ existing_relation.schema }}'
+      AND IS_HIDDEN = 'NO'
+      AND TABLE_NAME = '{{ table_identifier }}'
+{%- endmacro %}
+
+
 {% macro get_drift_catalog(existing_relation, temp_relation) %}
   {# Fetch every piece of metadata the drift check needs in one query.
      The result is a sparse table with a `section` discriminator and a
@@ -303,23 +327,9 @@ WITH (
      `_partition_drift_catalog` (Python) splits this back into per-concern
      dicts before any drift check runs. #}
   {% call statement('get_drift_catalog', fetch_result=True, hidden=True) %}
-    SELECT
-      'COLUMNS' AS section,
-      TABLE_NAME AS table_name,
-      COLUMN_NAME AS col_name,
-      FULL_DATA_TYPE AS data_type,
-      DISTRIBUTION_ORDINAL_POSITION AS dist_position,
-      CAST(NULL AS STRING) AS option_key,
-      CAST(NULL AS STRING) AS option_value,
-      CAST(NULL AS STRING) AS is_distributed,
-      CAST(NULL AS INT) AS dist_buckets,
-      CAST(NULL AS STRING) AS is_materialized
-    FROM INFORMATION_SCHEMA.`COLUMNS`
-    WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
-      AND TABLE_SCHEMA = '{{ existing_relation.schema }}'
-      AND IS_HIDDEN = 'NO'
-      AND (TABLE_NAME = '{{ existing_relation.identifier }}'
-           OR TABLE_NAME = '{{ temp_relation.identifier }}')
+{{ _drift_catalog_columns_select(existing_relation, existing_relation.identifier) }}
+    UNION ALL
+{{ _drift_catalog_columns_select(existing_relation, temp_relation.identifier) }}
     UNION ALL
     SELECT
       'TABLES' AS section,
