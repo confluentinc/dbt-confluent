@@ -1,0 +1,1 @@
+Split the schema drift `INFORMATION_SCHEMA.COLUMNS` query into two `TABLE_NAME`-scoped `SELECT`s joined by `UNION ALL` instead of one `SELECT` with an `OR`, so the server can push the `TABLE_NAME` predicate down.
