@@ -33,7 +33,7 @@ dependencies = [
   "dbt-adapters~=1.16",
   "agate~=1.0",
   "httpx>=0.23.0,<0.29.0",
-  "confluent-sql~=0.5.0",
+  "confluent-sql~=0.5.3",
 ]
 
 [dependency-groups]
