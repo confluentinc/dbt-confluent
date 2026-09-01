@@ -10,7 +10,11 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from confluent_sql.exceptions import OperationalError, TableflowTopicNotFoundError
+from confluent_sql.exceptions import (
+    OperationalError,
+    ProgrammingError,
+    TableflowTopicNotFoundError,
+)
 from dbt_common.exceptions import DbtDatabaseError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
@@ -95,3 +99,33 @@ class TestDisableTableflowIfEnabled:
             "not enabled", table_name="my_table"
         )
         wire_connection.disable_tableflow_if_enabled(rel)
+
+    # --- Tableflow control-plane auth errors -> actionable guidance ---
+
+    def test_get_auth_error_names_profile_fields(self, wire_connection, handle, rel):
+        err = ProgrammingError(
+            "Resolving the Kafka cluster id from the database name requires a global "
+            "API key; alternatively pass database_kafka_cluster_id to connect()."
+        )
+        handle.get_tableflow.side_effect = err
+        with pytest.raises(DbtDatabaseError) as exc_info:
+            wire_connection.disable_tableflow_if_enabled(rel)
+        assert exc_info.value.__cause__ is err
+        msg = str(exc_info.value)
+        assert "global_api_key" in msg
+        assert "tableflow_api_key" in msg
+        handle.disable_tableflow.assert_not_called()
+
+    def test_disable_auth_error_names_profile_fields(self, wire_connection, handle, rel):
+        handle.get_tableflow.return_value = MagicMock()
+        err = ProgrammingError(
+            "Resolving the Kafka cluster id from the database name requires a global "
+            "API key; alternatively pass database_kafka_cluster_id to connect()."
+        )
+        handle.disable_tableflow.side_effect = err
+        with pytest.raises(DbtDatabaseError) as exc_info:
+            wire_connection.disable_tableflow_if_enabled(rel)
+        assert exc_info.value.__cause__ is err
+        msg = str(exc_info.value)
+        assert "global_api_key" in msg
+        assert "tableflow_api_key" in msg

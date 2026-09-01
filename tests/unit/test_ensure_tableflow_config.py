@@ -13,6 +13,7 @@ import pytest
 from confluent_sql import AzureAdlsStorage, ByobAwsStorage, ManagedStorage, TableFormat
 from confluent_sql.exceptions import (
     OperationalError,
+    ProgrammingError,
     TableflowTopicAlreadyExistsError,
     TableflowTopicNotFoundError,
 )
@@ -210,3 +211,40 @@ class TestEnsureTableflowConfig:
         # One debug event for the enable attempt, one for the swallowed race.
         assert fire_event.call_count == 2
         assert "my_table" in fire_event.call_args.args[0].base_msg
+
+    # --- Tableflow control-plane auth errors -> actionable guidance ---
+
+    def test_get_auth_error_names_profile_fields(self, wire_connection, handle, rel):
+        """A Flink-region-only profile can't resolve the Kafka cluster id
+        Tableflow needs. The raw driver message points at `connect()`'s
+        `database_kafka_cluster_id`, a parameter this adapter doesn't expose
+        -- the wrapped error must instead name the actual profile fields."""
+        err = ProgrammingError(
+            "Resolving the Kafka cluster id from the database name requires a global "
+            "API key; alternatively pass database_kafka_cluster_id to connect()."
+        )
+        handle.get_tableflow.side_effect = err
+        with pytest.raises(DbtDatabaseError) as exc_info:
+            wire_connection.ensure_tableflow_config(
+                rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
+            )
+        assert exc_info.value.__cause__ is err
+        msg = str(exc_info.value)
+        assert "global_api_key" in msg
+        assert "tableflow_api_key" in msg
+        handle.enable_tableflow.assert_not_called()
+
+    def test_enable_auth_error_names_profile_fields(self, wire_connection, handle, rel):
+        err = ProgrammingError(
+            "Resolving the Kafka cluster id from the database name requires a global "
+            "API key; alternatively pass database_kafka_cluster_id to connect()."
+        )
+        handle.enable_tableflow.side_effect = err
+        with pytest.raises(DbtDatabaseError) as exc_info:
+            wire_connection.ensure_tableflow_config(
+                rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
+            )
+        assert exc_info.value.__cause__ is err
+        msg = str(exc_info.value)
+        assert "global_api_key" in msg
+        assert "tableflow_api_key" in msg

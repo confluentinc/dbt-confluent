@@ -4,7 +4,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 import agate
 from confluent_sql import (
@@ -21,6 +21,7 @@ from confluent_sql import (
 from confluent_sql import Error as ConfluentSqlError
 from confluent_sql.exceptions import (
     OperationalError,
+    ProgrammingError,
     StatementNotFoundError,
     TableflowTopicAlreadyExistsError,
     TableflowTopicNotFoundError,
@@ -676,6 +677,27 @@ class ConfluentAdapter(SQLAdapter):
             error_handling=error_handling,
         )
 
+    @staticmethod
+    def _reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
+        """Translate the driver's Kafka-cluster-id-resolution failure into
+        guidance that names actual profile fields.
+
+        Tableflow's control-plane routes (enable/get/disable) resolve the
+        connection's `database` to a Kafka cluster id via CMK, which
+        requires a Global or Tableflow-scoped API key -- a Flink-region key
+        alone can't reach it. The raw driver message says as much, but also
+        suggests passing `database_kafka_cluster_id` to `connect()`, a
+        parameter this adapter doesn't expose through `profiles.yml`. Raised
+        instead of the raw `ProgrammingError` so the message stays
+        actionable for a dbt-confluent user.
+        """
+        raise DbtDatabaseError(
+            f"{e} To use Tableflow, add a Global API key (`global_api_key`/"
+            "`global_api_secret`) to your profile, or a dedicated "
+            "`tableflow_api_key`/`tableflow_api_secret` pair -- see "
+            "README.md#configuration."
+        ) from e
+
     @available
     def ensure_tableflow_config(
         self, relation: BaseRelation, tableflow_config: dict | None
@@ -711,6 +733,8 @@ class ConfluentAdapter(SQLAdapter):
             handle.get_tableflow(relation.identifier)
         except TableflowTopicNotFoundError:
             pass  # Not enabled yet -- fall through to enable it below.
+        except ProgrammingError as e:
+            self._reraise_tableflow_auth_error(e)
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
         else:
@@ -751,6 +775,8 @@ class ConfluentAdapter(SQLAdapter):
                     base_msg=f"Tableflow was enabled concurrently for {relation}; leaving as-is."
                 )
             )
+        except ProgrammingError as e:
+            self._reraise_tableflow_auth_error(e)
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error enabling Tableflow for {relation}: {e}") from e
 
@@ -780,6 +806,8 @@ class ConfluentAdapter(SQLAdapter):
             handle.get_tableflow(relation.identifier)
         except TableflowTopicNotFoundError:
             return
+        except ProgrammingError as e:
+            self._reraise_tableflow_auth_error(e)
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
         fire_event(AdapterEventDebug(base_msg=f"Disabling Tableflow on {relation} before drop."))
@@ -787,6 +815,8 @@ class ConfluentAdapter(SQLAdapter):
             handle.disable_tableflow(relation.identifier)
         except TableflowTopicNotFoundError:
             return  # Narrow race: already gone.
+        except ProgrammingError as e:
+            self._reraise_tableflow_auth_error(e)
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error disabling Tableflow for {relation}: {e}") from e
 
