@@ -16,6 +16,7 @@ Features:
 - `distributed_by` config to control Kafka partitioning via the `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause
 - Schema drift detection on re-runs (columns, WITH options, `distributed_by`) — surfaces every violation in one error
 - Adopt existing tables and statements deployed outside dbt via the `alias` and `statement_name` configs
+- `tableflow` config to materialize a model's backing Kafka topic as an Iceberg/Delta table via [Tableflow](https://www.confluent.io/product/tableflow/)
 
 See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 
@@ -44,6 +45,8 @@ dbt init my_project
 Select `confluent` as the adapter and fill in the prompts for your Confluent Cloud credentials (API key, compute pool, environment, etc.).
 
 You can authenticate with either a **Global** Confluent Cloud API key (`global_api_key` / `global_api_secret`, which works against every route) or a **Flink-region** key (`flink_api_key` / `flink_api_secret`). The `compute_pool_id` is optional: omit it to run statements in the environment+region [default compute pool](https://docs.confluent.io/cloud/current/flink/concepts/compute-pools.html#default-compute-pools). This profile-level pool is the default for every model; individual models can override it with `config(compute_pool_id='...')` — see [Materializations](MATERIALIZATIONS.md#compute-pool).
+
+[Tableflow](MATERIALIZATIONS.md#tableflow) requires a Global key — it resolves your Kafka cluster id via a route a Flink-region key can't reach.
 
 ### Concept mapping
 
