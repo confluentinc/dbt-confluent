@@ -715,6 +715,15 @@ class ConfluentAdapter(SQLAdapter):
                 f"'tableflow' has unknown key(s): {', '.join(sorted(unknown))}. "
                 f"Allowed keys: {', '.join(sorted(_TABLEFLOW_CONFIG_KEYS))}."
             )
+        # Translate (raising CompilationError on a malformed config) before touching
+        # the driver at all, including the `get_tableflow` check below -- this is the
+        # only validation `tableflow` gets, so it must surface deterministically,
+        # not get masked by a get_tableflow connection/auth error, and not silently
+        # skipped when the relation turns out to already be enabled.
+        tableflow_formats = self._translate_tableflow_formats(tableflow_config.get("formats"))
+        storage = self._translate_tableflow_storage(tableflow_config.get("storage"))
+        topic_config = self._translate_tableflow_topic_config(tableflow_config)
+
         conn = self.connections.get_thread_connection()
         handle = conn.handle
         try:
@@ -736,14 +745,6 @@ class ConfluentAdapter(SQLAdapter):
                 )
             )
             return
-
-        # Translate (raising CompilationError on a malformed config) before
-        # logging or touching the driver -- this is the only validation
-        # `tableflow` gets, so it must fail clean, not with a raw KeyError
-        # from indexing a missing key below.
-        tableflow_formats = self._translate_tableflow_formats(tableflow_config.get("formats"))
-        storage = self._translate_tableflow_storage(tableflow_config.get("storage"))
-        topic_config = self._translate_tableflow_topic_config(tableflow_config)
 
         # Blocks (by default) until the topic reaches RUNNING, up to 300s -- worth
         # logging at info, not debug, so the wait is visible without --debug.

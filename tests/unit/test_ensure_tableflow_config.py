@@ -472,4 +472,28 @@ class TestEnsureTableflowConfigMalformedConfig:
         assert expected_substring in str(excinfo.value), (
             f"Expected error containing {expected_substring!r}, got: {excinfo.value}"
         )
+        # Validated before any driver call, including the get_tableflow check --
+        # an unrelated connection/auth error there must never mask a config error.
+        handle.get_tableflow.assert_not_called()
         handle.enable_tableflow.assert_not_called()
+
+    def test_malformed_config_raises_even_when_already_enabled(self, wire_connection, handle, rel):
+        """A malformed config must surface its own error rather than being
+        swallowed by the already-enabled warn-and-return path."""
+        handle.get_tableflow.side_effect = None
+        handle.get_tableflow.return_value = MagicMock()
+        with pytest.raises(CompilationError):
+            wire_connection.ensure_tableflow_config(rel, {"formats": "PARQUET"})
+        handle.get_tableflow.assert_not_called()
+
+    def test_malformed_config_raises_even_when_get_tableflow_would_error(
+        self, wire_connection, handle, rel
+    ):
+        """A malformed config must surface its own error rather than being
+        masked by an unrelated connection/auth error from get_tableflow."""
+        handle.get_tableflow.side_effect = OperationalError(
+            "gateway timeout", http_status_code=504
+        )
+        with pytest.raises(CompilationError):
+            wire_connection.ensure_tableflow_config(rel, {"formats": "PARQUET"})
+        handle.get_tableflow.assert_not_called()
