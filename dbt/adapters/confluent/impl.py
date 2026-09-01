@@ -536,7 +536,11 @@ class ConfluentAdapter(SQLAdapter):
                 f"key ({', '.join(sorted(_TABLEFLOW_STORAGE_CLASSES))})."
             )
         storage_kind = storage["kind"]
-        storage_cls = _TABLEFLOW_STORAGE_CLASSES.get(storage_kind)
+        # isinstance guard first -- dict.get() raises TypeError, not a clean
+        # CompilationError, on an unhashable kind (e.g. a list by mistake).
+        storage_cls = (
+            _TABLEFLOW_STORAGE_CLASSES.get(storage_kind) if isinstance(storage_kind, str) else None
+        )
         if storage_cls is None:
             raise CompilationError(
                 f"'tableflow.storage.kind' must be one of "
@@ -565,7 +569,9 @@ class ConfluentAdapter(SQLAdapter):
                 "'tableflow.error_handling' must be a mapping with a 'mode' key."
             )
         mode = eh["mode"]
-        eh_cls = _TABLEFLOW_ERROR_HANDLING_CLASSES.get(mode)
+        # isinstance guard first -- dict.get() raises TypeError, not a clean
+        # CompilationError, on an unhashable mode (e.g. a list by mistake).
+        eh_cls = _TABLEFLOW_ERROR_HANDLING_CLASSES.get(mode) if isinstance(mode, str) else None
         if eh_cls is None:
             raise CompilationError(
                 f"'tableflow.error_handling.mode' must be one of "

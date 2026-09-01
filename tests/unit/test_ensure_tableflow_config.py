@@ -425,6 +425,18 @@ class TestEnsureTableflowConfigMalformedConfig:
                 },
                 "'tableflow.error_handling.target' must be a string",
             ),
+            (
+                {"formats": "ICEBERG", "storage": {"kind": ["Managed"]}},
+                "'tableflow.storage.kind' must be one of",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {"kind": "Managed"},
+                    "error_handling": {"mode": ["LOG"]},
+                },
+                "'tableflow.error_handling.mode' must be one of",
+            ),
         ],
         ids=[
             "list_not_dict",
@@ -448,6 +460,8 @@ class TestEnsureTableflowConfigMalformedConfig:
             "unknown_error_handling_mode",
             "target_not_allowed_outside_log",
             "target_not_a_string",
+            "unhashable_storage_kind",
+            "unhashable_error_handling_mode",
         ],
     )
     def test_malformed_config_raises_before_touching_driver(
