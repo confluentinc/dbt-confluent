@@ -109,23 +109,24 @@ _START_MODE_RE = re.compile(
     r"(?:\((?P<arg>(?:'(?:[^']|'')*'|[\w \t])*)\)\s*)?"
 )
 
-# The dbt-facing shorthand name for each `tableflow.storage`/`error_handling`
-# shape, mapped to confluent_sql's own class. This mapping is the one piece of
-# "what backends/modes exist" that's genuinely ours to maintain -- it's our
-# config surface's own naming, not the driver's. Each shape's actual required/
-# allowed fields are NOT hand-copied here; they're enforced by the dataclass
-# constructor itself (see _translate_tableflow_storage /
-# _translate_tableflow_error_handling), so a field the driver adds or renames
-# needs no change on this side to be correctly accepted or rejected.
+# Each `tableflow.storage.kind`/`error_handling.mode` value, verbatim as the
+# API/driver name it (`ManagedStorage.kind`, `TableflowErrorHandlingSuspend.mode`,
+# etc.), mapped to confluent_sql's own class -- a thin passthrough, not a
+# dbt-invented shorthand, so there's no separate naming for users to learn.
+# Each shape's actual required/allowed fields are NOT hand-copied here;
+# they're enforced by the dataclass constructor itself (see
+# _translate_tableflow_storage / _translate_tableflow_error_handling), so a
+# field the driver adds or renames needs no change on this side to be
+# correctly accepted or rejected.
 _TABLEFLOW_STORAGE_CLASSES: dict[str, type] = {
-    "managed": ManagedStorage,
-    "byob_aws": ByobAwsStorage,
-    "azure_adls": AzureAdlsStorage,
+    "Managed": ManagedStorage,
+    "ByobAws": ByobAwsStorage,
+    "AzureDataLakeStorageGen2": AzureAdlsStorage,
 }
 _TABLEFLOW_ERROR_HANDLING_CLASSES: dict[str, type] = {
-    "suspend": TableflowErrorHandlingSuspend,
-    "skip": TableflowErrorHandlingSkip,
-    "log": TableflowErrorHandlingLog,
+    "SUSPEND": TableflowErrorHandlingSuspend,
+    "SKIP": TableflowErrorHandlingSkip,
+    "LOG": TableflowErrorHandlingLog,
 }
 
 
@@ -485,14 +486,14 @@ class ConfluentAdapter(SQLAdapter):
 
             tableflow={
                 'formats': 'ICEBERG' | ['ICEBERG', 'DELTA'],  # required
-                'storage': {'type': 'managed'}
-                         | {'type': 'byob_aws', 'bucket_name': ..., 'provider_integration_id': ...}
-                         | {'type': 'azure_adls', 'storage_account_name': ...,
+                'storage': {'kind': 'Managed'}
+                         | {'kind': 'ByobAws', 'bucket_name': ..., 'provider_integration_id': ...}
+                         | {'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': ...,
                             'container_name': ..., 'provider_integration_id': ...},  # required
                 'retention_ms': 604800000,       # optional
                 'data_retention_ms': 604800000,  # optional
-                'error_handling': {'mode': 'suspend' | 'skip'}
-                                | {'mode': 'log', 'target': '...'},  # optional
+                'error_handling': {'mode': 'SUSPEND' | 'SKIP'}
+                                | {'mode': 'LOG', 'target': '...'},  # optional
             }
 
         Deliberately thin: it just runs the same translation
@@ -575,33 +576,33 @@ class ConfluentAdapter(SQLAdapter):
     ) -> "ManagedStorage | ByobAwsStorage | AzureAdlsStorage":
         """Validate and translate `tableflow.storage` into its driver type.
 
-        Only the shorthand-name-to-class dispatch is ours; each storage
-        type's required/allowed *fields* are enforced by attempting the real
+        Only the kind-to-class dispatch is ours; each storage kind's
+        required/allowed *fields* are enforced by attempting the real
         dataclass construction and catching the `TypeError` it raises on a
         missing or unexpected field, instead of a hand-copied required-keys
         list that could silently go stale against the driver. Field *values*
         get their own check (see `_require_string_fields`) since the
         constructor won't catch a wrong-typed one.
         """
-        if not isinstance(storage, dict) or "type" not in storage:
+        if not isinstance(storage, dict) or "kind" not in storage:
             raise CompilationError(
-                "'tableflow.storage' is required and must be a mapping with a 'type' "
+                "'tableflow.storage' is required and must be a mapping with a 'kind' "
                 f"key ({', '.join(sorted(_TABLEFLOW_STORAGE_CLASSES))})."
             )
-        storage_type = storage["type"]
-        storage_cls = _TABLEFLOW_STORAGE_CLASSES.get(storage_type)
+        storage_kind = storage["kind"]
+        storage_cls = _TABLEFLOW_STORAGE_CLASSES.get(storage_kind)
         if storage_cls is None:
             raise CompilationError(
-                f"'tableflow.storage.type' must be one of "
-                f"{sorted(_TABLEFLOW_STORAGE_CLASSES)}; got {storage_type!r}."
+                f"'tableflow.storage.kind' must be one of "
+                f"{sorted(_TABLEFLOW_STORAGE_CLASSES)}; got {storage_kind!r}."
             )
-        fields = {k: v for k, v in storage.items() if k != "type"}
+        fields = {k: v for k, v in storage.items() if k != "kind"}
         ConfluentAdapter._require_string_fields(fields, "tableflow.storage")
         try:
             return storage_cls(**fields)
         except TypeError as e:
             raise CompilationError(
-                f"'tableflow.storage' of type '{storage_type}' is invalid: {e}"
+                f"'tableflow.storage' of kind '{storage_kind}' is invalid: {e}"
             ) from e
 
     @staticmethod
@@ -609,7 +610,7 @@ class ConfluentAdapter(SQLAdapter):
         """Validate and translate `tableflow.error_handling` into its driver
         type. Same philosophy as `_translate_tableflow_storage`: only the
         mode-name-to-class dispatch is ours, and each mode's allowed fields
-        (e.g. `target` for `'log'` only) are enforced by the constructor
+        (e.g. `target` for `'LOG'` only) are enforced by the constructor
         itself, not a hand-copied per-mode key list -- field values are
         checked separately (see `_require_string_fields`).
         """

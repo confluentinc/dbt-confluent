@@ -71,7 +71,7 @@ class TestEnsureTableflowConfig:
         self, wire_connection, handle, rel, fire_event
     ):
         wire_connection.ensure_tableflow_config(
-            rel, {"formats": "ICEBERG", "storage": {"type": "managed"}}
+            rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
         handle.enable_tableflow.assert_called_once()
         call = handle.enable_tableflow.call_args
@@ -84,7 +84,7 @@ class TestEnsureTableflowConfig:
 
     def test_lowercase_and_multiple_formats(self, wire_connection, handle, rel):
         wire_connection.ensure_tableflow_config(
-            rel, {"formats": ["iceberg", "delta"], "storage": {"type": "managed"}}
+            rel, {"formats": ["iceberg", "delta"], "storage": {"kind": "Managed"}}
         )
         call = handle.enable_tableflow.call_args
         assert call.kwargs["tableflow_formats"] == [TableFormat.ICEBERG, TableFormat.DELTA]
@@ -95,7 +95,7 @@ class TestEnsureTableflowConfig:
             {
                 "formats": "ICEBERG",
                 "storage": {
-                    "type": "byob_aws",
+                    "kind": "ByobAws",
                     "bucket_name": "my-bucket",
                     "provider_integration_id": "cspi-123",
                 },
@@ -112,7 +112,7 @@ class TestEnsureTableflowConfig:
             {
                 "formats": "ICEBERG",
                 "storage": {
-                    "type": "azure_adls",
+                    "kind": "AzureDataLakeStorageGen2",
                     "storage_account_name": "acct",
                     "container_name": "container",
                     "provider_integration_id": "cspi-123",
@@ -131,10 +131,10 @@ class TestEnsureTableflowConfig:
             rel,
             {
                 "formats": "ICEBERG",
-                "storage": {"type": "managed"},
+                "storage": {"kind": "Managed"},
                 "retention_ms": 604800000,
                 "data_retention_ms": 0,
-                "error_handling": {"mode": "log", "target": "my_dlq"},
+                "error_handling": {"mode": "LOG", "target": "my_dlq"},
             },
         )
         call = handle.enable_tableflow.call_args
@@ -146,7 +146,7 @@ class TestEnsureTableflowConfig:
 
     def test_no_optional_fields_passes_no_topic_config(self, wire_connection, handle, rel):
         wire_connection.ensure_tableflow_config(
-            rel, {"formats": "ICEBERG", "storage": {"type": "managed"}}
+            rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
         assert handle.enable_tableflow.call_args.kwargs["config"] is None
 
@@ -158,7 +158,7 @@ class TestEnsureTableflowConfig:
         handle.get_tableflow.side_effect = None
         handle.get_tableflow.return_value = MagicMock()
         wire_connection.ensure_tableflow_config(
-            rel, {"formats": "ICEBERG", "storage": {"type": "managed"}}
+            rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
         handle.enable_tableflow.assert_not_called()
         fire_event.assert_called_once()
@@ -182,7 +182,7 @@ class TestEnsureTableflowConfig:
         handle.get_tableflow.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             wire_connection.ensure_tableflow_config(
-                rel, {"formats": "ICEBERG", "storage": {"type": "managed"}}
+                rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
             )
         assert exc_info.value.__cause__ is err
         handle.enable_tableflow.assert_not_called()
@@ -192,7 +192,7 @@ class TestEnsureTableflowConfig:
         handle.enable_tableflow.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             wire_connection.ensure_tableflow_config(
-                rel, {"formats": "ICEBERG", "storage": {"type": "managed"}}
+                rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
             )
         assert exc_info.value.__cause__ is err
         assert "my_table" in str(exc_info.value)
@@ -205,7 +205,7 @@ class TestEnsureTableflowConfig:
             "already enabled", table_name="my_table"
         )
         wire_connection.ensure_tableflow_config(
-            rel, {"formats": "ICEBERG", "storage": {"type": "managed"}}
+            rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
         # One debug event for the enable attempt, one for the swallowed race.
         assert fire_event.call_count == 2

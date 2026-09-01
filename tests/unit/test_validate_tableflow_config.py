@@ -25,13 +25,13 @@ class TestValidateTableflowConfig:
     @pytest.mark.parametrize(
         "valid_config",
         [
-            {"formats": "ICEBERG", "storage": {"type": "managed"}},
-            {"formats": ["iceberg"], "storage": {"type": "managed"}},
-            {"formats": ["ICEBERG", "DELTA"], "storage": {"type": "managed"}},
+            {"formats": "ICEBERG", "storage": {"kind": "Managed"}},
+            {"formats": ["iceberg"], "storage": {"kind": "Managed"}},
+            {"formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}},
             {
                 "formats": "ICEBERG",
                 "storage": {
-                    "type": "byob_aws",
+                    "kind": "ByobAws",
                     "bucket_name": "my-bucket",
                     "provider_integration_id": "cspi-123",
                 },
@@ -39,7 +39,7 @@ class TestValidateTableflowConfig:
             {
                 "formats": "ICEBERG",
                 "storage": {
-                    "type": "azure_adls",
+                    "kind": "AzureDataLakeStorageGen2",
                     "storage_account_name": "acct",
                     "container_name": "container",
                     "provider_integration_id": "cspi-123",
@@ -47,34 +47,34 @@ class TestValidateTableflowConfig:
             },
             {
                 "formats": "ICEBERG",
-                "storage": {"type": "managed"},
+                "storage": {"kind": "Managed"},
                 "retention_ms": 604800000,
                 "data_retention_ms": 0,
             },
             {
                 "formats": "ICEBERG",
-                "storage": {"type": "managed"},
+                "storage": {"kind": "Managed"},
                 "retention_ms": "604800000",
             },
             {
                 "formats": "ICEBERG",
-                "storage": {"type": "managed"},
-                "error_handling": {"mode": "suspend"},
+                "storage": {"kind": "Managed"},
+                "error_handling": {"mode": "SUSPEND"},
             },
             {
                 "formats": "ICEBERG",
-                "storage": {"type": "managed"},
-                "error_handling": {"mode": "skip"},
+                "storage": {"kind": "Managed"},
+                "error_handling": {"mode": "SKIP"},
             },
             {
                 "formats": "ICEBERG",
-                "storage": {"type": "managed"},
-                "error_handling": {"mode": "log", "target": "my_dlq"},
+                "storage": {"kind": "Managed"},
+                "error_handling": {"mode": "LOG", "target": "my_dlq"},
             },
             {
                 "formats": "ICEBERG",
-                "storage": {"type": "managed"},
-                "error_handling": {"mode": "log"},
+                "storage": {"kind": "Managed"},
+                "error_handling": {"mode": "LOG"},
             },
         ],
         ids=[
@@ -99,38 +99,38 @@ class TestValidateTableflowConfig:
         [
             (["ICEBERG"], "must be a mapping"),
             ("ICEBERG", "must be a mapping"),
-            ({"storage": {"type": "managed"}, "bogus": 1}, "unknown key(s): bogus"),
-            ({"storage": {"type": "managed"}}, "'tableflow.formats' is required"),
-            ({"formats": [], "storage": {"type": "managed"}}, "'tableflow.formats' is required"),
+            ({"storage": {"kind": "Managed"}, "bogus": 1}, "unknown key(s): bogus"),
+            ({"storage": {"kind": "Managed"}}, "'tableflow.formats' is required"),
+            ({"formats": [], "storage": {"kind": "Managed"}}, "'tableflow.formats' is required"),
             (
-                {"formats": ["PARQUET"], "storage": {"type": "managed"}},
+                {"formats": ["PARQUET"], "storage": {"kind": "Managed"}},
                 "'tableflow.formats' is invalid",
             ),
             ({"formats": "ICEBERG"}, "'tableflow.storage' is required"),
             ({"formats": "ICEBERG", "storage": "managed"}, "'tableflow.storage' is required"),
             (
-                {"formats": "ICEBERG", "storage": {"type": "s3"}},
-                "'tableflow.storage.type' must be one of",
+                {"formats": "ICEBERG", "storage": {"kind": "s3"}},
+                "'tableflow.storage.kind' must be one of",
             ),
             (
-                {"formats": "ICEBERG", "storage": {"type": "byob_aws"}},
-                "'tableflow.storage' of type 'byob_aws' is invalid",
+                {"formats": "ICEBERG", "storage": {"kind": "ByobAws"}},
+                "'tableflow.storage' of kind 'ByobAws' is invalid",
             ),
             (
                 {
                     "formats": "ICEBERG",
                     "storage": {
-                        "type": "managed",
+                        "kind": "Managed",
                         "bucket_name": "extra",
                     },
                 },
-                "'tableflow.storage' of type 'managed' is invalid",
+                "'tableflow.storage' of kind 'Managed' is invalid",
             ),
             (
                 {
                     "formats": "ICEBERG",
                     "storage": {
-                        "type": "byob_aws",
+                        "kind": "ByobAws",
                         "bucket_name": 12345,
                         "provider_integration_id": "cspi-1",
                     },
@@ -141,7 +141,7 @@ class TestValidateTableflowConfig:
                 {
                     "formats": "ICEBERG",
                     "storage": {
-                        "type": "azure_adls",
+                        "kind": "AzureDataLakeStorageGen2",
                         "storage_account_name": "acct",
                         "container_name": 999,
                         "provider_integration_id": "cspi-1",
@@ -152,7 +152,7 @@ class TestValidateTableflowConfig:
             (
                 {
                     "formats": "ICEBERG",
-                    "storage": {"type": "managed"},
+                    "storage": {"kind": "Managed"},
                     "retention_ms": -1,
                 },
                 "must be a non-negative integer",
@@ -160,7 +160,7 @@ class TestValidateTableflowConfig:
             (
                 {
                     "formats": "ICEBERG",
-                    "storage": {"type": "managed"},
+                    "storage": {"kind": "Managed"},
                     "retention_ms": True,
                 },
                 "must be a non-negative integer",
@@ -168,7 +168,7 @@ class TestValidateTableflowConfig:
             (
                 {
                     "formats": "ICEBERG",
-                    "storage": {"type": "managed"},
+                    "storage": {"kind": "Managed"},
                     "retention_ms": "not-a-number",
                 },
                 "must be a non-negative integer",
@@ -176,7 +176,7 @@ class TestValidateTableflowConfig:
             (
                 {
                     "formats": "ICEBERG",
-                    "storage": {"type": "managed"},
+                    "storage": {"kind": "Managed"},
                     "retention_ms": [1, 2, 3],
                 },
                 "must be a non-negative integer",
@@ -184,15 +184,15 @@ class TestValidateTableflowConfig:
             (
                 {
                     "formats": "ICEBERG",
-                    "storage": {"type": "managed"},
-                    "error_handling": "suspend",
+                    "storage": {"kind": "Managed"},
+                    "error_handling": "SUSPEND",
                 },
                 "must be a mapping with a 'mode' key",
             ),
             (
                 {
                     "formats": "ICEBERG",
-                    "storage": {"type": "managed"},
+                    "storage": {"kind": "Managed"},
                     "error_handling": {"mode": "retry"},
                 },
                 "'tableflow.error_handling.mode' must be one of",
@@ -200,16 +200,16 @@ class TestValidateTableflowConfig:
             (
                 {
                     "formats": "ICEBERG",
-                    "storage": {"type": "managed"},
-                    "error_handling": {"mode": "suspend", "target": "x"},
+                    "storage": {"kind": "Managed"},
+                    "error_handling": {"mode": "SUSPEND", "target": "x"},
                 },
-                "'tableflow.error_handling' of mode 'suspend' is invalid",
+                "'tableflow.error_handling' of mode 'SUSPEND' is invalid",
             ),
             (
                 {
                     "formats": "ICEBERG",
-                    "storage": {"type": "managed"},
-                    "error_handling": {"mode": "log", "target": 123},
+                    "storage": {"kind": "Managed"},
+                    "error_handling": {"mode": "LOG", "target": 123},
                 },
                 "'tableflow.error_handling.target' must be a string",
             ),

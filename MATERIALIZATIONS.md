@@ -289,7 +289,7 @@ Available on every materialization that owns a real Kafka-backed table (`table`,
     materialized='table',
     tableflow={
         'formats': ['ICEBERG'],
-        'storage': {'type': 'managed'},
+        'storage': {'kind': 'Managed'},
     }
 ) }}
 select order_id, customer_id, price from {{ ref('orders') }}
@@ -297,12 +297,12 @@ select order_id, customer_id, price from {{ ref('orders') }}
 
 **Fields**:
 - `formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both (case-insensitive).
-- `storage` (required) — a mapping with a `type` key:
-    - `{'type': 'managed'}` — Confluent-managed storage, no further config.
-    - `{'type': 'byob_aws', 'bucket_name': '...', 'provider_integration_id': '...'}` — bring-your-own S3 bucket.
-    - `{'type': 'azure_adls', 'storage_account_name': '...', 'container_name': '...', 'provider_integration_id': '...'}` — customer-owned Azure Data Lake Storage Gen2.
+- `storage` (required) — a mapping with a `kind` key, using Tableflow's own API names verbatim:
+    - `{'kind': 'Managed'}` — Confluent-managed storage, no further config.
+    - `{'kind': 'ByobAws', 'bucket_name': '...', 'provider_integration_id': '...'}` — bring-your-own S3 bucket.
+    - `{'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': '...', 'container_name': '...', 'provider_integration_id': '...'}` — customer-owned Azure Data Lake Storage Gen2.
 - `retention_ms` / `data_retention_ms` (optional) — non-negative integers (or numeric strings) controlling snapshot/data retention.
-- `error_handling` (optional) — how a bad record is handled: `{'mode': 'suspend'}` (the server default — suspends materialization), `{'mode': 'skip'}` (skip and continue), or `{'mode': 'log', 'target': '...'}` (log to a dead-letter target, `target` defaults to `'error_log'`).
+- `error_handling` (optional) — how a bad record is handled: `{'mode': 'SUSPEND'}` (the server default — suspends materialization), `{'mode': 'SKIP'}` (skip and continue), or `{'mode': 'LOG', 'target': '...'}` (log to a dead-letter target, `target` defaults to `'error_log'`).
 
 The adapter validates this shape at compile time (`CompilationError` on a malformed `tableflow` config), before any DDL or full-refresh drop runs.
 
