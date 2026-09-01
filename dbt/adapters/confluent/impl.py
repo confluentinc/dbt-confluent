@@ -680,24 +680,24 @@ class ConfluentAdapter(SQLAdapter):
     @staticmethod
     def _reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
         """Translate the driver's Kafka-cluster-id-resolution failure into
-        guidance that names actual profile fields.
+        guidance that names the actual profile field, or bubble it up
+        unchanged if it's not that specific error.
 
-        Tableflow's control-plane routes (enable/get/disable) resolve the
-        connection's `database` to a Kafka cluster id via CMK, which
-        requires a Global or Tableflow-scoped API key -- a Flink-region key
-        alone can't reach it. The raw driver message says as much, but in
-        terms of the driver's own `connect()` call (a `database_kafka_
-        cluster_id` parameter this adapter doesn't expose through
-        `profiles.yml`), not this adapter's profile fields -- not useful to
-        a dbt user, so it's replaced rather than appended to (still
-        available via `__cause__` for anyone who needs it).
+        `ProgrammingError` covers more than this one case, so only the
+        known "no global key" message (raised by `_resolve_kafka_cluster_id`
+        when `database` can't be resolved to a Kafka cluster id) is
+        rewritten -- a `tableflow_api_key`/`tableflow_api_secret` pair alone
+        doesn't fix this particular error (CMK resolution requires the
+        global key specifically), so it isn't offered as an alternative
+        here. Anything else re-raises as-is rather than risk mislabeling an
+        unrelated `ProgrammingError`.
         """
+        if "requires a global API key" not in str(e):
+            raise
         raise DbtDatabaseError(
-            "Tableflow requires a Global API key or a dedicated "
-            "`tableflow_api_key`/`tableflow_api_secret` pair -- a Flink-region key "
-            "alone can't reach Tableflow's control plane. Add `global_api_key`/"
-            "`global_api_secret`, or `tableflow_api_key`/`tableflow_api_secret`, to "
-            "your profile -- see README.md#configuration."
+            "Tableflow needs to resolve your Kafka cluster id, which requires a Global "
+            "API key. Add `global_api_key`/`global_api_secret` to your profile -- see "
+            "README.md#configuration."
         ) from e
 
     @available

@@ -214,11 +214,11 @@ class TestEnsureTableflowConfig:
 
     # --- Tableflow control-plane auth errors -> actionable guidance ---
 
-    def test_get_auth_error_names_profile_fields(self, wire_connection, handle, rel):
+    def test_get_auth_error_names_profile_field(self, wire_connection, handle, rel):
         """A Flink-region-only profile can't resolve the Kafka cluster id
         Tableflow needs. The raw driver message points at `connect()`'s
         `database_kafka_cluster_id`, a parameter this adapter doesn't expose
-        -- the wrapped error must instead name the actual profile fields."""
+        -- the wrapped error must instead name the actual profile field."""
         err = ProgrammingError(
             "Resolving the Kafka cluster id from the database name requires a global "
             "API key; alternatively pass database_kafka_cluster_id to connect()."
@@ -229,12 +229,10 @@ class TestEnsureTableflowConfig:
                 rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
             )
         assert exc_info.value.__cause__ is err
-        msg = str(exc_info.value)
-        assert "global_api_key" in msg
-        assert "tableflow_api_key" in msg
+        assert "global_api_key" in str(exc_info.value)
         handle.enable_tableflow.assert_not_called()
 
-    def test_enable_auth_error_names_profile_fields(self, wire_connection, handle, rel):
+    def test_enable_auth_error_names_profile_field(self, wire_connection, handle, rel):
         err = ProgrammingError(
             "Resolving the Kafka cluster id from the database name requires a global "
             "API key; alternatively pass database_kafka_cluster_id to connect()."
@@ -245,6 +243,29 @@ class TestEnsureTableflowConfig:
                 rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
             )
         assert exc_info.value.__cause__ is err
-        msg = str(exc_info.value)
-        assert "global_api_key" in msg
-        assert "tableflow_api_key" in msg
+        assert "global_api_key" in str(exc_info.value)
+
+    def test_get_unrelated_programming_error_bubbles_up_unchanged(
+        self, wire_connection, handle, rel
+    ):
+        """Not every ProgrammingError is the cluster-id auth case -- an
+        unrecognized one must not be mislabeled with auth guidance."""
+        err = ProgrammingError("SQL statement cannot be empty")
+        handle.get_tableflow.side_effect = err
+        with pytest.raises(ProgrammingError) as exc_info:
+            wire_connection.ensure_tableflow_config(
+                rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
+            )
+        assert exc_info.value is err
+        handle.enable_tableflow.assert_not_called()
+
+    def test_enable_unrelated_programming_error_bubbles_up_unchanged(
+        self, wire_connection, handle, rel
+    ):
+        err = ProgrammingError("SQL statement cannot be empty")
+        handle.enable_tableflow.side_effect = err
+        with pytest.raises(ProgrammingError) as exc_info:
+            wire_connection.ensure_tableflow_config(
+                rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
+            )
+        assert exc_info.value is err

@@ -316,7 +316,7 @@ If `tableflow` is unset in the model, nothing is ever checked or touched, regard
 
 The corollary: if a model's `tableflow` config is removed (rather than the table being dropped outright), an old Tableflow configuration left enabled on that relation is not disabled and is not touched on subsequent runs. If that relation is later full-refreshed, the drop is **not** preceded by a disable, since the new config no longer mentions `tableflow` — this can race Tableflow the same way an unguarded drop would. Explicitly turning Tableflow off (without dropping the table) is not yet supported; it's tracked as follow-up work.
 
-**Credentials**: a Global API key already covers Tableflow's control-plane routes. If your profile uses a Flink-region key instead (or you'd rather scope Tableflow to its own key), add `tableflow_api_key` / `tableflow_api_secret` to `profiles.yml` by hand (not prompted by `dbt init`) — see [Configuration](README.md#configuration). A model that configures `tableflow` with neither raises a clear error naming these fields, rather than the raw driver error.
+**Credentials**: a Global API key already covers Tableflow's control-plane routes. If your profile uses a Flink-region key instead (or you'd rather scope Tableflow to its own key), add `tableflow_api_key` / `tableflow_api_secret` to `profiles.yml` by hand (not prompted by `dbt init`) — see [Configuration](README.md#configuration). A model that configures `tableflow` on a profile with no Global key raises a clear error naming `global_api_key` / `global_api_secret`, rather than the raw driver error.
 
 ## Adopting Existing Tables and Statements
 
