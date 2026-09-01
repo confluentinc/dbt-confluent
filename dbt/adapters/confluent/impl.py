@@ -646,7 +646,7 @@ class ConfluentAdapter(SQLAdapter):
         expose `database_kafka_cluster_id` to skip the lookup instead (#105).
         """
         if "requires a global API key" not in str(e):
-            raise
+            raise e
         raise DbtDatabaseError(
             "Tableflow needs to resolve your Kafka cluster id, which requires a Global "
             "API key. Add `global_api_key`/`global_api_secret` to your profile -- see "
