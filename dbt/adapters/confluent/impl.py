@@ -1,4 +1,3 @@
-import logging
 import re
 import threading
 import time
@@ -29,7 +28,6 @@ from confluent_sql.exceptions import (
 from confluent_sql.tableflow import normalize_table_formats
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
-from dbt_common.events.functions import fire_event
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 from dbt_common.ui import warning_tag
 
@@ -38,13 +36,13 @@ from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_tabl
 from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
 from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
-from dbt.adapters.events.types import AdapterEventDebug, AdapterEventInfo, AdapterEventWarning
+from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
-logger = logging.getLogger(__name__)
+logger = AdapterLogger("Confluent")
 
 # Every dbt-confluent-specific config key, keyed by which materializations
 # consume it. This is a closed set we own completely -- validate_materialization_config
@@ -399,30 +397,25 @@ class ConfluentAdapter(SQLAdapter):
         action: noun describing the call ("deletion", "inspection"), used in
             the message. expect_exists: if True (default), the 403 is
             surprising — the caller had reason to believe the statement
-            existed — so we emit a loud AdapterEventWarning. If False (e.g.
+            existed — so we log a loud warning. If False (e.g.
             orphan-cleanup paths), the 403 is expected and we log at debug.
         """
         if getattr(e, "http_status_code", None) != 403:
             return False
         if expect_exists:
-            fire_event(
-                AdapterEventWarning(
-                    base_msg=(
-                        f"Got 403 during {action} of Flink statement "
-                        f"'{statement_name}'. Under compute-pool-scoped roles this "
-                        f"is the expected response for a statement that is missing "
-                        f"or lives on a different compute pool, so we are treating "
-                        f"it as missing. If subsequent operations fail "
-                        f"unexpectedly, verify that the API key can manage "
-                        f"statements in this compute pool."
-                    )
-                )
+            logger.warning(
+                f"Got 403 during {action} of Flink statement "
+                f"'{statement_name}'. Under compute-pool-scoped roles this "
+                f"is the expected response for a statement that is missing "
+                f"or lives on a different compute pool, so we are treating "
+                f"it as missing. If subsequent operations fail "
+                f"unexpectedly, verify that the API key can manage "
+                f"statements in this compute pool."
             )
         else:
             logger.debug(
-                "Got 403 on opportunistic %s of statement '%s' (no orphan present).",
-                action,
-                statement_name,
+                f"Got 403 on opportunistic {action} of statement "
+                f"'{statement_name}' (no orphan present)."
             )
         return True
 
@@ -743,30 +736,24 @@ class ConfluentAdapter(SQLAdapter):
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
         else:
-            fire_event(
-                AdapterEventWarning(
-                    base_msg=warning_tag(
-                        f"Tableflow is already enabled for {relation}, and dbt does not "
-                        f"yet update an existing Tableflow configuration in place. If "
-                        f"you've changed the `tableflow` config and want that change "
-                        f"applied, run --full-refresh, or disable Tableflow on this "
-                        f"table manually first."
-                    )
+            logger.warning(
+                warning_tag(
+                    f"Tableflow is already enabled for {relation}, and dbt does not "
+                    f"yet update an existing Tableflow configuration in place. If "
+                    f"you've changed the `tableflow` config and want that change "
+                    f"applied, run --full-refresh, or disable Tableflow on this "
+                    f"table manually first."
                 )
             )
             return
 
-        # Blocks (by default) until the topic reaches RUNNING, up to 300s -- worth an
-        # AdapterEventInfo, not AdapterEventDebug, so the wait is visible without --debug.
-        fire_event(
-            AdapterEventInfo(
-                base_msg=(
-                    f"Enabling Tableflow for {relation} "
-                    f"(formats={tableflow_config['formats']!r}, "
-                    f"storage={tableflow_config['storage']!r}) -- this can take a "
-                    f"few minutes."
-                )
-            )
+        # Blocks (by default) until the topic reaches RUNNING, up to 300s -- worth
+        # logging at info, not debug, so the wait is visible without --debug.
+        logger.info(
+            f"Enabling Tableflow for {relation} "
+            f"(formats={tableflow_config['formats']!r}, "
+            f"storage={tableflow_config['storage']!r}) -- this can take a "
+            f"few minutes."
         )
         try:
             handle.enable_tableflow(
@@ -778,11 +765,7 @@ class ConfluentAdapter(SQLAdapter):
         except TableflowTopicAlreadyExistsError:
             # Narrow race: something else enabled it between our GET above and
             # this call. The desired end state (enabled) already holds.
-            fire_event(
-                AdapterEventDebug(
-                    base_msg=f"Tableflow was enabled concurrently for {relation}; leaving as-is."
-                )
-            )
+            logger.debug(f"Tableflow was enabled concurrently for {relation}; leaving as-is.")
         except ProgrammingError as e:
             self._reraise_tableflow_auth_error(e)
         except ConfluentSqlError as e:
@@ -819,14 +802,9 @@ class ConfluentAdapter(SQLAdapter):
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
         # Blocks (by default) until the topic is confirmed gone, up to 300s -- see the
-        # AdapterEventInfo note in ensure_tableflow_config.
-        fire_event(
-            AdapterEventInfo(
-                base_msg=(
-                    f"Disabling Tableflow on {relation} before drop -- this can take a "
-                    f"few minutes."
-                )
-            )
+        # info-level note in ensure_tableflow_config.
+        logger.info(
+            f"Disabling Tableflow on {relation} before drop -- this can take a few minutes."
         )
         try:
             handle.disable_tableflow(relation.identifier)
@@ -890,13 +868,9 @@ class ConfluentAdapter(SQLAdapter):
             try:
                 self.drop_relation(relation)
             except Exception as e:
-                fire_event(
-                    AdapterEventWarning(
-                        base_msg=(
-                            f"Failed to drop {relation} during post-model cleanup: {e}. "
-                            f"It will be reclaimed by the next run."
-                        )
-                    )
+                logger.warning(
+                    f"Failed to drop {relation} during post-model cleanup: {e}. "
+                    f"It will be reclaimed by the next run."
                 )
         self._deferred_cleanups.relations.clear()
 
@@ -1433,13 +1407,9 @@ class ConfluentAdapter(SQLAdapter):
                 # INFORMATION_SCHEMA ever returns an unexpected row.
                 target = columns_by_table.get(row["table_name"])
                 if target is None:
-                    fire_event(
-                        AdapterEventWarning(
-                            base_msg=(
-                                f"Got empty table during drift check for columns in {row['table_name']}. "
-                                "Columns drift detection skipped, this is probably a bug."
-                            )
-                        )
+                    logger.warning(
+                        f"Got empty table during drift check for columns in {row['table_name']}. "
+                        "Columns drift detection skipped, this is probably a bug."
                     )
                     continue
                 target[row["col_name"]] = row["data_type"]

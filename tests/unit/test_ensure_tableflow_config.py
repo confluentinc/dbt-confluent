@@ -20,7 +20,6 @@ from confluent_sql.exceptions import (
 from dbt_common.exceptions import DbtDatabaseError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
-from dbt.adapters.events.types import AdapterEventInfo
 from tests.unit._helpers import relation as make_relation
 
 
@@ -50,9 +49,9 @@ class TestEnsureTableflowConfig:
         return make_relation("my_table")
 
     @pytest.fixture
-    def fire_event(self, monkeypatch):
+    def logger(self, monkeypatch):
         mock = MagicMock()
-        monkeypatch.setattr("dbt.adapters.confluent.impl.fire_event", mock)
+        monkeypatch.setattr("dbt.adapters.confluent.impl.logger", mock)
         return mock
 
     # --- config-unset no-op ---
@@ -69,9 +68,7 @@ class TestEnsureTableflowConfig:
 
     # --- not enabled -> enable ---
 
-    def test_not_enabled_enables_with_current_config(
-        self, wire_connection, handle, rel, fire_event
-    ):
+    def test_not_enabled_enables_with_current_config(self, wire_connection, handle, rel, logger):
         wire_connection.ensure_tableflow_config(
             rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
@@ -81,12 +78,11 @@ class TestEnsureTableflowConfig:
         assert call.kwargs["tableflow_formats"] == [TableFormat.ICEBERG]
         assert call.kwargs["storage"] == ManagedStorage()
         assert call.kwargs["config"] is None
-        fire_event.assert_called_once()
-        event = fire_event.call_args.args[0]
-        assert "my_table" in event.base_msg
         # This blocks for up to 300s by default (waiting for RUNNING), so it
-        # must be visible without --debug.
-        assert isinstance(event, AdapterEventInfo)
+        # must be logged at info, not debug, to be visible without --debug.
+        logger.info.assert_called_once()
+        assert "my_table" in logger.info.call_args.args[0]
+        logger.debug.assert_not_called()
 
     def test_lowercase_and_multiple_formats(self, wire_connection, handle, rel):
         wire_connection.ensure_tableflow_config(
@@ -158,31 +154,29 @@ class TestEnsureTableflowConfig:
 
     # --- already enabled -> warn, don't touch it ---
 
-    def test_already_enabled_warns_instead_of_enabling(
-        self, wire_connection, handle, rel, fire_event
-    ):
+    def test_already_enabled_warns_instead_of_enabling(self, wire_connection, handle, rel, logger):
         handle.get_tableflow.side_effect = None
         handle.get_tableflow.return_value = MagicMock()
         wire_connection.ensure_tableflow_config(
             rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
         handle.enable_tableflow.assert_not_called()
-        fire_event.assert_called_once()
-        event = fire_event.call_args.args[0]
-        assert "my_table" in event.base_msg
-        assert "--full-refresh" in event.base_msg
+        logger.warning.assert_called_once()
+        msg = logger.warning.call_args.args[0]
+        assert "my_table" in msg
+        assert "--full-refresh" in msg
         # dbt-core's default text logger doesn't color lines by level -- a
         # message must tag itself with warning_tag() to visually stand out.
-        assert "WARNING" in event.base_msg
+        assert "WARNING" in msg
 
     def test_already_enabled_does_not_warn_when_config_unset(
-        self, wire_connection, handle, rel, fire_event
+        self, wire_connection, handle, rel, logger
     ):
         handle.get_tableflow.side_effect = None
         handle.get_tableflow.return_value = MagicMock()
         wire_connection.ensure_tableflow_config(rel, None)
         handle.get_tableflow.assert_not_called()
-        fire_event.assert_not_called()
+        logger.warning.assert_not_called()
 
     # --- error wrapping ---
 
@@ -206,7 +200,7 @@ class TestEnsureTableflowConfig:
         assert exc_info.value.__cause__ is err
         assert "my_table" in str(exc_info.value)
 
-    def test_already_exists_race_is_swallowed(self, wire_connection, handle, rel, fire_event):
+    def test_already_exists_race_is_swallowed(self, wire_connection, handle, rel, logger):
         """Narrow race: something else enabled it between our GET and this
         call. The desired end state (enabled) already holds, so this must
         not raise."""
@@ -216,9 +210,10 @@ class TestEnsureTableflowConfig:
         wire_connection.ensure_tableflow_config(
             rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
-        # One debug event for the enable attempt, one for the swallowed race.
-        assert fire_event.call_count == 2
-        assert "my_table" in fire_event.call_args.args[0].base_msg
+        # One info log for the enable attempt, one debug log for the swallowed race.
+        logger.info.assert_called_once()
+        logger.debug.assert_called_once()
+        assert "my_table" in logger.debug.call_args.args[0]
 
     # --- Tableflow control-plane auth errors -> actionable guidance ---
 

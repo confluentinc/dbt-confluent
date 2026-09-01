@@ -18,7 +18,6 @@ from confluent_sql.exceptions import (
 from dbt_common.exceptions import DbtDatabaseError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
-from dbt.adapters.events.types import AdapterEventInfo
 from tests.unit._helpers import relation as make_relation
 
 
@@ -42,29 +41,27 @@ class TestDisableTableflowIfEnabled:
         return make_relation("my_table")
 
     @pytest.fixture
-    def fire_event(self, monkeypatch):
+    def logger(self, monkeypatch):
         mock = MagicMock()
-        monkeypatch.setattr("dbt.adapters.confluent.impl.fire_event", mock)
+        monkeypatch.setattr("dbt.adapters.confluent.impl.logger", mock)
         return mock
 
-    def test_disables_when_enabled(self, wire_connection, handle, rel, fire_event):
+    def test_disables_when_enabled(self, wire_connection, handle, rel, logger):
         handle.get_tableflow.return_value = MagicMock()
         wire_connection.disable_tableflow_if_enabled(rel)
         handle.disable_tableflow.assert_called_once_with("my_table")
-        fire_event.assert_called_once()
-        event = fire_event.call_args.args[0]
-        assert "my_table" in event.base_msg
         # This blocks for up to 300s by default (waiting for removal), so it
-        # must be visible without --debug.
-        assert isinstance(event, AdapterEventInfo)
+        # must be logged at info, not debug, to be visible without --debug.
+        logger.info.assert_called_once()
+        assert "my_table" in logger.info.call_args.args[0]
 
-    def test_no_op_when_not_enabled(self, wire_connection, handle, rel, fire_event):
+    def test_no_op_when_not_enabled(self, wire_connection, handle, rel, logger):
         handle.get_tableflow.side_effect = TableflowTopicNotFoundError(
             "not enabled", table_name="my_table"
         )
         wire_connection.disable_tableflow_if_enabled(rel)
         handle.disable_tableflow.assert_not_called()
-        fire_event.assert_not_called()
+        logger.info.assert_not_called()
 
     def test_checks_before_disabling(self, wire_connection, handle, rel):
         """A GET-then-DELETE order, not a blind DELETE -- a blind DELETE would
