@@ -1,8 +1,11 @@
 {% materialization table, adapter='confluent' %}
   {# Pure config validation first, before load_cached_relation (which can be a
      real INFORMATION_SCHEMA round-trip if this schema's relation cache isn't
-     already warm) -- neither validator depends on the relation, so a config
-     mistake should fail before any warehouse I/O, not after. #}
+     already warm) -- the validator doesn't depend on the relation, so a config
+     mistake should fail before any warehouse I/O, not after. `tableflow` isn't
+     validated here: unlike distributed_by, it's never baked into this DDL, so a
+     bad value can't doom a --full-refresh recreate -- ensure_tableflow_config
+     validates it for real when it actually applies the config. #}
   {% do validate_materialization_config() %}
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
   {%- set existing_relation = load_cached_relation(this) -%}
@@ -13,6 +16,7 @@
   {% if decide_action(existing_relation) == 'skip' %}
     {# dbt requires a 'main' statement result even when skipping #}
     {% call noop_statement('main', 'SKIP') %}{% endcall %}
+    {{ ensure_tableflow_config(target_relation) }}
     {{ run_hooks(post_hooks, inside_transaction=False) }}
     {{ return({'relations': [target_relation]}) }}
   {% endif %}
@@ -25,6 +29,8 @@
                     statement_name=get_statement_name()) -%}
     {{ get_create_table_as_sql(False, target_relation, sql) }}
   {%- endcall %}
+
+  {{ ensure_tableflow_config(target_relation) }}
 
   {% do persist_docs(target_relation, model) %}
   {{ run_hooks(post_hooks, inside_transaction=True) }}

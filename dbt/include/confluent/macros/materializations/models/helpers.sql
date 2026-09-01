@@ -89,6 +89,45 @@ WITH (
 {% endmacro %}
 
 
+{% macro ensure_tableflow_config(relation) %}
+  {# Ensure `relation`'s backing Kafka topic reflects config(tableflow={...}):
+     enable it if not already enabled, or warn (v1 does no diffing -- see
+     #101) if it's already enabled. No-op if `tableflow` is unset -- that
+     decision, and all the "is this shape valid" work, live entirely in
+     adapter.ensure_tableflow_config; this macro's only job is the `execute`
+     guard, same as every other side-effecting call here. Call this on
+     every run, regardless of whether the relation was just created,
+     already existed, or is being restarted -- it doesn't matter which. #}
+  {% if execute %}
+    {% do adapter.ensure_tableflow_config(relation, config.get('tableflow')) %}
+  {% endif %}
+{% endmacro %}
+
+
+{% macro disable_old_tableflow_before_drop(relation) %}
+  {# Before dropping `relation` for a --full-refresh: if the model's
+     *current* config sets `tableflow`, check whether Tableflow is already
+     enabled on the relation about to be dropped, and disable it first so
+     the drop doesn't race an active materialization (confluent_sql's own
+     recommendation) -- clearing the way for the upcoming recreate to
+     enable a fresh one from a clean slate.
+
+     Deliberately gated on the current config, not on live state alone:
+     checking live state for every drop (including drops on models that
+     have never configured `tableflow`) would require every profile to
+     supply Tableflow-capable credentials just to run --full-refresh at
+     all. If the *new* model doesn't configure `tableflow`, we don't touch
+     Tableflow here -- an old, no-longer-configured Tableflow topic on the
+     relation being dropped is left as-is (same "we only ever touch what's
+     configured" rule `ensure_tableflow_config` follows) and may end up
+     racing the drop; see MATERIALIZATIONS.md's Tableflow section for the
+     accepted trade-off. #}
+  {% if execute and config.get('tableflow') %}
+    {% do adapter.disable_tableflow_if_enabled(relation) %}
+  {% endif %}
+{% endmacro %}
+
+
 {% macro decide_action(existing_relation, has_select_query=true, recoverable=false) %}
   {# Decide what to do for an existing-relation materialization, perform the
      side effects that decision implies, and return the action so the caller
@@ -146,6 +185,7 @@ WITH (
        caller can recreate from scratch. #}
     {{ delete_statement_if_exists(get_statement_name()) }}
     {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
+    {{ disable_old_tableflow_before_drop(existing_relation) }}
     {{ drop_relation_if_exists(existing_relation) }}
   {% else %}
     {# Fresh build, but orphaned Flink statements may linger if the table was
