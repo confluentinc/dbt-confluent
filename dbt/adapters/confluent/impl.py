@@ -803,8 +803,8 @@ class ConfluentAdapter(SQLAdapter):
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
         # Blocks (by default) until the topic is confirmed gone, up to 300s -- see the
         # info-level note in ensure_tableflow_config.
-        logger.info(
-            f"Disabling Tableflow on {relation} before drop -- this can take a few minutes."
+        logger.debug(
+            f"Disabling Tableflow on {relation} before drop."
         )
         try:
             handle.disable_tableflow(relation.identifier)
