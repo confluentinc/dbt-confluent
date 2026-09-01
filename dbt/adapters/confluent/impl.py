@@ -800,8 +800,7 @@ class ConfluentAdapter(SQLAdapter):
             self._reraise_tableflow_auth_error(e)
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
-        # Blocks (by default) until the topic is confirmed gone, up to 300s -- see the
-        # info-level note in ensure_tableflow_config.
+        # Blocks (by default) until the topic is confirmed gone
         logger.debug(f"Disabling Tableflow on {relation} before drop.")
         try:
             handle.disable_tableflow(relation.identifier)
@@ -1211,12 +1210,13 @@ class ConfluentAdapter(SQLAdapter):
         if unsupported:
             keys = "', '".join(unsupported)
             verb = "is" if len(unsupported) == 1 else "are"
+            # "contract" is a dbt-core built-in, not one of our own keys, so it isn't
+            # in MATERIALIZATION_CONFIG_KEYS -- listed separately here.
+            supported = sorted(MATERIALIZATION_CONFIG_KEYS["materialized_table"] | {"contract"})
             raise CompilationError(
                 f"'{keys}' {verb} not supported by the 'materialized_table' "
                 f"materialization for Confluent Flink.\n"
-                f"Supported config options include: distributed_by, with, start_mode, "
-                f"statement_properties, contract, tableflow, statement_name, "
-                f"compute_pool_id, ignore_unsupported_config."
+                f"Supported config options include: {', '.join(supported)}."
             )
 
     @available
