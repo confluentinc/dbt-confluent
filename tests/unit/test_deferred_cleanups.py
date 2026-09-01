@@ -62,11 +62,11 @@ class TestDeferredCleanups:
         drop_relation.side_effect = RuntimeError("drop failed")
         adapter.defer_drop(relation("tmp_a"))
         adapter.defer_drop(relation("tmp_b"))
-        with patch("dbt.adapters.confluent.impl.fire_event") as fire_event:
+        with patch("dbt.adapters.confluent.impl.logger") as logger:
             adapter.post_model_hook({}, None)
         assert drop_relation.call_count == 2
-        assert fire_event.call_count == 2
-        messages = [c.args[0].base_msg for c in fire_event.call_args_list]
+        assert logger.warning.call_count == 2
+        messages = [c.args[0] for c in logger.warning.call_args_list]
         assert any("`env-1`.`cluster-a`.`tmp_a`" in m for m in messages)
         assert any("`env-1`.`cluster-a`.`tmp_b`" in m for m in messages)
 

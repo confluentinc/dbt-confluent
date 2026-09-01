@@ -7,7 +7,6 @@ GH #58). The caller indicates whether 403 should be loud (expect_exists=True,
 default) or quiet (expect_exists=False, used for orphan-cleanup paths).
 """
 
-import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -44,41 +43,35 @@ class TestDeleteStatement:
         handle.delete_statement.side_effect = OperationalError(
             "error sending request '403'", http_status_code=403
         )
-        with patch("dbt.adapters.confluent.impl.fire_event") as fire_event:
+        with patch("dbt.adapters.confluent.impl.logger") as logger:
             wire_connection.delete_statement("dbt-some-stmt", expect_exists=True)
 
-        fire_event.assert_called_once()
-        event = fire_event.call_args.args[0]
-        assert "403" in event.base_msg
-        assert "dbt-some-stmt" in event.base_msg
+        logger.warning.assert_called_once()
+        msg = logger.warning.call_args.args[0]
+        assert "403" in msg
+        assert "dbt-some-stmt" in msg
 
     def test_403_with_expect_exists_default_emits_warning(self, wire_connection, handle):
         """Default is expect_exists=True, so a 403 still warns."""
         handle.delete_statement.side_effect = OperationalError(
             "error sending request '403'", http_status_code=403
         )
-        with patch("dbt.adapters.confluent.impl.fire_event") as fire_event:
+        with patch("dbt.adapters.confluent.impl.logger") as logger:
             wire_connection.delete_statement("dbt-some-stmt")
 
-        fire_event.assert_called_once()
+        logger.warning.assert_called_once()
 
-    def test_403_without_expect_exists_logs_debug_no_warning(
-        self, wire_connection, handle, caplog
-    ):
+    def test_403_without_expect_exists_logs_debug_no_warning(self, wire_connection, handle):
         handle.delete_statement.side_effect = OperationalError(
             "error sending request '403'", http_status_code=403
         )
-        with (
-            patch("dbt.adapters.confluent.impl.fire_event") as fire_event,
-            caplog.at_level(logging.DEBUG, logger="dbt.adapters.confluent.impl"),
-        ):
+        with patch("dbt.adapters.confluent.impl.logger") as logger:
             wire_connection.delete_statement("dbt-some-stmt", expect_exists=False)
 
-        fire_event.assert_not_called()
-        assert any(
-            "dbt-some-stmt" in rec.message and "opportunistic" in rec.message
-            for rec in caplog.records
-        )
+        logger.warning.assert_not_called()
+        logger.debug.assert_called_once()
+        msg = logger.debug.call_args.args[0]
+        assert "dbt-some-stmt" in msg and "opportunistic" in msg
 
     def test_non_403_operational_error_reraises(self, wire_connection, handle):
         err = OperationalError("internal server error", http_status_code=500)
