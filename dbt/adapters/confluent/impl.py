@@ -55,15 +55,25 @@ _UNIVERSAL_CONFIG_KEYS = frozenset(
     {"statement_name", "compute_pool_id", "ignore_unsupported_config"}
 )
 
+# Config keys that only make sense for a materialization backed by a real
+# Kafka topic -- a live topic to distribute across partitions or materialize
+# via Tableflow. Every materialization except `view` owns one, and every one
+# of them supports both keys identically -- there is no case where one
+# applies but not the other.
+_KAFKA_BACKED_CONFIG_KEYS = frozenset({"distributed_by", "tableflow"})
+
 MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
-    "table": _UNIVERSAL_CONFIG_KEYS | {"distributed_by", "on_schema_drift", "tableflow"},
+    "table": _UNIVERSAL_CONFIG_KEYS | _KAFKA_BACKED_CONFIG_KEYS | {"on_schema_drift"},
     "view": _UNIVERSAL_CONFIG_KEYS,
     "streaming_source": _UNIVERSAL_CONFIG_KEYS
-    | {"connector", "with", "distributed_by", "on_schema_drift", "tableflow"},
+    | _KAFKA_BACKED_CONFIG_KEYS
+    | {"connector", "with", "on_schema_drift"},
     "streaming_table": _UNIVERSAL_CONFIG_KEYS
-    | {"with", "distributed_by", "on_schema_drift", "statement_properties", "tableflow"},
+    | _KAFKA_BACKED_CONFIG_KEYS
+    | {"with", "on_schema_drift", "statement_properties"},
     "materialized_table": _UNIVERSAL_CONFIG_KEYS
-    | {"with", "distributed_by", "start_mode", "statement_properties", "tableflow"},
+    | _KAFKA_BACKED_CONFIG_KEYS
+    | {"with", "start_mode", "statement_properties"},
 }
 
 _ALL_CONFIG_KEYS: frozenset[str] = frozenset().union(*MATERIALIZATION_CONFIG_KEYS.values())
