@@ -304,7 +304,7 @@ select order_id, customer_id, price from {{ ref('orders') }}
 - `retention_ms` / `data_retention_ms` (optional) — non-negative integers (or numeric strings) controlling snapshot/data retention.
 - `error_handling` (optional) — how a bad record is handled: `{'mode': 'SUSPEND'}` (the server default — suspends materialization), `{'mode': 'SKIP'}` (skip and continue), or `{'mode': 'LOG', 'target': '...'}` (log to a dead-letter target, `target` defaults to `'error_log'`).
 
-The adapter validates this shape at compile time (`CompilationError` on a malformed `tableflow` config), before any DDL or full-refresh drop runs.
+The adapter validates this shape (`CompilationError` on a malformed `tableflow` config) when it's actually applied — unlike `distributed_by`/`start_mode`, `tableflow` is never baked into this DDL, so a bad value can't doom a `--full-refresh` recreate, and there's no need to validate it any earlier.
 
 **Ensured on every run — not diffed.** Whenever a model configures `tableflow`, every run (whether the relation was just created, already existed, or is being restarted) checks Tableflow's live state and:
 - **Not enabled** — enables it with the current config.

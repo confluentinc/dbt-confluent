@@ -129,6 +129,14 @@ _TABLEFLOW_ERROR_HANDLING_CLASSES: dict[str, type] = {
     "LOG": TableflowErrorHandlingLog,
 }
 
+# The only keys `tableflow` itself accepts. Checked explicitly (not just left to
+# fall out of the translation below) because every one of `_translate_tableflow_*`
+# reads its fields by name via .get()/[...] -- an unknown/misspelled key would
+# otherwise be silently ignored rather than rejected.
+_TABLEFLOW_CONFIG_KEYS = frozenset(
+    {"formats", "storage", "retention_ms", "data_retention_ms", "error_handling"}
+)
+
 
 @dataclass(frozen=True, eq=False, repr=False)
 class ConfluentRelation(BaseRelation):
@@ -468,63 +476,6 @@ class ConfluentAdapter(SQLAdapter):
             ):
                 raise
 
-    @available
-    def validate_tableflow_config(self, tf: object) -> None:
-        """Raise CompilationError if the `tableflow` config is malformed.
-
-        Called once per materialization run (mirroring
-        `validate_distributed_by_config`) so `ensure_tableflow_config` can
-        trust the shape without re-validating, and so a bad config fails
-        before any DDL/full-refresh drop runs.
-
-        Shape::
-
-            tableflow={
-                'formats': 'ICEBERG' | ['ICEBERG', 'DELTA'],  # required
-                'storage': {'kind': 'Managed'}
-                         | {'kind': 'ByobAws', 'bucket_name': ..., 'provider_integration_id': ...}
-                         | {'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': ...,
-                            'container_name': ..., 'provider_integration_id': ...},  # required
-                'retention_ms': 604800000,       # optional
-                'data_retention_ms': 604800000,  # optional
-                'error_handling': {'mode': 'SUSPEND' | 'SKIP'}
-                                | {'mode': 'LOG', 'target': '...'},  # optional
-            }
-
-        Deliberately thin: it just runs the same translation
-        `ensure_tableflow_config` performs and discards the result. The
-        actual "is this shape valid" logic lives in
-        `_translate_tableflow_formats` / `_translate_tableflow_storage` /
-        `_translate_tableflow_topic_config`, which delegate as much as
-        possible to confluent_sql's own types (`normalize_table_formats`,
-        each storage/error-handling dataclass's own constructor) rather than
-        re-declaring the driver's rules here -- so a format, storage
-        backend, or error mode the driver adds requires no change on this
-        side to be correctly accepted.
-        """
-        if tf is None:
-            return
-        if not isinstance(tf, dict):
-            raise CompilationError("'tableflow' config must be a mapping.")
-
-        allowed_keys = {
-            "formats",
-            "storage",
-            "retention_ms",
-            "data_retention_ms",
-            "error_handling",
-        }
-        unknown = set(tf) - allowed_keys
-        if unknown:
-            raise CompilationError(
-                f"'tableflow' has unknown key(s): {', '.join(sorted(unknown))}. "
-                f"Allowed keys: {', '.join(sorted(allowed_keys))}."
-            )
-
-        self._translate_tableflow_formats(tf.get("formats"))
-        self._translate_tableflow_storage(tf.get("storage"))
-        self._translate_tableflow_topic_config(tf)
-
     @staticmethod
     def _translate_tableflow_formats(formats: object) -> list[str]:
         """Validate and normalize `tableflow.formats` into the driver's wire
@@ -702,9 +653,34 @@ class ConfluentAdapter(SQLAdapter):
     ) -> None:
         """Ensure `relation`'s backing Kafka topic reflects `config(tableflow={...})`.
 
+        Shape::
+
+            tableflow={
+                'formats': 'ICEBERG' | ['ICEBERG', 'DELTA'],  # required
+                'storage': {'kind': 'Managed'}
+                         | {'kind': 'ByobAws', 'bucket_name': ..., 'provider_integration_id': ...}
+                         | {'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': ...,
+                            'container_name': ..., 'provider_integration_id': ...},  # required
+                'retention_ms': 604800000,       # optional
+                'data_retention_ms': 604800000,  # optional
+                'error_handling': {'mode': 'SUSPEND' | 'SKIP'}
+                                | {'mode': 'LOG', 'target': '...'},  # optional
+            }
+
         No-op if `tableflow_config` is empty/None -- config governs whether
         we touch Tableflow at all; live state is only ever consulted once
         we already know the model wants to manage it.
+
+        Deliberately not validated eagerly at compile time (unlike
+        `distributed_by`/`start_mode`): this config is only ever applied via
+        a Tableflow API call made *after* the table already exists (fresh
+        create, or the skip path), never baked into the table's own DDL. A
+        bad value can't doom a `--full-refresh` recreate the way a bad
+        `distributed_by`/`start_mode` could, so there's no destructive
+        action to race against -- the translation below (which delegates as
+        much as possible to confluent_sql's own types) is the only
+        validation `tableflow` gets, run for real instead of eagerly
+        discarded.
 
         Runs the same way on every invocation, regardless of whether
         `relation` was just created, already existed, or is being restarted
@@ -725,6 +701,14 @@ class ConfluentAdapter(SQLAdapter):
         """
         if not tableflow_config:
             return
+        if not isinstance(tableflow_config, dict):
+            raise CompilationError("'tableflow' config must be a mapping.")
+        unknown = set(tableflow_config) - _TABLEFLOW_CONFIG_KEYS
+        if unknown:
+            raise CompilationError(
+                f"'tableflow' has unknown key(s): {', '.join(sorted(unknown))}. "
+                f"Allowed keys: {', '.join(sorted(_TABLEFLOW_CONFIG_KEYS))}."
+            )
         conn = self.connections.get_thread_connection()
         handle = conn.handle
         try:
@@ -747,6 +731,14 @@ class ConfluentAdapter(SQLAdapter):
             )
             return
 
+        # Translate (raising CompilationError on a malformed config) before
+        # logging or touching the driver -- this is the only validation
+        # `tableflow` gets, so it must fail clean, not with a raw KeyError
+        # from indexing a missing key below.
+        tableflow_formats = self._translate_tableflow_formats(tableflow_config.get("formats"))
+        storage = self._translate_tableflow_storage(tableflow_config.get("storage"))
+        topic_config = self._translate_tableflow_topic_config(tableflow_config)
+
         # Blocks (by default) until the topic reaches RUNNING, up to 300s -- worth
         # logging at info, not debug, so the wait is visible without --debug.
         logger.info(
@@ -758,9 +750,9 @@ class ConfluentAdapter(SQLAdapter):
         try:
             handle.enable_tableflow(
                 relation.identifier,
-                tableflow_formats=self._translate_tableflow_formats(tableflow_config["formats"]),
-                storage=self._translate_tableflow_storage(tableflow_config["storage"]),
-                config=self._translate_tableflow_topic_config(tableflow_config),
+                tableflow_formats=tableflow_formats,
+                storage=storage,
+                config=topic_config,
             )
         except TableflowTopicAlreadyExistsError:
             # Narrow race: something else enabled it between our GET above and
@@ -803,9 +795,7 @@ class ConfluentAdapter(SQLAdapter):
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
         # Blocks (by default) until the topic is confirmed gone, up to 300s -- see the
         # info-level note in ensure_tableflow_config.
-        logger.debug(
-            f"Disabling Tableflow on {relation} before drop."
-        )
+        logger.debug(f"Disabling Tableflow on {relation} before drop.")
         try:
             handle.disable_tableflow(relation.identifier)
         except TableflowTopicNotFoundError:

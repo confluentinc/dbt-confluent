@@ -1,11 +1,13 @@
 {% materialization table, adapter='confluent' %}
   {# Pure config validation first, before load_cached_relation (which can be a
      real INFORMATION_SCHEMA round-trip if this schema's relation cache isn't
-     already warm) -- neither validator depends on the relation, so a config
-     mistake should fail before any warehouse I/O, not after. #}
+     already warm) -- the validator doesn't depend on the relation, so a config
+     mistake should fail before any warehouse I/O, not after. `tableflow` isn't
+     validated here: unlike distributed_by, it's never baked into this DDL, so a
+     bad value can't doom a --full-refresh recreate -- ensure_tableflow_config
+     validates it for real when it actually applies the config. #}
   {% do validate_materialization_config() %}
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
-  {%- do adapter.validate_tableflow_config(config.get('tableflow')) -%}
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type='table') %}
 

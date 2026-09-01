@@ -50,10 +50,8 @@ class TestDisableTableflowIfEnabled:
         handle.get_tableflow.return_value = MagicMock()
         wire_connection.disable_tableflow_if_enabled(rel)
         handle.disable_tableflow.assert_called_once_with("my_table")
-        # This blocks for up to 300s by default (waiting for removal), so it
-        # must be logged at info, not debug, to be visible without --debug.
-        logger.info.assert_called_once()
-        assert "my_table" in logger.info.call_args.args[0]
+        logger.debug.assert_called_once()
+        assert "my_table" in logger.debug.call_args.args[0]
 
     def test_no_op_when_not_enabled(self, wire_connection, handle, rel, logger):
         handle.get_tableflow.side_effect = TableflowTopicNotFoundError(
@@ -61,7 +59,7 @@ class TestDisableTableflowIfEnabled:
         )
         wire_connection.disable_tableflow_if_enabled(rel)
         handle.disable_tableflow.assert_not_called()
-        logger.info.assert_not_called()
+        logger.debug.assert_not_called()
 
     def test_checks_before_disabling(self, wire_connection, handle, rel):
         """A GET-then-DELETE order, not a blind DELETE -- a blind DELETE would

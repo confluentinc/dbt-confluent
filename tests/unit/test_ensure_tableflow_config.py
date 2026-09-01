@@ -17,7 +17,7 @@ from confluent_sql.exceptions import (
     TableflowTopicAlreadyExistsError,
     TableflowTopicNotFoundError,
 )
-from dbt_common.exceptions import DbtDatabaseError
+from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
 from tests.unit._helpers import relation as make_relation
@@ -272,3 +272,190 @@ class TestEnsureTableflowConfig:
                 rel, {"formats": "ICEBERG", "storage": {"kind": "Managed"}}
             )
         assert exc_info.value is err
+
+
+class TestEnsureTableflowConfigMalformedConfig:
+    """`tableflow` isn't validated eagerly at compile time (unlike
+    distributed_by/start_mode): it's only ever applied via an API call made
+    after the table already exists, so a bad value can't doom a
+    --full-refresh recreate. This is the only place it's validated -- these
+    cases must all raise CompilationError before ever reaching the driver.
+    """
+
+    @pytest.fixture
+    def adapter(self):
+        return ConfluentAdapter.__new__(ConfluentAdapter)
+
+    @pytest.fixture
+    def handle(self):
+        # Not enabled yet -- reach the translation/enable path, not the
+        # already-enabled warn path.
+        handle = MagicMock()
+        handle.get_tableflow.side_effect = TableflowTopicNotFoundError(
+            "not enabled", table_name="my_table"
+        )
+        return handle
+
+    @pytest.fixture
+    def wire_connection(self, adapter, handle):
+        adapter.connections = MagicMock()
+        adapter.connections.get_thread_connection.return_value = SimpleNamespace(handle=handle)
+        return adapter
+
+    @pytest.fixture
+    def rel(self):
+        return make_relation("my_table")
+
+    @pytest.mark.parametrize(
+        "bad_config, expected_substring",
+        [
+            (["ICEBERG"], "must be a mapping"),
+            ("ICEBERG", "must be a mapping"),
+            ({"storage": {"kind": "Managed"}, "bogus": 1}, "unknown key(s): bogus"),
+            ({"storage": {"kind": "Managed"}}, "'tableflow.formats' is required"),
+            ({"formats": [], "storage": {"kind": "Managed"}}, "'tableflow.formats' is required"),
+            (
+                {"formats": ["PARQUET"], "storage": {"kind": "Managed"}},
+                "'tableflow.formats' is invalid",
+            ),
+            ({"formats": "ICEBERG"}, "'tableflow.storage' is required"),
+            ({"formats": "ICEBERG", "storage": "managed"}, "'tableflow.storage' is required"),
+            (
+                {"formats": "ICEBERG", "storage": {"kind": "s3"}},
+                "'tableflow.storage.kind' must be one of",
+            ),
+            (
+                {"formats": "ICEBERG", "storage": {"kind": "ByobAws"}},
+                "'tableflow.storage' of kind 'ByobAws' is invalid",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {
+                        "kind": "Managed",
+                        "bucket_name": "extra",
+                    },
+                },
+                "'tableflow.storage' of kind 'Managed' is invalid",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {
+                        "kind": "ByobAws",
+                        "bucket_name": 12345,
+                        "provider_integration_id": "cspi-1",
+                    },
+                },
+                "'tableflow.storage.bucket_name' must be a string",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {
+                        "kind": "AzureDataLakeStorageGen2",
+                        "storage_account_name": "acct",
+                        "container_name": 999,
+                        "provider_integration_id": "cspi-1",
+                    },
+                },
+                "'tableflow.storage.container_name' must be a string",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {"kind": "Managed"},
+                    "retention_ms": -1,
+                },
+                "must be a non-negative integer",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {"kind": "Managed"},
+                    "retention_ms": True,
+                },
+                "must be a non-negative integer",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {"kind": "Managed"},
+                    "retention_ms": "not-a-number",
+                },
+                "must be a non-negative integer",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {"kind": "Managed"},
+                    "retention_ms": [1, 2, 3],
+                },
+                "must be a non-negative integer",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {"kind": "Managed"},
+                    "error_handling": "SUSPEND",
+                },
+                "must be a mapping with a 'mode' key",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {"kind": "Managed"},
+                    "error_handling": {"mode": "retry"},
+                },
+                "'tableflow.error_handling.mode' must be one of",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {"kind": "Managed"},
+                    "error_handling": {"mode": "SUSPEND", "target": "x"},
+                },
+                "'tableflow.error_handling' of mode 'SUSPEND' is invalid",
+            ),
+            (
+                {
+                    "formats": "ICEBERG",
+                    "storage": {"kind": "Managed"},
+                    "error_handling": {"mode": "LOG", "target": 123},
+                },
+                "'tableflow.error_handling.target' must be a string",
+            ),
+        ],
+        ids=[
+            "list_not_dict",
+            "string_not_dict",
+            "unknown_top_level_key",
+            "missing_formats",
+            "empty_formats",
+            "unknown_format",
+            "missing_storage",
+            "storage_not_dict",
+            "unknown_storage_kind",
+            "byob_aws_missing_required_keys",
+            "managed_with_extra_key",
+            "byob_aws_bucket_name_not_a_string",
+            "azure_adls_container_name_not_a_string",
+            "negative_retention_ms",
+            "bool_retention_ms",
+            "non_numeric_string_retention_ms",
+            "list_retention_ms",
+            "error_handling_not_dict",
+            "unknown_error_handling_mode",
+            "target_not_allowed_outside_log",
+            "target_not_a_string",
+        ],
+    )
+    def test_malformed_config_raises_before_touching_driver(
+        self, wire_connection, handle, rel, bad_config, expected_substring
+    ):
+        with pytest.raises(CompilationError) as excinfo:
+            wire_connection.ensure_tableflow_config(rel, bad_config)
+        assert expected_substring in str(excinfo.value), (
+            f"Expected error containing {expected_substring!r}, got: {excinfo.value}"
+        )
+        handle.enable_tableflow.assert_not_called()
