@@ -31,6 +31,7 @@ from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstrain
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.events.functions import fire_event
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
+from dbt_common.ui import warning_tag
 
 from dbt.adapters.base import BaseRelation, available
 from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_table
@@ -744,7 +745,7 @@ class ConfluentAdapter(SQLAdapter):
         else:
             fire_event(
                 AdapterEventWarning(
-                    base_msg=(
+                    base_msg=warning_tag(
                         f"Tableflow is already enabled for {relation}, and dbt does not "
                         f"yet update an existing Tableflow configuration in place. If "
                         f"you've changed the `tableflow` config and want that change "

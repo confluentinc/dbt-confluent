@@ -171,6 +171,9 @@ class TestEnsureTableflowConfig:
         event = fire_event.call_args.args[0]
         assert "my_table" in event.base_msg
         assert "--full-refresh" in event.base_msg
+        # dbt-core's default text logger doesn't color lines by level -- a
+        # message must tag itself with warning_tag() to visually stand out.
+        assert "WARNING" in event.base_msg
 
     def test_already_enabled_does_not_warn_when_config_unset(
         self, wire_connection, handle, rel, fire_event
