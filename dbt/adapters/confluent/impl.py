@@ -36,7 +36,7 @@ from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_tabl
 from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
 from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
-from dbt.adapters.events.types import AdapterEventWarning
+from dbt.adapters.events.types import AdapterEventDebug, AdapterEventWarning
 from dbt.adapters.sql import SQLAdapter
 
 from .naming import sanitize_statement_name
@@ -726,6 +726,15 @@ class ConfluentAdapter(SQLAdapter):
             )
             return
 
+        fire_event(
+            AdapterEventDebug(
+                base_msg=(
+                    f"Enabling Tableflow for {relation} "
+                    f"(formats={tableflow_config['formats']!r}, "
+                    f"storage={tableflow_config['storage']!r})."
+                )
+            )
+        )
         try:
             handle.enable_tableflow(
                 relation.identifier,
@@ -736,7 +745,11 @@ class ConfluentAdapter(SQLAdapter):
         except TableflowTopicAlreadyExistsError:
             # Narrow race: something else enabled it between our GET above and
             # this call. The desired end state (enabled) already holds.
-            logger.debug("Tableflow was enabled concurrently for %s; leaving as-is.", relation)
+            fire_event(
+                AdapterEventDebug(
+                    base_msg=f"Tableflow was enabled concurrently for {relation}; leaving as-is."
+                )
+            )
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error enabling Tableflow for {relation}: {e}") from e
 
@@ -768,7 +781,7 @@ class ConfluentAdapter(SQLAdapter):
             return
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
-        logger.debug("Disabling Tableflow on %s before drop.", relation)
+        fire_event(AdapterEventDebug(base_msg=f"Disabling Tableflow on {relation} before drop."))
         try:
             handle.disable_tableflow(relation.identifier)
         except TableflowTopicNotFoundError:

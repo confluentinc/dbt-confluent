@@ -67,7 +67,9 @@ class TestEnsureTableflowConfig:
 
     # --- not enabled -> enable ---
 
-    def test_not_enabled_enables_with_current_config(self, wire_connection, handle, rel):
+    def test_not_enabled_enables_with_current_config(
+        self, wire_connection, handle, rel, fire_event
+    ):
         wire_connection.ensure_tableflow_config(
             rel, {"formats": "ICEBERG", "storage": {"type": "managed"}}
         )
@@ -77,6 +79,8 @@ class TestEnsureTableflowConfig:
         assert call.kwargs["tableflow_formats"] == [TableFormat.ICEBERG]
         assert call.kwargs["storage"] == ManagedStorage()
         assert call.kwargs["config"] is None
+        fire_event.assert_called_once()
+        assert "my_table" in fire_event.call_args.args[0].base_msg
 
     def test_lowercase_and_multiple_formats(self, wire_connection, handle, rel):
         wire_connection.ensure_tableflow_config(
@@ -193,7 +197,7 @@ class TestEnsureTableflowConfig:
         assert exc_info.value.__cause__ is err
         assert "my_table" in str(exc_info.value)
 
-    def test_already_exists_race_is_swallowed(self, wire_connection, handle, rel):
+    def test_already_exists_race_is_swallowed(self, wire_connection, handle, rel, fire_event):
         """Narrow race: something else enabled it between our GET and this
         call. The desired end state (enabled) already holds, so this must
         not raise."""
@@ -203,3 +207,6 @@ class TestEnsureTableflowConfig:
         wire_connection.ensure_tableflow_config(
             rel, {"formats": "ICEBERG", "storage": {"type": "managed"}}
         )
+        # One debug event for the enable attempt, one for the swallowed race.
+        assert fire_event.call_count == 2
+        assert "my_table" in fire_event.call_args.args[0].base_msg
