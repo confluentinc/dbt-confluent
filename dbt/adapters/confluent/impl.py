@@ -685,17 +685,19 @@ class ConfluentAdapter(SQLAdapter):
         Tableflow's control-plane routes (enable/get/disable) resolve the
         connection's `database` to a Kafka cluster id via CMK, which
         requires a Global or Tableflow-scoped API key -- a Flink-region key
-        alone can't reach it. The raw driver message says as much, but also
-        suggests passing `database_kafka_cluster_id` to `connect()`, a
-        parameter this adapter doesn't expose through `profiles.yml`. Raised
-        instead of the raw `ProgrammingError` so the message stays
-        actionable for a dbt-confluent user.
+        alone can't reach it. The raw driver message says as much, but in
+        terms of the driver's own `connect()` call (a `database_kafka_
+        cluster_id` parameter this adapter doesn't expose through
+        `profiles.yml`), not this adapter's profile fields -- not useful to
+        a dbt user, so it's replaced rather than appended to (still
+        available via `__cause__` for anyone who needs it).
         """
         raise DbtDatabaseError(
-            f"{e} To use Tableflow, add a Global API key (`global_api_key`/"
-            "`global_api_secret`) to your profile, or a dedicated "
-            "`tableflow_api_key`/`tableflow_api_secret` pair -- see "
-            "README.md#configuration."
+            "Tableflow requires a Global API key or a dedicated "
+            "`tableflow_api_key`/`tableflow_api_secret` pair -- a Flink-region key "
+            "alone can't reach Tableflow's control plane. Add `global_api_key`/"
+            "`global_api_secret`, or `tableflow_api_key`/`tableflow_api_secret`, to "
+            "your profile -- see README.md#configuration."
         ) from e
 
     @available
