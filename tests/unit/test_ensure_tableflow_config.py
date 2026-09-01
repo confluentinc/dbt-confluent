@@ -20,6 +20,7 @@ from confluent_sql.exceptions import (
 from dbt_common.exceptions import DbtDatabaseError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
+from dbt.adapters.events.types import AdapterEventInfo
 from tests.unit._helpers import relation as make_relation
 
 
@@ -81,7 +82,11 @@ class TestEnsureTableflowConfig:
         assert call.kwargs["storage"] == ManagedStorage()
         assert call.kwargs["config"] is None
         fire_event.assert_called_once()
-        assert "my_table" in fire_event.call_args.args[0].base_msg
+        event = fire_event.call_args.args[0]
+        assert "my_table" in event.base_msg
+        # This blocks for up to 300s by default (waiting for RUNNING), so it
+        # must be visible without --debug.
+        assert isinstance(event, AdapterEventInfo)
 
     def test_lowercase_and_multiple_formats(self, wire_connection, handle, rel):
         wire_connection.ensure_tableflow_config(

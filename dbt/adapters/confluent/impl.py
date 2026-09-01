@@ -37,7 +37,7 @@ from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_tabl
 from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
 from dbt.adapters.contracts.connection import AdapterResponse
 from dbt.adapters.contracts.relation import Policy
-from dbt.adapters.events.types import AdapterEventDebug, AdapterEventWarning
+from dbt.adapters.events.types import AdapterEventDebug, AdapterEventInfo, AdapterEventWarning
 from dbt.adapters.sql import SQLAdapter
 
 from .naming import sanitize_statement_name
@@ -755,12 +755,15 @@ class ConfluentAdapter(SQLAdapter):
             )
             return
 
+        # Blocks (by default) until the topic reaches RUNNING, up to 300s -- worth an
+        # AdapterEventInfo, not AdapterEventDebug, so the wait is visible without --debug.
         fire_event(
-            AdapterEventDebug(
+            AdapterEventInfo(
                 base_msg=(
                     f"Enabling Tableflow for {relation} "
                     f"(formats={tableflow_config['formats']!r}, "
-                    f"storage={tableflow_config['storage']!r})."
+                    f"storage={tableflow_config['storage']!r}) -- this can take a "
+                    f"few minutes."
                 )
             )
         )
@@ -814,7 +817,16 @@ class ConfluentAdapter(SQLAdapter):
             self._reraise_tableflow_auth_error(e)
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
-        fire_event(AdapterEventDebug(base_msg=f"Disabling Tableflow on {relation} before drop."))
+        # Blocks (by default) until the topic is confirmed gone, up to 300s -- see the
+        # AdapterEventInfo note in ensure_tableflow_config.
+        fire_event(
+            AdapterEventInfo(
+                base_msg=(
+                    f"Disabling Tableflow on {relation} before drop -- this can take a "
+                    f"few minutes."
+                )
+            )
+        )
         try:
             handle.disable_tableflow(relation.identifier)
         except TableflowTopicNotFoundError:

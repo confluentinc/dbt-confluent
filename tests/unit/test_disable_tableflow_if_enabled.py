@@ -18,6 +18,7 @@ from confluent_sql.exceptions import (
 from dbt_common.exceptions import DbtDatabaseError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
+from dbt.adapters.events.types import AdapterEventInfo
 from tests.unit._helpers import relation as make_relation
 
 
@@ -51,7 +52,11 @@ class TestDisableTableflowIfEnabled:
         wire_connection.disable_tableflow_if_enabled(rel)
         handle.disable_tableflow.assert_called_once_with("my_table")
         fire_event.assert_called_once()
-        assert "my_table" in fire_event.call_args.args[0].base_msg
+        event = fire_event.call_args.args[0]
+        assert "my_table" in event.base_msg
+        # This blocks for up to 300s by default (waiting for removal), so it
+        # must be visible without --debug.
+        assert isinstance(event, AdapterEventInfo)
 
     def test_no_op_when_not_enabled(self, wire_connection, handle, rel, fire_event):
         handle.get_tableflow.side_effect = TableflowTopicNotFoundError(
