@@ -5,6 +5,7 @@
      should fail before any warehouse I/O, not after. #}
   {% do validate_materialization_config() %}
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
+  {%- do adapter.validate_tableflow_config(config.get('tableflow')) -%}
 
   -- Check if the relation exists already, and precreate the target_relation
   {%- set existing_relation = load_cached_relation(this) -%}
@@ -27,6 +28,7 @@
   {% if action == 'skip' %}
     {# dbt requires a 'main' statement result even when skipping #}
     {% call noop_statement('main', 'SKIP') %}{% endcall %}
+    {{ ensure_tableflow_config(target_relation) }}
     {{ run_hooks(post_hooks, inside_transaction=False) }}
     {{ return({'relations': [target_relation]}) }}
   {% endif %}
@@ -47,6 +49,12 @@
       {{ render_with_options(with_options) }}
     {%- endcall -%}
   {% endif %}
+
+  {# The table exists by this point either way -- freshly created just now
+     (action == 'create'), or already there and intact (action == 'restart',
+     which skips the DDL above but never the table itself). One check
+     covers both. #}
+  {{ ensure_tableflow_config(target_relation) }}
 
   -- Long-running INSERT — registered as 'main' so its compiled SQL is the
   -- artifact written to disk for `dbt show` / debugging, and so the restart

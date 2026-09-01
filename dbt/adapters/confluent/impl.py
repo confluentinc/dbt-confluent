@@ -7,7 +7,25 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import agate
-from confluent_sql.exceptions import OperationalError, StatementNotFoundError
+from confluent_sql import (
+    AzureAdlsStorage,
+    ByobAwsStorage,
+    InterfaceError,
+    ManagedStorage,
+    TableflowErrorHandling,
+    TableflowErrorHandlingLog,
+    TableflowErrorHandlingSkip,
+    TableflowErrorHandlingSuspend,
+    TableflowTopicConfig,
+)
+from confluent_sql import Error as ConfluentSqlError
+from confluent_sql.exceptions import (
+    OperationalError,
+    StatementNotFoundError,
+    TableflowTopicAlreadyExistsError,
+    TableflowTopicNotFoundError,
+)
+from confluent_sql.tableflow import normalize_table_formats
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.events.functions import fire_event
@@ -38,14 +56,14 @@ _UNIVERSAL_CONFIG_KEYS = frozenset(
 )
 
 MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
-    "table": _UNIVERSAL_CONFIG_KEYS | {"distributed_by", "on_schema_drift"},
+    "table": _UNIVERSAL_CONFIG_KEYS | {"distributed_by", "on_schema_drift", "tableflow"},
     "view": _UNIVERSAL_CONFIG_KEYS,
     "streaming_source": _UNIVERSAL_CONFIG_KEYS
-    | {"connector", "with", "distributed_by", "on_schema_drift"},
+    | {"connector", "with", "distributed_by", "on_schema_drift", "tableflow"},
     "streaming_table": _UNIVERSAL_CONFIG_KEYS
-    | {"with", "distributed_by", "on_schema_drift", "statement_properties"},
+    | {"with", "distributed_by", "on_schema_drift", "statement_properties", "tableflow"},
     "materialized_table": _UNIVERSAL_CONFIG_KEYS
-    | {"with", "distributed_by", "start_mode", "statement_properties"},
+    | {"with", "distributed_by", "start_mode", "statement_properties", "tableflow"},
 }
 
 _ALL_CONFIG_KEYS: frozenset[str] = frozenset().union(*MATERIALIZATION_CONFIG_KEYS.values())
@@ -80,6 +98,25 @@ _START_MODE_RE = re.compile(
     r"\s*(?P<kw>[A-Za-z_]+)\s*"
     r"(?:\((?P<arg>(?:'(?:[^']|'')*'|[\w \t])*)\)\s*)?"
 )
+
+# The dbt-facing shorthand name for each `tableflow.storage`/`error_handling`
+# shape, mapped to confluent_sql's own class. This mapping is the one piece of
+# "what backends/modes exist" that's genuinely ours to maintain -- it's our
+# config surface's own naming, not the driver's. Each shape's actual required/
+# allowed fields are NOT hand-copied here; they're enforced by the dataclass
+# constructor itself (see _translate_tableflow_storage /
+# _translate_tableflow_error_handling), so a field the driver adds or renames
+# needs no change on this side to be correctly accepted or rejected.
+_TABLEFLOW_STORAGE_CLASSES: dict[str, type] = {
+    "managed": ManagedStorage,
+    "byob_aws": ByobAwsStorage,
+    "azure_adls": AzureAdlsStorage,
+}
+_TABLEFLOW_ERROR_HANDLING_CLASSES: dict[str, type] = {
+    "suspend": TableflowErrorHandlingSuspend,
+    "skip": TableflowErrorHandlingSkip,
+    "log": TableflowErrorHandlingLog,
+}
 
 
 @dataclass(frozen=True, eq=False, repr=False)
@@ -424,6 +461,310 @@ class ConfluentAdapter(SQLAdapter):
                 e, statement_name, action="deletion", expect_exists=expect_exists
             ):
                 raise
+
+    @available
+    def validate_tableflow_config(self, tf: object) -> None:
+        """Raise CompilationError if the `tableflow` config is malformed.
+
+        Called once per materialization run (mirroring
+        `validate_distributed_by_config`) so `ensure_tableflow_config` can
+        trust the shape without re-validating, and so a bad config fails
+        before any DDL/full-refresh drop runs.
+
+        Shape::
+
+            tableflow={
+                'formats': 'ICEBERG' | ['ICEBERG', 'DELTA'],  # required
+                'storage': {'type': 'managed'}
+                         | {'type': 'byob_aws', 'bucket_name': ..., 'provider_integration_id': ...}
+                         | {'type': 'azure_adls', 'storage_account_name': ...,
+                            'container_name': ..., 'provider_integration_id': ...},  # required
+                'retention_ms': 604800000,       # optional
+                'data_retention_ms': 604800000,  # optional
+                'error_handling': {'mode': 'suspend' | 'skip'}
+                                | {'mode': 'log', 'target': '...'},  # optional
+            }
+
+        Deliberately thin: it just runs the same translation
+        `ensure_tableflow_config` performs and discards the result. The
+        actual "is this shape valid" logic lives in
+        `_translate_tableflow_formats` / `_translate_tableflow_storage` /
+        `_translate_tableflow_topic_config`, which delegate as much as
+        possible to confluent_sql's own types (`normalize_table_formats`,
+        each storage/error-handling dataclass's own constructor) rather than
+        re-declaring the driver's rules here -- so a format, storage
+        backend, or error mode the driver adds requires no change on this
+        side to be correctly accepted.
+        """
+        if tf is None:
+            return
+        if not isinstance(tf, dict):
+            raise CompilationError("'tableflow' config must be a mapping.")
+
+        allowed_keys = {
+            "formats",
+            "storage",
+            "retention_ms",
+            "data_retention_ms",
+            "error_handling",
+        }
+        unknown = set(tf) - allowed_keys
+        if unknown:
+            raise CompilationError(
+                f"'tableflow' has unknown key(s): {', '.join(sorted(unknown))}. "
+                f"Allowed keys: {', '.join(sorted(allowed_keys))}."
+            )
+
+        self._translate_tableflow_formats(tf.get("formats"))
+        self._translate_tableflow_storage(tf.get("storage"))
+        self._translate_tableflow_topic_config(tf)
+
+    @staticmethod
+    def _translate_tableflow_formats(formats: object) -> list[str]:
+        """Validate and normalize `tableflow.formats` into the driver's wire
+        list. Case-insensitivity (`'iceberg'` as well as `'ICEBERG'`) is our
+        own convenience; which values are actually valid formats is entirely
+        confluent_sql's `normalize_table_formats`'s call, not ours -- a format
+        the driver adds tomorrow is accepted here with no adapter change.
+        """
+        raw = [formats] if isinstance(formats, str) else formats
+        if (
+            not formats
+            or not isinstance(raw, (list, tuple))
+            or not all(isinstance(f, str) for f in raw)
+        ):
+            raise CompilationError(
+                "'tableflow.formats' is required and must be 'ICEBERG'/'DELTA' or a list of them."
+            )
+        try:
+            return normalize_table_formats([f.upper() for f in raw])
+        except InterfaceError as e:
+            raise CompilationError(f"'tableflow.formats' is invalid: {e}") from e
+
+    @staticmethod
+    def _require_string_fields(fields: dict, owner: str) -> None:
+        """Raise if any of `fields`' values isn't a string.
+
+        Every field the storage/error-handling dataclasses accept (bucket
+        names, integration ids, dead-letter targets, ...) is typed `str` --
+        but dataclasses don't enforce field types at construction, so a
+        wrong-typed value would otherwise construct successfully and only
+        fail (or silently misbehave) far downstream at the actual API call.
+        A blanket "every field here is a string" is timeless sanity, not a
+        business rule that could go stale, so it's checked explicitly
+        instead of relying on the constructor. `owner` is the dotted config
+        path used in the error message (e.g. "tableflow.storage").
+        """
+        for key, value in fields.items():
+            if not isinstance(value, str):
+                raise CompilationError(f"'{owner}.{key}' must be a string; got {value!r}.")
+
+    @staticmethod
+    def _translate_tableflow_storage(
+        storage: object,
+    ) -> "ManagedStorage | ByobAwsStorage | AzureAdlsStorage":
+        """Validate and translate `tableflow.storage` into its driver type.
+
+        Only the shorthand-name-to-class dispatch is ours; each storage
+        type's required/allowed *fields* are enforced by attempting the real
+        dataclass construction and catching the `TypeError` it raises on a
+        missing or unexpected field, instead of a hand-copied required-keys
+        list that could silently go stale against the driver. Field *values*
+        get their own check (see `_require_string_fields`) since the
+        constructor won't catch a wrong-typed one.
+        """
+        if not isinstance(storage, dict) or "type" not in storage:
+            raise CompilationError(
+                "'tableflow.storage' is required and must be a mapping with a 'type' "
+                f"key ({', '.join(sorted(_TABLEFLOW_STORAGE_CLASSES))})."
+            )
+        storage_type = storage["type"]
+        storage_cls = _TABLEFLOW_STORAGE_CLASSES.get(storage_type)
+        if storage_cls is None:
+            raise CompilationError(
+                f"'tableflow.storage.type' must be one of "
+                f"{sorted(_TABLEFLOW_STORAGE_CLASSES)}; got {storage_type!r}."
+            )
+        fields = {k: v for k, v in storage.items() if k != "type"}
+        ConfluentAdapter._require_string_fields(fields, "tableflow.storage")
+        try:
+            return storage_cls(**fields)
+        except TypeError as e:
+            raise CompilationError(
+                f"'tableflow.storage' of type '{storage_type}' is invalid: {e}"
+            ) from e
+
+    @staticmethod
+    def _translate_tableflow_error_handling(eh: object) -> TableflowErrorHandling:
+        """Validate and translate `tableflow.error_handling` into its driver
+        type. Same philosophy as `_translate_tableflow_storage`: only the
+        mode-name-to-class dispatch is ours, and each mode's allowed fields
+        (e.g. `target` for `'log'` only) are enforced by the constructor
+        itself, not a hand-copied per-mode key list -- field values are
+        checked separately (see `_require_string_fields`).
+        """
+        if not isinstance(eh, dict) or "mode" not in eh:
+            raise CompilationError(
+                "'tableflow.error_handling' must be a mapping with a 'mode' key."
+            )
+        mode = eh["mode"]
+        eh_cls = _TABLEFLOW_ERROR_HANDLING_CLASSES.get(mode)
+        if eh_cls is None:
+            raise CompilationError(
+                f"'tableflow.error_handling.mode' must be one of "
+                f"{sorted(_TABLEFLOW_ERROR_HANDLING_CLASSES)}; got {mode!r}."
+            )
+        fields = {k: v for k, v in eh.items() if k != "mode"}
+        ConfluentAdapter._require_string_fields(fields, "tableflow.error_handling")
+        try:
+            return eh_cls(**fields)
+        except TypeError as e:
+            raise CompilationError(
+                f"'tableflow.error_handling' of mode '{mode}' is invalid: {e}"
+            ) from e
+
+    @staticmethod
+    def _translate_tableflow_topic_config(tf: dict) -> TableflowTopicConfig | None:
+        """Translate `retention_ms`/`data_retention_ms`/`error_handling` into
+        a `TableflowTopicConfig`, or None if none of them are set (an empty
+        config sends nothing extra in the request, matching the driver's own
+        default).
+
+        `retention_ms`/`data_retention_ms` get a sign/type check the driver's
+        `str | int | None` field type doesn't itself enforce -- but this is
+        timeless dimensional sanity (a duration can't be negative or a list),
+        not a business rule tied to Confluent's current feature set, so
+        there's no server-sync risk in keeping it eager here.
+        """
+        for key in ("retention_ms", "data_retention_ms"):
+            value = tf.get(key)
+            if value is None:
+                continue
+            if isinstance(value, bool) or (
+                not (isinstance(value, int) and value >= 0)
+                and not (isinstance(value, str) and value.isdigit())
+            ):
+                raise CompilationError(
+                    f"'tableflow.{key}' must be a non-negative integer (or a numeric string)."
+                )
+
+        error_handling_conf = tf.get("error_handling")
+        error_handling = (
+            ConfluentAdapter._translate_tableflow_error_handling(error_handling_conf)
+            if error_handling_conf is not None
+            else None
+        )
+
+        retention_ms = tf.get("retention_ms")
+        data_retention_ms = tf.get("data_retention_ms")
+        if retention_ms is None and data_retention_ms is None and error_handling is None:
+            return None
+        return TableflowTopicConfig(
+            retention_ms=retention_ms,
+            data_retention_ms=data_retention_ms,
+            error_handling=error_handling,
+        )
+
+    @available
+    def ensure_tableflow_config(
+        self, relation: BaseRelation, tableflow_config: dict | None
+    ) -> None:
+        """Ensure `relation`'s backing Kafka topic reflects `config(tableflow={...})`.
+
+        No-op if `tableflow_config` is empty/None -- config governs whether
+        we touch Tableflow at all; live state is only ever consulted once
+        we already know the model wants to manage it.
+
+        Runs the same way on every invocation, regardless of whether
+        `relation` was just created, already existed, or is being restarted
+        -- there's no separate "enable at creation" vs. "check on skip" path
+        to keep in sync:
+
+        - Not enabled -> enable it with the current config.
+        - Already enabled -> v1 does no diffing at all (see #101). We don't
+          know whether the live config matches what's configured now, so we
+          don't claim to -- just warn that dbt doesn't update an enabled
+          Tableflow config in place yet, and point at --full-refresh or a
+          manual disable.
+
+        Calls the driver's `Connection` directly (no SQL statement, no
+        cursor), bypassing `exception_handler`'s usual confluent_sql ->
+        DbtDatabaseError wrapping -- so any error other than the expected
+        "already enabled"/"already exists" outcomes is wrapped here instead.
+        """
+        if not tableflow_config:
+            return
+        conn = self.connections.get_thread_connection()
+        handle = conn.handle
+        try:
+            handle.get_tableflow(relation.identifier)
+        except TableflowTopicNotFoundError:
+            pass  # Not enabled yet -- fall through to enable it below.
+        except ConfluentSqlError as e:
+            raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
+        else:
+            fire_event(
+                AdapterEventWarning(
+                    base_msg=(
+                        f"Tableflow is already enabled for {relation}, and dbt does not "
+                        f"yet update an existing Tableflow configuration in place. If "
+                        f"you've changed the `tableflow` config and want that change "
+                        f"applied, run --full-refresh, or disable Tableflow on this "
+                        f"table manually first."
+                    )
+                )
+            )
+            return
+
+        try:
+            handle.enable_tableflow(
+                relation.identifier,
+                tableflow_formats=self._translate_tableflow_formats(tableflow_config["formats"]),
+                storage=self._translate_tableflow_storage(tableflow_config["storage"]),
+                config=self._translate_tableflow_topic_config(tableflow_config),
+            )
+        except TableflowTopicAlreadyExistsError:
+            # Narrow race: something else enabled it between our GET above and
+            # this call. The desired end state (enabled) already holds.
+            logger.debug("Tableflow was enabled concurrently for %s; leaving as-is.", relation)
+        except ConfluentSqlError as e:
+            raise DbtDatabaseError(f"Error enabling Tableflow for {relation}: {e}") from e
+
+    @available
+    def disable_tableflow_if_enabled(self, relation: BaseRelation) -> None:
+        """Disable Tableflow on `relation`'s backing Kafka topic if currently enabled.
+
+        Only ever called by a Jinja caller that has already checked its own
+        `tableflow` config is set (see `disable_old_tableflow_before_drop` in
+        helpers.sql) -- this method itself takes no config, on purpose: it
+        can't know why it's being called, only what's true on the server
+        right now, which is exactly what it's here to check.
+
+        confluent_sql recommends disabling Tableflow -- and waiting for the
+        removal to be confirmed -- before a DROP TABLE, so the drop doesn't
+        race an active materialization. A silent no-op if Tableflow was
+        never enabled.
+
+        Calls the driver's `Connection` directly (no SQL statement, no
+        cursor), bypassing `exception_handler`'s usual confluent_sql ->
+        DbtDatabaseError wrapping -- so any error other than "not enabled"
+        is wrapped here instead.
+        """
+        conn = self.connections.get_thread_connection()
+        handle = conn.handle
+        try:
+            handle.get_tableflow(relation.identifier)
+        except TableflowTopicNotFoundError:
+            return
+        except ConfluentSqlError as e:
+            raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
+        logger.debug("Disabling Tableflow on %s before drop.", relation)
+        try:
+            handle.disable_tableflow(relation.identifier)
+        except TableflowTopicNotFoundError:
+            return  # Narrow race: already gone.
+        except ConfluentSqlError as e:
+            raise DbtDatabaseError(f"Error disabling Tableflow for {relation}: {e}") from e
 
     def pre_model_hook(self, config: Mapping[str, Any]) -> None:
         """Reset this thread's deferred-cleanup registry.
@@ -832,7 +1173,7 @@ class ConfluentAdapter(SQLAdapter):
                 f"'{keys}' {verb} not supported by the 'materialized_table' "
                 f"materialization for Confluent Flink.\n"
                 f"Supported config options are: distributed_by, with, start_mode, "
-                f"statement_properties, contract."
+                f"statement_properties, contract, tableflow."
             )
 
     @available

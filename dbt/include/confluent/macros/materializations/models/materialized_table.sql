@@ -11,6 +11,7 @@
 
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
   {%- do adapter.validate_materialized_table_config(config) -%}
+  {%- do adapter.validate_tableflow_config(config.get('tableflow')) -%}
 
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type=this.Table) %}
@@ -29,6 +30,7 @@
       {%- if should_full_refresh() -%}
         {{ delete_statement_if_exists(get_statement_name()) }}
         {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
+        {{ disable_old_tableflow_before_drop(existing_relation) }}
         {{ drop_relation_if_exists(existing_relation) }}
       {%- else -%}
         {% set msg %}
@@ -38,6 +40,7 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
         {% do exceptions.raise_compiler_error(msg) %}
       {%- endif -%}
     {%- elif existing_kind == 'materialized_table' and should_full_refresh() -%}
+      {{ disable_old_tableflow_before_drop(existing_relation) }}
       {% do adapter.drop_materialized_table(existing_relation) %}
     {%- endif -%}
   {%- endif -%}
@@ -69,6 +72,10 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
     AS
     {{ sql }}
   {%- endcall %}
+
+  {# Same check on every run, whether this statement just created the table,
+     evolved it, or was a server-side no-op -- no need to track which. #}
+  {{ ensure_tableflow_config(target_relation) }}
 
   {% do persist_docs(target_relation, model) %}
   {{ run_hooks(post_hooks, inside_transaction=True) }}

@@ -5,6 +5,7 @@
      should fail before any warehouse I/O, not after. #}
   {% do validate_materialization_config() %}
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
+  {%- do adapter.validate_tableflow_config(config.get('tableflow')) -%}
 
   -- Check if the relation exists already, and precreate the target_relation
   {%- set existing_relation = load_cached_relation(this) -%}
@@ -38,6 +39,7 @@
   {% if decide_action(existing_relation, has_select_query=false, recoverable=false) == 'skip' %}
     {# dbt requires a 'main' statement result even when skipping #}
     {% call noop_statement('main', 'SKIP') %}{% endcall %}
+    {{ ensure_tableflow_config(target_relation) }}
     {{ run_hooks(post_hooks, inside_transaction=False) }}
     {{ return({'relations': [target_relation]}) }}
   {% endif %}
@@ -53,6 +55,8 @@
     {{ get_distributed_by_clause() }}
     {{ render_with_options(with_options) }}
   {%- endcall %}
+
+  {{ ensure_tableflow_config(target_relation) }}
 
   -- See comment above about calling hooks
   {% do persist_docs(target_relation, model) %}

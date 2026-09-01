@@ -33,6 +33,7 @@ class TestAllConfluentConfigKeys:
             "connector",
             "statement_properties",
             "start_mode",
+            "tableflow",
         ):
             assert expected in keys
 
@@ -53,9 +54,18 @@ class TestValidateMaterializationConfig:
             ("table", {"on_schema_drift": "ignore"}),
             ("table", {"statement_name": "custom"}),
             ("table", {"compute_pool_id": "lfcp-1"}),
+            ("table", {"tableflow": {"formats": "ICEBERG", "storage": {"type": "managed"}}}),
             ("view", {"statement_name": "custom"}),
             ("streaming_source", {"connector": "faker", "with": {"a": "b"}}),
+            (
+                "streaming_source",
+                {"tableflow": {"formats": "ICEBERG", "storage": {"type": "managed"}}},
+            ),
             ("streaming_table", {"with": {"a": "b"}, "statement_properties": {"x": "y"}}),
+            (
+                "streaming_table",
+                {"tableflow": {"formats": "ICEBERG", "storage": {"type": "managed"}}},
+            ),
             (
                 "materialized_table",
                 {
@@ -64,6 +74,10 @@ class TestValidateMaterializationConfig:
                     "start_mode": "FROM_BEGINNING",
                     "statement_properties": {"x": "y"},
                 },
+            ),
+            (
+                "materialized_table",
+                {"tableflow": {"formats": "ICEBERG", "storage": {"type": "managed"}}},
             ),
         ],
     )
@@ -82,6 +96,7 @@ class TestValidateMaterializationConfig:
             ("streaming_table", {"connector": "faker"}),
             ("materialized_table", {"on_schema_drift": "ignore"}),
             ("materialized_table", {"connector": "faker"}),
+            ("view", {"tableflow": {"formats": "ICEBERG", "storage": {"type": "managed"}}}),
         ],
         ids=[
             "statement_properties_on_table",
@@ -93,6 +108,7 @@ class TestValidateMaterializationConfig:
             "connector_on_streaming_table",
             "on_schema_drift_on_materialized_table",
             "connector_on_materialized_table",
+            "tableflow_on_view",
         ],
     )
     def test_unsupported_config_raises(self, adapter, materialization, observed_config):
