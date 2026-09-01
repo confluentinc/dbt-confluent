@@ -686,11 +686,13 @@ class ConfluentAdapter(SQLAdapter):
         `ProgrammingError` covers more than this one case, so only the
         known "no global key" message (raised by `_resolve_kafka_cluster_id`
         when `database` can't be resolved to a Kafka cluster id) is
-        rewritten -- a `tableflow_api_key`/`tableflow_api_secret` pair alone
-        doesn't fix this particular error (CMK resolution requires the
-        global key specifically), so it isn't offered as an alternative
-        here. Anything else re-raises as-is rather than risk mislabeling an
-        unrelated `ProgrammingError`.
+        rewritten. Anything else re-raises as-is rather than risk
+        mislabeling an unrelated `ProgrammingError`.
+
+        Only `global_api_key`/`global_api_secret` is offered as a fix: CMK
+        cluster-id resolution requires the global key specifically, so a
+        Tableflow-scoped key pair can't satisfy it -- this adapter doesn't
+        expose `database_kafka_cluster_id` to skip the lookup instead (#105).
         """
         if "requires a global API key" not in str(e):
             raise

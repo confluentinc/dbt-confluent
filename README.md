@@ -46,7 +46,7 @@ Select `confluent` as the adapter and fill in the prompts for your Confluent Clo
 
 You can authenticate with either a **Global** Confluent Cloud API key (`global_api_key` / `global_api_secret`, which works against every route) or a **Flink-region** key (`flink_api_key` / `flink_api_secret`). The `compute_pool_id` is optional: omit it to run statements in the environment+region [default compute pool](https://docs.confluent.io/cloud/current/flink/concepts/compute-pools.html#default-compute-pools). This profile-level pool is the default for every model; individual models can override it with `config(compute_pool_id='...')` — see [Materializations](MATERIALIZATIONS.md#compute-pool).
 
-A Global key already covers [Tableflow](MATERIALIZATIONS.md#tableflow)'s control-plane routes, so most profiles need nothing further. If you're using a Flink-region key instead (or want Tableflow on a separate, more narrowly-scoped key), add `tableflow_api_key` / `tableflow_api_secret` to your `profiles.yml` by hand — they're not prompted by `dbt init`.
+[Tableflow](MATERIALIZATIONS.md#tableflow) requires a Global key — it resolves your Kafka cluster id via a route a Flink-region key can't reach.
 
 ### Concept mapping
 

@@ -65,12 +65,6 @@ class ConfluentCredentials(Credentials):
     global_api_secret: str | None = None
     flink_api_key: str | None = None
     flink_api_secret: str | None = None
-    # Optional: a dedicated key pair for Tableflow's control-plane routes
-    # (enable/get/disable, used by config(tableflow={...})). confluent_sql
-    # only consults these when no global key is supplied -- a global key
-    # already covers Tableflow, so most users never need this pair.
-    tableflow_api_key: str | None = None
-    tableflow_api_secret: str | None = None
     # Optional ("poolless"): when omitted, Confluent Cloud Flink runs statements
     # in the environment+region default compute pool (provisioning if necessary).
     compute_pool_id: str | None = None
@@ -480,8 +474,6 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 global_api_secret=credentials.global_api_secret,
                 flink_api_key=credentials.flink_api_key,
                 flink_api_secret=credentials.flink_api_secret,
-                tableflow_api_key=credentials.tableflow_api_key,
-                tableflow_api_secret=credentials.tableflow_api_secret,
                 environment_id=credentials.database,
                 compute_pool_id=credentials.compute_pool_id,
                 organization_id=credentials.organization_id,
