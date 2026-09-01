@@ -1,9 +1,12 @@
 """Unit tests for ConfluentAdapter.disable_tableflow_if_enabled.
 
 Called before dropping a relation so the drop doesn't race an active
-Tableflow materialization (confluent_sql's own recommendation). Checked by
-live state (GET, then DELETE) rather than dbt config, so it also covers a
-table Tableflow was enabled on outside of dbt.
+Tableflow materialization (confluent_sql's own recommendation). This method
+itself checks only live state (GET, then DELETE), not dbt config -- so
+within it, a table Tableflow was enabled on outside of dbt is covered the
+same as one dbt enabled. Its caller (`disable_old_tableflow_before_drop` in
+helpers.sql) is what decides whether to call it at all, gated on the
+*current* model's `tableflow` config -- see that macro's docstring for why.
 """
 
 from types import SimpleNamespace
