@@ -801,7 +801,7 @@ class ConfluentAdapter(SQLAdapter):
         except ConfluentSqlError as e:
             raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
         # Blocks (by default) until the topic is confirmed gone
-        logger.debug(f"Disabling Tableflow on {relation} before drop.")
+        logger.info(f"Disabling Tableflow on {relation} before drop.")
         try:
             handle.disable_tableflow(relation.identifier)
         except TableflowTopicNotFoundError:
