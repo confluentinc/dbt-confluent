@@ -498,7 +498,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
         except Exception as e:
             connection.state = "fail"
             connection.handle = None
-            raise ConnectionError("confluent_sql connection error") from e
+            raise e
 
     @classmethod
     def get_response(cls, cursor):
