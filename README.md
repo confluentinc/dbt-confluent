@@ -45,6 +45,8 @@ Select `confluent` as the adapter and fill in the prompts for your Confluent Clo
 
 You can authenticate with either a **Global** Confluent Cloud API key (`global_api_key` / `global_api_secret`, which works against every route) or a **Flink-region** key (`flink_api_key` / `flink_api_secret`). The `compute_pool_id` is optional: omit it to run statements in the environment+region [default compute pool](https://docs.confluent.io/cloud/current/flink/concepts/compute-pools.html#default-compute-pools). This profile-level pool is the default for every model; individual models can override it with `config(compute_pool_id='...')` — see [Materializations](MATERIALIZATIONS.md#compute-pool).
 
+Alternatively, set `auth: oauth` in the profile to authenticate via interactive Confluent Cloud sign-in instead of an API key — the first connection opens a browser for a one-time login, which is then shared across the run. Omit `global_api_key`/`global_api_secret`/`flink_api_key`/`flink_api_secret` when using `auth: oauth`.
+
 ### Concept mapping
 
 Confluent Cloud Flink uses different terminology than traditional databases. Here's how dbt concepts map to Flink and Confluent Cloud:

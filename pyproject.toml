@@ -33,7 +33,7 @@ dependencies = [
   "dbt-adapters~=1.16",
   "agate~=1.0",
   "httpx>=0.23.0,<0.29.0",
-  "confluent-sql~=0.5.3",
+  "confluent-sql @ git+https://github.com/confluentinc/confluent-sql.git@oauth-epic-integration",
 ]
 
 [dependency-groups]
@@ -98,6 +98,11 @@ pretty = true
 
 [tool.hatch.version]
 path = "dbt/adapters/confluent/__version__.py"
+
+[tool.hatch.metadata]
+# Needed while confluent-sql is pinned to a git branch (oauth-epic-integration) instead of a
+# published release. Remove once oauth support ships in a tagged confluent-sql version.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["dbt"]

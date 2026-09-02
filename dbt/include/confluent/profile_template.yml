@@ -39,6 +39,8 @@ prompts:
       flink_api_secret:
         hint: "Flink API secret"
         hide_input: true
+    "Use OAuth (interactive Confluent Cloud sign-in, no API key)":
+      _fixed_auth: oauth
   execution_mode:
     hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'"
     type: "string"
