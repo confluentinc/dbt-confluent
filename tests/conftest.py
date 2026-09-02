@@ -36,6 +36,12 @@ def dbt_profile_target(unique_schema):
     """The profile dictionary, used to write out profiles.yml for tests."""
     flink_api_key = os.getenv("CONFLUENT_FLINK_API_KEY")
     flink_api_secret = os.getenv("CONFLUENT_FLINK_API_SECRET")
+    # Optional: a Global key, only needed for Tableflow functional tests (Tableflow's
+    # control-plane routes require one regardless of the Flink-region pair above --
+    # see MATERIALIZATIONS.md#tableflow). None/None when unset, so confluent_sql.connect()
+    # falls back to the Flink-region pair for every other test, unaffected.
+    global_api_key = os.getenv("CONFLUENT_GLOBAL_API_KEY")
+    global_api_secret = os.getenv("CONFLUENT_GLOBAL_API_SECRET")
     environment = os.getenv("CONFLUENT_ENV_ID")
     organization_id = os.getenv("CONFLUENT_ORG_ID")
     compute_pool_id = os.getenv("CONFLUENT_COMPUTE_POOL_ID")
@@ -52,6 +58,8 @@ def dbt_profile_target(unique_schema):
         "organization_id": organization_id,
         "flink_api_key": flink_api_key,
         "flink_api_secret": flink_api_secret,
+        "global_api_key": global_api_key,
+        "global_api_secret": global_api_secret,
         "database": environment,
         "schema": unique_schema,
         "test_schema": unique_schema,
