@@ -181,6 +181,13 @@ export CONFLUENT_FLINK_API_SECRET=xxx
 # CONFLUENT_COMPUTE_POOL_ID) used only by the per-model compute pool test.
 # The test is skipped when this is unset or equal to CONFLUENT_COMPUTE_POOL_ID.
 export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
+
+# Optional: a Global API key, used only by the Tableflow functional tests
+# (Tableflow's control-plane routes require one regardless of the Flink-region
+# pair above -- see MATERIALIZATIONS.md#tableflow). Those tests are skipped
+# when either of these is unset.
+export CONFLUENT_GLOBAL_API_KEY=xxx
+export CONFLUENT_GLOBAL_API_SECRET=xxx
 ```
 
 ```bash
