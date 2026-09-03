@@ -10,7 +10,9 @@ from dbt.include import confluent
 __all__ = ["Plugin", "ConfluentConnectionManager", "ConfluentColumn"]
 
 Plugin = AdapterPlugin(
-    adapter=ConfluentAdapter,
+    # dbt-core's `AdapterProtocol` is a Generic Protocol (see its own "TODO CT-211"),
+    # and no concrete adapter satisfies it under strict structural checking.
+    adapter=ConfluentAdapter,  # type: ignore[arg-type]
     credentials=ConfluentCredentials,
     include_path=confluent.PACKAGE_PATH,
 )

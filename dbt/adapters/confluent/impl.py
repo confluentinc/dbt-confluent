@@ -3,7 +3,7 @@ import threading
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal, NoReturn
+from typing import Any, Literal, NoReturn, cast
 
 import agate
 from confluent_sql import (
@@ -953,7 +953,9 @@ class ConfluentAdapter(SQLAdapter):
         # We distinguish between them by the presence (or lack) of "table_name"/"column_name"
         # This allows us to get the catalog with a single query, which, given the
         # overhead of each query, is a significant time saving move.
-        catalog = self.execute_macro("get_catalog", kwargs=kwargs)
+        # `execute_macro` is typed as returning `AttrDict`, but a macro returning a
+        # list of rows (as `get_catalog` does) actually yields a plain list of dicts.
+        catalog = cast(list[dict[str, Any]], self.execute_macro("get_catalog", kwargs=kwargs))
 
         # Sort by database.schema.name first, so we get all the rows (table and columns) for
         # any given table in the right order.
@@ -1300,6 +1302,8 @@ class ConfluentAdapter(SQLAdapter):
         expected options here to participate in options drift like any
         other option. None for materializations without a connector.
         """
+        assert existing_relation.identifier is not None
+        assert temp_relation.identifier is not None
         (
             existing_columns,
             expected_columns,
