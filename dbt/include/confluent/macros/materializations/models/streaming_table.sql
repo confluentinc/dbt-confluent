@@ -52,12 +52,6 @@
     {%- endcall -%}
   {% endif %}
 
-  {# The table exists by this point either way -- freshly created just now
-     (action == 'create'), or already there and intact (action == 'restart',
-     which skips the DDL above but never the table itself). One check
-     covers both. #}
-  {{ ensure_tableflow_config(target_relation) }}
-
   -- Long-running INSERT — registered as 'main' so its compiled SQL is the
   -- artifact written to disk for `dbt show` / debugging, and so the restart
   -- path satisfies dbt's "main result" contract without renaming.
@@ -66,6 +60,13 @@
                      statement_properties=config.get('statement_properties')) -%}
     INSERT INTO {{ target_relation }} {{ sql }}
   {%- endcall -%}
+
+  {# The table exists by this point either way -- freshly created just now
+     (action == 'create'), or already there and intact (action == 'restart',
+     which skips the DDL above but never the table itself). One check
+     covers both. Called after the data-producing INSERT, matching every
+     other materialization -- no reason for this one to differ. #}
+  {{ ensure_tableflow_config(target_relation) }}
 
   -- See comment above, calling hooks even if our transactions are noop.
   {% do persist_docs(target_relation, model) %}
