@@ -72,10 +72,10 @@ class TestStatementNeedsRestart:
         _handle(adapter).get_statement.side_effect = OperationalError(
             "error sending request '403'", http_status_code=403
         )
-        with patch("dbt.adapters.confluent.impl.fire_event") as fire_event:
+        with patch("dbt.adapters.confluent.impl.logger") as logger:
             assert needs_restart(adapter) is True
-        fire_event.assert_called_once()
-        assert "403" in fire_event.call_args.args[0].base_msg
+        logger.warning.assert_called_once()
+        assert "403" in logger.warning.call_args.args[0]
 
     def test_non_403_operational_error_reraises(self):
         """A non-403 API error is a real failure and must propagate."""
