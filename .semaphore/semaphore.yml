@@ -35,6 +35,9 @@ blocks:
         - name: "Ruff Format Check"
           commands:
             - uv run --frozen ruff format --check dbt/ tests/
+        - name: "Mypy Check"
+          commands:
+            - uv run --frozen mypy dbt/
         - name: "Changelog Check"
           commands:
             - |
