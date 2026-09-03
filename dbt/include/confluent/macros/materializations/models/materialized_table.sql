@@ -2,7 +2,11 @@
   {# Pure config validation first, before load_cached_relation (which can be a
      real INFORMATION_SCHEMA round-trip if this schema's relation cache isn't
      already warm) -- none of these validators depend on the relation, so a
-     config mistake should fail before any warehouse I/O, not after. #}
+     config mistake should fail before any warehouse I/O, not after.
+     `tableflow` isn't validated here: unlike start_mode/distributed_by, it's
+     never baked into this DDL, so a bad value can't doom a --full-refresh
+     recreate -- ensure_tableflow_config validates it for real when it
+     actually applies the config. #}
   {% do validate_materialization_config() %}
 
   {# Validates and renders in one step ('' when unset) — must run up here so a
@@ -29,6 +33,7 @@
       {%- if should_full_refresh() -%}
         {{ delete_statement_if_exists(get_statement_name()) }}
         {{ delete_statement_if_exists(get_statement_name('-ddl')) }}
+        {{ disable_old_tableflow_before_drop(existing_relation) }}
         {{ drop_relation_if_exists(existing_relation) }}
       {%- else -%}
         {% set msg %}
@@ -38,6 +43,7 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
         {% do exceptions.raise_compiler_error(msg) %}
       {%- endif -%}
     {%- elif existing_kind == 'materialized_table' and should_full_refresh() -%}
+      {{ disable_old_tableflow_before_drop(existing_relation) }}
       {% do adapter.drop_materialized_table(existing_relation) %}
     {%- endif -%}
   {%- endif -%}
@@ -69,6 +75,10 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
     AS
     {{ sql }}
   {%- endcall %}
+
+  {# Same check on every run, whether this statement just created the table,
+     evolved it, or was a server-side no-op -- no need to track which. #}
+  {{ ensure_tableflow_config(target_relation) }}
 
   {% do persist_docs(target_relation, model) %}
   {{ run_hooks(post_hooks, inside_transaction=True) }}

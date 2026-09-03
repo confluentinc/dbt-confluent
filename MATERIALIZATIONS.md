@@ -15,7 +15,7 @@
 
 Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing — e.g. `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
 
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`) against the materialization you're using. Any other config key — including your own custom keys read by your own hooks or macros — is never inspected and never affected by this check.
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`) against the materialization you're using. Any other config key — including your own custom keys read by your own hooks or macros — is never inspected and never affected by this check.
 
 If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
 
@@ -108,6 +108,7 @@ If you drop relations outside dbt, note that a materialized table must be droppe
 - `with` — table options, e.g. `{'key.format': 'avro-registry'}`.
 - `start_mode` — where the query starts (or, on an in-place evolution, restarts) reading. It applies when the table is created **and is re-applied on every evolution** — e.g. `FROM_BEGINNING` reprocesses the full input history after each definition change (see the stateful-queries warning above). All eight documented forms are accepted (default: `RESUME_OR_FROM_BEGINNING`): `FROM_BEGINNING`, `FROM_NOW`, `RESUME_OR_FROM_BEGINNING`, `RESUME_OR_FROM_NOW`, `FROM_TIMESTAMP('<timestamp>')`, `RESUME_OR_FROM_TIMESTAMP('<timestamp>')`, `FROM_NOW(INTERVAL '<n>' <unit>)`, `RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>)`. The adapter validates the keyword and its arity but passes the parenthesized argument through verbatim (after rejecting anything that could break out of the DDL — stray quotes, parens, operators); the server validates the argument itself. Note that `FROM_NOW`/`RESUME_OR_FROM_NOW` require a full interval literal — `FROM_NOW(INTERVAL '7' DAY)` — not a plain quoted string, despite what some Confluent docs examples currently show.
 - `statement_properties` — Flink SET-style statement properties for the `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT` statement (e.g. tuning a temporal join's scan idle-timeout). See [Statement Properties](#statement-properties).
+- `tableflow` — materialize this table's backing Kafka topic via Tableflow. Checked on every run (create, in-place evolution, or no-op alike) — see [Tableflow](#tableflow).
 
 `freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error. Any other dbt-confluent config key this materialization doesn't read (e.g. `connector`, `on_schema_drift`) is also rejected — see [Config Validation](#config-validation).
 
@@ -276,6 +277,46 @@ This is different from `with`: `with` sets table-level WITH-clause options baked
 Three keys are reserved for use by the driver - `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any reserved properties yourself fails the run with a "reserved system property" error. Confluent Cloud Flink performs the validation of all the provided values at statement planning time.
 
 Changing `statement_properties` on an existing, healthy `streaming_table` takes effect **only** on the next `--full-refresh` or statement restart — a running statement keeps its original properties, since (like `compute_pool_id`) they're a property of the statement, not the table, and aren't part of drift detection. `materialized_table` has no such lag: every run resubmits a fresh `CREATE OR ALTER` statement under a new per-run name (see [Deterministic Statement Names](#deterministic-statement-names)), so a changed value takes effect on the very next run.
+
+## Tableflow
+
+[Tableflow](https://www.confluent.io/product/tableflow/) materializes the Kafka topic backing a Flink table as an Apache Iceberg and/or Delta Lake table in object storage, for consumption by external query engines. It's enabled through a dedicated Confluent Cloud control-plane API (`POST`/`GET`/`DELETE /tableflow/v1/tableflow-topics`) — not Flink SQL DDL — so the adapter drives it directly through the `confluent-sql` driver rather than through the model's own statements.
+
+Available on every materialization that owns a real Kafka-backed table (`table`, `streaming_table`, `streaming_source`, `materialized_table`) via the `tableflow` config:
+
+```sql
+{{ config(
+    materialized='table',
+    tableflow={
+        'formats': ['ICEBERG'],
+        'storage': {'kind': 'Managed'},
+    }
+) }}
+select order_id, customer_id, price from {{ ref('orders') }}
+```
+
+**Fields**:
+- `formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both.
+- `storage` (required) — a mapping with a `kind` key, using Tableflow's own API names verbatim:
+    - `{'kind': 'Managed'}` — Confluent-managed storage, no further config.
+    - `{'kind': 'ByobAws', 'bucket_name': '...', 'provider_integration_id': '...'}` — bring-your-own S3 bucket.
+    - `{'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': '...', 'container_name': '...', 'provider_integration_id': '...'}` — customer-owned Azure Data Lake Storage Gen2.
+- `retention_ms` / `data_retention_ms` (optional) — non-negative integers (or numeric strings) controlling snapshot/data retention.
+- `error_handling` (optional) — how a bad record is handled: `{'mode': 'SUSPEND'}` (the server default — suspends materialization), `{'mode': 'SKIP'}` (skip and continue), or `{'mode': 'LOG', 'target': '...'}` (log to a dead-letter target, `target` defaults to `'error_log'`).
+
+The adapter validates this shape (`CompilationError` on a malformed `tableflow` config) when it's actually applied — unlike `distributed_by`/`start_mode`, `tableflow` is never baked into this DDL, so a bad value can't doom a `--full-refresh` recreate, and there's no need to validate it any earlier.
+
+**Ensured on every run — not diffed.** Whenever a model configures `tableflow`, every run (whether the relation was just created, already existed, or is being restarted) checks Tableflow's live state and:
+- **Not enabled** — enables it with the current config.
+- **Already enabled** — this version does not compare the live configuration against what's now configured; it just warns that dbt doesn't update an existing Tableflow configuration in place, and points at `--full-refresh` (or a manual disable) if you intended a change to take effect. Diffing and in-place updates are tracked as follow-up work.
+
+If `tableflow` is unset in the model, nothing is ever checked or touched, regardless of live state — this also means a table Tableflow was enabled on outside of dbt is never flagged just because the model doesn't mention it.
+
+**Disabled automatically before `--full-refresh`, when the *new* config still sets `tableflow`.** Before dropping a relation for a full-refresh, the adapter checks live Tableflow state (via a live `GET`, not the config value) and disables it first if present, so the drop doesn't race an active materialization — confluent-sql's own recommendation. This is deliberately gated on the *current* model's config, not on live state alone: checking live state before every drop, including drops on models that have never used `tableflow`, would require every profile to supply a Global API key just to run `--full-refresh` at all.
+
+The corollary: if a model's `tableflow` config is removed (rather than the table being dropped outright), an old Tableflow configuration left enabled on that relation is not disabled and is not touched on subsequent runs. If that relation is later full-refreshed, the drop is **not** preceded by a disable, since the new config no longer mentions `tableflow` — this can race Tableflow the same way an unguarded drop would. Explicitly turning Tableflow off (without dropping the table) is not yet supported; it's tracked as follow-up work.
+
+**Credentials**: Tableflow's control-plane routes require a Global API key (`global_api_key` / `global_api_secret`) — they resolve `database` to a Kafka cluster id via CMK, which only a Global key can do. A model that configures `tableflow` on a profile without one raises a clear error naming these fields, rather than the raw driver error.
 
 ## Adopting Existing Tables and Statements
 

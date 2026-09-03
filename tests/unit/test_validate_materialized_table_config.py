@@ -40,7 +40,8 @@ class TestValidateMaterializedTableConfig:
             adapter.validate_materialized_table_config({key: "x"})
         message = str(excinfo.value)
         assert f"'{key}' is not supported" in message
-        assert "distributed_by, with, start_mode" in message
+        for supported_key in ("distributed_by", "with", "start_mode", "statement_name"):
+            assert supported_key in message
 
     def test_multiple_unsupported_keys_bundled(self, adapter):
         """All offending keys land in one error, in a stable order."""
