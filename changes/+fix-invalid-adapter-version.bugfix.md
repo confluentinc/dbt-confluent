@@ -1,0 +1,1 @@
+Fix the adapter version string (`0.4.0.dev0`) not being valid semantic version syntax, which made `dbt-core` reject it at adapter-registration time (`SemverError: "0.4.0.dev0" is not a valid semantic version.`, blocking every dbt command). Changed to `0.4.0-dev`.
