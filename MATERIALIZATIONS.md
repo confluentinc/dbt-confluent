@@ -296,7 +296,7 @@ select order_id, customer_id, price from {{ ref('orders') }}
 ```
 
 **Fields**:
-- `formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both (case-insensitive).
+- `formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both.
 - `storage` (required) — a mapping with a `kind` key, using Tableflow's own API names verbatim:
     - `{'kind': 'Managed'}` — Confluent-managed storage, no further config.
     - `{'kind': 'ByobAws', 'bucket_name': '...', 'provider_integration_id': '...'}` — bring-your-own S3 bucket.

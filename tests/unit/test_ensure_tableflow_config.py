@@ -84,9 +84,9 @@ class TestEnsureTableflowConfig:
         assert "my_table" in logger.info.call_args.args[0]
         logger.debug.assert_not_called()
 
-    def test_lowercase_and_multiple_formats(self, wire_connection, handle, rel):
+    def test_multiple_formats(self, wire_connection, handle, rel):
         wire_connection.ensure_tableflow_config(
-            rel, {"formats": ["iceberg", "delta"], "storage": {"kind": "Managed"}}
+            rel, {"formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}}
         )
         call = handle.enable_tableflow.call_args
         assert call.kwargs["tableflow_formats"] == [TableFormat.ICEBERG, TableFormat.DELTA]
@@ -318,6 +318,10 @@ class TestEnsureTableflowConfigMalformedConfig:
                 {"formats": ["PARQUET"], "storage": {"kind": "Managed"}},
                 "'tableflow.formats' is invalid",
             ),
+            (
+                {"formats": "iceberg", "storage": {"kind": "Managed"}},
+                "'tableflow.formats' is invalid",
+            ),
             ({"formats": "ICEBERG"}, "'tableflow.storage' is required"),
             ({"formats": "ICEBERG", "storage": "managed"}, "'tableflow.storage' is required"),
             (
@@ -445,6 +449,7 @@ class TestEnsureTableflowConfigMalformedConfig:
             "missing_formats",
             "empty_formats",
             "unknown_format",
+            "lowercase_format_no_longer_accepted",
             "missing_storage",
             "storage_not_dict",
             "unknown_storage_kind",

@@ -479,10 +479,12 @@ class ConfluentAdapter(SQLAdapter):
     @staticmethod
     def _translate_tableflow_formats(formats: object) -> list[str]:
         """Validate and normalize `tableflow.formats` into the driver's wire
-        list. Case-insensitivity (`'iceberg'` as well as `'ICEBERG'`) is our
-        own convenience; which values are actually valid formats is entirely
-        confluent_sql's `normalize_table_formats`'s call, not ours -- a format
-        the driver adds tomorrow is accepted here with no adapter change.
+        list. Exact case, matching `storage.kind`/`error_handling.mode` --
+        every `tableflow` discriminator is a thin passthrough of the API's
+        own values, none case-insensitive. Which values are actually valid
+        formats is entirely confluent_sql's `normalize_table_formats`'s
+        call, not ours -- a format the driver adds tomorrow is accepted
+        here with no adapter change.
         """
         raw = [formats] if isinstance(formats, str) else formats
         if (
@@ -494,7 +496,7 @@ class ConfluentAdapter(SQLAdapter):
                 "'tableflow.formats' is required and must be 'ICEBERG'/'DELTA' or a list of them."
             )
         try:
-            return normalize_table_formats([f.upper() for f in raw])
+            return normalize_table_formats(raw)
         except InterfaceError as e:
             raise CompilationError(f"'tableflow.formats' is invalid: {e}") from e
 
@@ -653,6 +655,24 @@ class ConfluentAdapter(SQLAdapter):
             "README.md#configuration."
         ) from e
 
+    @staticmethod
+    def _probe_tableflow_state(handle, relation: BaseRelation):
+        """GET `relation`'s live Tableflow state, or None if not enabled.
+
+        Shared by `ensure_tableflow_config` and `disable_tableflow_if_enabled`,
+        which otherwise duplicate this exact GET-and-translate-errors step --
+        each still decides for itself what a hit/miss means (fall through to
+        enable vs. warn-and-return; no-op vs. proceed to disable).
+        """
+        try:
+            return handle.get_tableflow(relation.identifier)
+        except TableflowTopicNotFoundError:
+            return None
+        except ProgrammingError as e:
+            ConfluentAdapter._reraise_tableflow_auth_error(e)
+        except ConfluentSqlError as e:
+            raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
+
     @available
     def ensure_tableflow_config(
         self, relation: BaseRelation, tableflow_config: dict | None
@@ -726,15 +746,7 @@ class ConfluentAdapter(SQLAdapter):
 
         conn = self.connections.get_thread_connection()
         handle = conn.handle
-        try:
-            handle.get_tableflow(relation.identifier)
-        except TableflowTopicNotFoundError:
-            pass  # Not enabled yet -- fall through to enable it below.
-        except ProgrammingError as e:
-            self._reraise_tableflow_auth_error(e)
-        except ConfluentSqlError as e:
-            raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
-        else:
+        if self._probe_tableflow_state(handle, relation) is not None:
             logger.warning(
                 warning_tag(
                     f"Tableflow is already enabled for {relation}, and dbt does not "
@@ -792,14 +804,8 @@ class ConfluentAdapter(SQLAdapter):
         """
         conn = self.connections.get_thread_connection()
         handle = conn.handle
-        try:
-            handle.get_tableflow(relation.identifier)
-        except TableflowTopicNotFoundError:
+        if self._probe_tableflow_state(handle, relation) is None:
             return
-        except ProgrammingError as e:
-            self._reraise_tableflow_auth_error(e)
-        except ConfluentSqlError as e:
-            raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
         # Blocks (by default) until the topic is confirmed gone
         logger.info(f"Disabling Tableflow on {relation} before drop.")
         try:
