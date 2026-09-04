@@ -60,6 +60,11 @@ Repository = "https://github.com/confluentinc/dbt-confluent"
 [project.entry-points."dbt.adapters"]
 confluent = "dbt.adapters.confluent"
 
+[tool.uv.sources]
+# Local editable checkout for co-developing the tableflow update/PATCH support
+# (see issue #101) -- remove once the needed confluent-sql release ships.
+confluent-sql = { path = "confluent-sql", editable = true }
+
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
 addopts = "-v --color=yes"
