@@ -4,6 +4,7 @@ dbt-confluent 0.3.1 (2026-09-08)
 
 - The `table` materialization's CTAS statement is now submitted in `snapshot_ddl` mode. Previously it used no explicit execution mode, so it fell back to the connection default (`streaming_query`), contradicting the documented snapshot behavior and leaving an unbounded statement running instead of one that completes. ([#77](https://github.com/confluentinc/dbt-confluent/issues/77))
 - Surface the underlying `confluent-sql` exception on connection failure instead of masking it behind a generic `confluent_sql connection error`, so `dbt` shows the driver's actual error message (e.g. authentication failures or read timeouts).
+- Fixed `ConfluentColumn` inheriting dbt-core's default `STRING -> TEXT` `TYPE_LABELS` mapping, which produced invalid Flink SQL (`TEXT`) for any contract-enforced model with a `string` column. ([#92](https://github.com/confluentinc/dbt-confluent/issues/92))
 
 # Misc
 
