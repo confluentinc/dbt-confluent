@@ -1,1 +1,0 @@
-Surface the underlying `confluent-sql` exception on connection failure instead of masking it behind a generic `confluent_sql connection error`, so `dbt` shows the driver's actual error message (e.g. authentication failures or read timeouts).

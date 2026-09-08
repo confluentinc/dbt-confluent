@@ -1,3 +1,16 @@
+dbt-confluent 0.3.1 (2026-09-08)
+
+# Bugfixes
+
+- The `table` materialization's CTAS statement is now submitted in `snapshot_ddl` mode. Previously it used no explicit execution mode, so it fell back to the connection default (`streaming_query`), contradicting the documented snapshot behavior and leaving an unbounded statement running instead of one that completes. ([#77](https://github.com/confluentinc/dbt-confluent/issues/77))
+- Surface the underlying `confluent-sql` exception on connection failure instead of masking it behind a generic `confluent_sql connection error`, so `dbt` shows the driver's actual error message (e.g. authentication failures or read timeouts).
+
+# Misc
+
+- Cap supported Python versions at `<3.14` (a dbt-core dependency is not yet Python 3.14 compatible) and bump `confluent-sql` to `~=0.5.4`.
+- Split the schema drift `INFORMATION_SCHEMA.COLUMNS` query into two `TABLE_NAME`-scoped `SELECT`s joined by `UNION ALL` instead of one `SELECT` with an `OR`, so the server can push the `TABLE_NAME` predicate down.
+
+
 dbt-confluent 0.3.0 (2026-07-09)
 
 # Features
