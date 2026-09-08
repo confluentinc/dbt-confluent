@@ -17,7 +17,6 @@ from confluent_sql.execution_mode import ExecutionMode
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.events.functions import fire_event
 from dbt_common.exceptions import (
-    ConnectionError,
     DbtDatabaseError,
     DbtRuntimeError,
 )
@@ -406,10 +405,10 @@ class ConfluentConnectionManager(SQLConnectionManager):
             connection.state = "open"
             connection.handle = handle
             return connection
-        except Exception as e:
+        except Exception:
             connection.state = "fail"
             connection.handle = None
-            raise ConnectionError("confluent_sql connection error") from e
+            raise
 
     @classmethod
     def get_response(cls, cursor):
