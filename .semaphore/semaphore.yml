@@ -38,10 +38,10 @@ blocks:
         - name: "Changelog Check"
           commands:
             - |
-              if [ "$SEMAPHORE_GIT_WORKING_BRANCH" != "main" ]; then
-                uv run --frozen towncrier check
+              if [ "$SEMAPHORE_GIT_WORKING_BRANCH" = "main" ] || [[ "$SEMAPHORE_GIT_WORKING_BRANCH" =~ ^v[0-9]+\.[0-9]+\.x$ ]]; then
+                echo "Skipping changelog check on $SEMAPHORE_GIT_WORKING_BRANCH"
               else
-                echo "Skipping changelog check on main"
+                uv run --frozen towncrier check
               fi
 
   - name: "Build"
