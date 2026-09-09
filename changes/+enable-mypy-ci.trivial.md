@@ -1,0 +1,1 @@
+Enabled `mypy` in Semaphore CI as a new "Mypy Check" job in the Lint block, so type errors are caught on every PR instead of only when run locally. `mypy` was already a declared dev dependency with a `[tool.mypy]` config in `pyproject.toml`, just never wired into CI.
