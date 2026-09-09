@@ -1,4 +1,4 @@
-dbt-confluent 0.3.1 (2026-09-10)
+dbt-confluent 0.3.1 (2026-09-09)
 
 # Bugfixes
 
