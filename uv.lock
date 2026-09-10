@@ -276,7 +276,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "agate", specifier = "~=1.0" },
-    { name = "confluent-sql", specifier = "~=0.5.4" },
+    { name = "confluent-sql", git = "https://github.com/confluentinc/confluent-sql?rev=1c2ffb4ac1397c1952f9b8cee7261b7d2b00db51" },
     { name = "dbt-adapters", specifier = "~=1.16" },
     { name = "dbt-common", specifier = "~=1.12" },
     { name = "dbt-core", specifier = "~=1.11" },
