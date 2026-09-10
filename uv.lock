@@ -179,14 +179,10 @@ wheels = [
 
 [[package]]
 name = "confluent-sql"
-version = "0.5.4"
-source = { registry = "https://pypi.org/simple" }
+version = "0.6.0rc0"
+source = { git = "https://github.com/confluentinc/confluent-sql?rev=1c2ffb4ac1397c1952f9b8cee7261b7d2b00db51#1c2ffb4ac1397c1952f9b8cee7261b7d2b00db51" }
 dependencies = [
     { name = "httpx" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/31/60/4e873a7579d8f7ba35fd42730c012220fac1f0df6878245aca86808ae6c3/confluent_sql-0.5.4.tar.gz", hash = "sha256:db557e2bc2a5b4ba8ee1aef2baa306495eabac73b752516269c4b1e40e8b7d03", size = 303289, upload-time = "2026-09-08T15:17:42.691Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/bb/9d/f5efd5d7aff73ca1cdf5bb68b818c292f4f90e08b4ea8f9ded75f476df60/confluent_sql-0.5.4-py3-none-any.whl", hash = "sha256:71488ade6c8f8982889de7a7c3041f96774f73f2bedb636aa015f6f0b137f0df", size = 113646, upload-time = "2026-09-08T15:17:41.532Z" },
 ]
 
 [[package]]
