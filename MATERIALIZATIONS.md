@@ -288,7 +288,7 @@ Available on every materialization that owns a real Kafka-backed table (`table`,
 {{ config(
     materialized='table',
     tableflow={
-        'formats': ['ICEBERG'],
+        'table_formats': ['ICEBERG'],
         'storage': {'kind': 'Managed'},
     }
 ) }}
@@ -296,7 +296,7 @@ select order_id, customer_id, price from {{ ref('orders') }}
 ```
 
 **Fields**:
-- `formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both.
+- `table_formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both.
 - `storage` (required) — a mapping with a `kind` key, using Tableflow's own API names verbatim:
     - `{'kind': 'Managed'}` — Confluent-managed storage, no further config.
     - `{'kind': 'ByobAws', 'bucket_name': '...', 'provider_integration_id': '...'}` — bring-your-own S3 bucket.
@@ -309,7 +309,7 @@ The adapter validates this shape (`CompilationError` on a malformed `tableflow` 
 
 **Ensured on every run.** Whenever a model configures `tableflow`, every run (whether the relation was just created, already existed, or is being restarted) checks Tableflow's live state and:
 - **Not enabled** — enables it with the current config.
-- **Already enabled** — diffs the live configuration against what's now configured and applies an in-place update only if `formats`/`config` actually changed, so an unchanged config is a true no-op rather than cycling the backing materialization job every run. `storage` can't be changed in place (Tableflow's API doesn't support it) — a change there is not detected and still requires `--full-refresh` or a manual disable to take effect.
+- **Already enabled** — diffs the live configuration against what's now configured and applies an in-place update only if `table_formats`/`config` actually changed, so an unchanged config is a true no-op rather than cycling the backing materialization job every run. `storage` can't be changed in place (Tableflow's API doesn't support it) — a change there is not detected and still requires `--full-refresh` or a manual disable to take effect.
 
 If `tableflow` is unset in the model, nothing is ever checked or touched, regardless of live state — this also means a table Tableflow was enabled on outside of dbt is never flagged just because the model doesn't mention it.
 

@@ -61,9 +61,10 @@ Repository = "https://github.com/confluentinc/dbt-confluent"
 confluent = "dbt.adapters.confluent"
 
 [tool.uv.sources]
-# Local editable checkout for co-developing the tableflow update/PATCH support
-# (see issue #101) -- remove once the needed confluent-sql release ships.
-confluent-sql = { path = "confluent-sql", editable = true }
+# Pinned to the tableflow-update-patch branch tip (see issue #101, confluent-sql#214) so CI can
+# resolve update_tableflow/table_formats without a local checkout -- remove once the needed
+# confluent-sql release ships.
+confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "1c2ffb4ac1397c1952f9b8cee7261b7d2b00db51" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
