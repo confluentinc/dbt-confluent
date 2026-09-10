@@ -9,7 +9,6 @@ global_job_config:
   prologue:
     commands:
       - checkout
-      - . vault-setup
       - curl -LsSf https://astral.sh/uv/install.sh | sh
 
 blocks:
@@ -18,6 +17,6 @@ blocks:
       jobs:
         - name: Publish `dbt_confluent` to PyPi
           commands:
-            - DBT_CONFLUENT_KEY=$(vault kv get -field=dbt-confluent v1/ci/kv/pypi/pypi.org)
+            - . vault-get-secret --secret-key=pypi_token --export-as=DBT_CONFLUENT_KEY pypi/dbt-confluent
             - uv build
             - uv publish -u __token__ -p "$DBT_CONFLUENT_KEY" dist/*
