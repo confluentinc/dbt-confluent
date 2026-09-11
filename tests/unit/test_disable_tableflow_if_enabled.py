@@ -38,6 +38,7 @@ class TestDisableTableflowIfEnabled:
     def wire_connection(self, adapter, handle):
         adapter.connections = MagicMock()
         adapter.connections.get_thread_connection.return_value = SimpleNamespace(handle=handle)
+        adapter.connections.get_thread_handle.return_value = handle
         return adapter
 
     @pytest.fixture

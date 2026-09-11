@@ -30,9 +30,10 @@ class TestDeleteStatement:
         return SimpleNamespace(handle=handle)
 
     @pytest.fixture
-    def wire_connection(self, adapter, conn):
+    def wire_connection(self, adapter, conn, handle):
         adapter.connections = MagicMock()
         adapter.connections.get_thread_connection.return_value = conn
+        adapter.connections.get_thread_handle.return_value = handle
         return adapter
 
     def test_successful_delete_calls_handle(self, wire_connection, handle):
