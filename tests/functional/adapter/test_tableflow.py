@@ -1,19 +1,22 @@
 """Functional tests for the `tableflow` config.
 
-Unit tests (tests/unit/test_ensure_tableflow_config.py,
-test_disable_tableflow_if_enabled.py) mock the driver entirely and never
-exercise the Jinja macro wiring, so they can't prove that Tableflow actually
-gets enabled against Confluent Cloud, or that the disable-before-drop macro
-call sites actually fire correctly end-to-end. These two tests cover exactly
-that gap -- deliberately narrow (a single Managed-storage config; every
-storage backend/error_handling permutation is already exhaustively covered
-by the unit tests):
+Unit tests (tests/unit/test_tableflow.py, test_disable_tableflow_if_enabled.py) mock the driver
+entirely and never exercise the Jinja macro wiring, so they can't prove that Tableflow actually
+gets enabled against Confluent Cloud, that the disable-before-drop macro call sites actually fire
+correctly end-to-end, or -- crucially for TestNoSpuriousPatchOnDefaultErrorHandling below -- what
+shape a real Confluent Cloud GET response actually has (a mocked response can only ever have the
+shape a unit test author assumed it would).
 
 - TestTableTableflow: enable on create, then the disable-before-drop ->
   recreate -> re-enable cycle on --full-refresh (table.sql's one drop path).
 - TestMaterializedTableTableflowSwitchAndRefresh: materialized_table.sql's
   two distinct disable-before-drop call sites -- switching a regular table
   into an MT under --full-refresh, then full-refreshing that MT again.
+- TestNoSpuriousPatchOnDefaultErrorHandling: a second identical run must not issue a PATCH when
+  `config.error_handling` is left at its server default (`SUSPEND`) -- guards against a
+  plausible-looking failure mode where a GET response omits an unset/default `error_handling`
+  block entirely, making `existing`'s parsed value `None` while `desired`'s is a real
+  `TableflowErrorHandlingSuspend()`, which would compare unequal and PATCH every run.
 
 Requires a Global API key: Tableflow's control-plane routes need one
 regardless of the Flink-region pair every other functional test uses (see
@@ -35,8 +38,10 @@ Notes:
 import os
 import re
 import time
+from unittest.mock import patch
 
 import pytest
+from confluent_sql import Connection
 from confluent_sql.exceptions import TableflowTopicNotFoundError
 
 from dbt.tests.util import run_dbt, set_model_file
@@ -58,9 +63,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 _RUN_TAG = format(int(time.time()), "08x")
-_TEST_RELATION_RE = re.compile(r"^dbttest_tf_(?:table|src|switch)_(?P<tag>[0-9a-f]{8})$")
+_TEST_RELATION_RE = re.compile(r"^dbttest_tf_(?:table|src|switch|noop)_(?P<tag>[0-9a-f]{8})$")
 
-_TABLEFLOW_CONFIG = "{'formats': 'ICEBERG', 'storage': {'kind': 'Managed'}}"
+_TABLEFLOW_CONFIG = "{'table_formats': 'ICEBERG', 'storage': {'kind': 'Managed'}}"
 
 
 def _statement_label(dbt_profile_data):
@@ -161,6 +166,65 @@ class TestTableTableflow(_TableflowFixtures):
         topic = _get_tableflow(project, self.TABLE)
         assert topic is not None, "Tableflow was not re-enabled after --full-refresh"
         assert topic.phase.name == "RUNNING"
+
+
+NOOP_TABLE = f"""
+{{{{ config(
+    materialized='table',
+    tableflow={{
+        'table_formats': 'ICEBERG',
+        'storage': {{'kind': 'Managed'}},
+        'config': {{'error_handling': {{'mode': 'SUSPEND'}}}},
+    }},
+) }}}}
+select 1 as id, 'a' as name
+"""
+
+
+class TestNoSpuriousPatchOnDefaultErrorHandling(_TableflowFixtures):
+    """A second identical run must not PATCH when `config.error_handling` is left at its server
+    default (`SUSPEND`) -- see the module docstring for the failure mode this guards against.
+    `Connection.update_tableflow` is replaced with a plain function that records each call and
+    delegates to the real implementation, so a spurious PATCH is caught directly (a Mock can't
+    just be swapped in for a class-level method: unlike a function, it doesn't implement the
+    descriptor protocol, so `self` wouldn't be bound automatically when called via an instance)."""
+
+    NAME = "tfnoop"
+    TABLE = f"dbttest_tf_noop_{_RUN_TAG}"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {f"{self.TABLE}.sql": NOOP_TABLE}
+
+    @pytest.fixture(autouse=True, scope="class")
+    def class_clean_up(self, project, dbt_profile_data):
+        yield
+        _disable_tableflow_best_effort(project, self.TABLE)
+        if drop_any_relation(project, self.TABLE):
+            delete_statements_by_label(project, _statement_label(dbt_profile_data))
+
+    def test_second_run_issues_no_patch(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results)
+
+        topic = _get_tableflow(project, self.TABLE)
+        assert topic is not None, "Tableflow was not enabled on create"
+        assert topic.phase.name == "RUNNING"
+        assert topic.spec.config is not None
+        assert topic.spec.config.error_handling is not None
+        assert topic.spec.config.error_handling.mode == "SUSPEND"
+
+        calls = []
+        original_update_tableflow = Connection.update_tableflow
+
+        def spy_update_tableflow(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return original_update_tableflow(self, *args, **kwargs)
+
+        with patch.object(Connection, "update_tableflow", spy_update_tableflow):
+            results = run_dbt(["run"])
+            assert all(r.status.name == "Success" for r in results)
+        assert calls == [], f"Expected no PATCH on an unchanged config, but got: {calls}"
 
 
 # -- materialized_table's two disable-before-drop call sites --
