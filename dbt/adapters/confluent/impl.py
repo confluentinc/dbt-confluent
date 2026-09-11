@@ -396,9 +396,9 @@ class ConfluentAdapter(SQLAdapter):
         Used by `decide_action` (Jinja) to recover a streaming_table whose
         INSERT died without the table being dropped.
         """
-        conn = self.connections.get_thread_connection()
+        handle = self.connections.get_thread_handle()
         try:
-            statement = conn.handle.get_statement(statement_name)
+            statement = handle.get_statement(statement_name)
         except StatementNotFoundError:
             return True
         except OperationalError as e:
@@ -420,8 +420,7 @@ class ConfluentAdapter(SQLAdapter):
         CREATE on 409 to handle the in-flight teardown race against the
         next statement that reuses this name.
         """
-        conn = self.connections.get_thread_connection()
-        handle = conn.handle
+        handle = self.connections.get_thread_handle()
         try:
             handle.delete_statement(statement_name)
         except StatementNotFoundError:
@@ -442,8 +441,8 @@ class ConfluentAdapter(SQLAdapter):
         this is a thin wrapper providing the live driver connection, since
         that module has no notion of a dbt connection or thread state.
         """
-        conn = self.connections.get_thread_connection()
-        tableflow.reconcile_tableflow_config(conn.handle, relation, tableflow_config)
+        handle = self.connections.get_thread_handle()
+        tableflow.reconcile_tableflow_config(handle, relation, tableflow_config)
 
     @available
     def disable_tableflow_if_enabled(self, relation: BaseRelation) -> None:
@@ -465,8 +464,7 @@ class ConfluentAdapter(SQLAdapter):
         DbtDatabaseError wrapping -- so any error other than "not enabled"
         is wrapped here instead.
         """
-        conn = self.connections.get_thread_connection()
-        handle = conn.handle
+        handle = self.connections.get_thread_handle()
         if tableflow.probe_tableflow_state(handle, relation) is None:
             return
         # Blocks (by default) until the topic is confirmed gone

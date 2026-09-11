@@ -1,0 +1,1 @@
+Annotated the `handle` parameter (a `confluent_sql.Connection`) across `tableflow.py` and `impl.py`, which surfaced a few call sites passing `relation.identifier` (`str | None`) where the driver requires `str`; added `assert relation.identifier is not None` at those points.

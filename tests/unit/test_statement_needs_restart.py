@@ -26,7 +26,7 @@ def _adapter() -> ConfluentAdapter:
 
 
 def _handle(adapter: ConfluentAdapter) -> MagicMock:
-    return adapter.connections.get_thread_connection.return_value.handle
+    return adapter.connections.get_thread_handle.return_value
 
 
 def _adapter_with_phase(phase: Phase | None) -> ConfluentAdapter:

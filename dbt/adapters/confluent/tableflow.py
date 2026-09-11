@@ -20,6 +20,7 @@ from typing import NoReturn
 from confluent_sql import (
     AzureAdlsStorage,
     ByobAwsStorage,
+    Connection,
     InterfaceError,
     ManagedStorage,
     TableflowErrorHandling,
@@ -161,7 +162,7 @@ class TableflowPatch:
 
 
 def reconcile_tableflow_config(
-    handle, relation: BaseRelation, tableflow_config: dict | None
+    handle: Connection, relation: BaseRelation, tableflow_config: dict | None
 ) -> None:
     """Ensure `relation`'s backing Kafka topic reflects `config(tableflow={...})`.
 
@@ -259,7 +260,7 @@ def warn_tableflow_failed(relation: BaseRelation, existing: TableflowTopic) -> N
     logger.warning(warning_tag(message))
 
 
-def probe_tableflow_state(handle, relation: BaseRelation) -> TableflowTopic | None:
+def probe_tableflow_state(handle: Connection, relation: BaseRelation) -> TableflowTopic | None:
     """GET `relation`'s live Tableflow state, or None if not enabled.
 
     Shared by `reconcile_tableflow_config` and `disable_tableflow_if_enabled`,
@@ -267,6 +268,7 @@ def probe_tableflow_state(handle, relation: BaseRelation) -> TableflowTopic | No
     each still decides for itself what a hit/miss means (fall through to
     enable vs. warn-and-return; no-op vs. proceed to disable).
     """
+    assert relation.identifier is not None
     try:
         return handle.get_tableflow(relation.identifier)
     except TableflowTopicNotFoundError:
@@ -277,13 +279,14 @@ def probe_tableflow_state(handle, relation: BaseRelation) -> TableflowTopic | No
         raise DbtDatabaseError(f"Error checking Tableflow state for {relation}: {e}") from e
 
 
-def disable_tableflow_topic(handle, relation: BaseRelation) -> None:
+def disable_tableflow_topic(handle: Connection, relation: BaseRelation) -> None:
     """DELETE Tableflow on `relation`, tolerating a narrow "already gone" race.
 
     Shared by `disable_tableflow_if_enabled` (before a DROP TABLE) and
     `recreate_tableflow_topic` (to apply a `storage`/`display_name` change) -- each still
     decides for itself whether/when to call this and what to log around it.
     """
+    assert relation.identifier is not None
     try:
         handle.disable_tableflow(relation.identifier)
     except TableflowTopicNotFoundError:
@@ -295,7 +298,7 @@ def disable_tableflow_topic(handle, relation: BaseRelation) -> None:
 
 
 def recreate_tableflow_topic(
-    handle, relation: BaseRelation, desired: TableflowDesiredState
+    handle: Connection, relation: BaseRelation, desired: TableflowDesiredState
 ) -> TableflowTopic | None:
     """Disable and re-enable Tableflow to apply a `storage`/`display_name` change that has no
     in-place PATCH path (#101).
@@ -363,9 +366,10 @@ def compute_tableflow_patch(
 
 
 def create_tableflow_topic(
-    handle, relation: BaseRelation, desired: TableflowDesiredState
+    handle: Connection, relation: BaseRelation, desired: TableflowDesiredState
 ) -> TableflowTopic | None:
     """Enable Tableflow on `relation` with `desired`."""
+    assert relation.identifier is not None
     # Blocks (by default) until the topic reaches RUNNING, up to 300s -- worth
     # logging at info, not debug, so the wait is visible without --debug.
     logger.info(
@@ -412,9 +416,10 @@ def create_tableflow_topic(
 
 
 def patch_tableflow_topic(
-    handle, relation: BaseRelation, patch: TableflowPatch
+    handle: Connection, relation: BaseRelation, patch: TableflowPatch
 ) -> TableflowTopic | None:
     """PATCH Tableflow on `relation` with the computed diff."""
+    assert relation.identifier is not None
     # Blocks (by default) until the topic reaches RUNNING, up to 300s -- worth
     # logging at info, not debug, so the wait is visible without --debug.
     logger.info(

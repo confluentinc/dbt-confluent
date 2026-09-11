@@ -284,6 +284,16 @@ def _execute_query_with_retry(
 class ConfluentConnectionManager(SQLConnectionManager):
     TYPE = "confluent"
 
+    def get_thread_handle(self) -> confluent_sql.Connection:
+        """Typed accessor for the current thread's live `confluent_sql.Connection`.
+
+        `Connection.handle` (dbt-adapters) is untyped (`Any`), since it's generic across
+        every adapter's own driver -- this is the one place that gets narrowed to
+        `confluent_sql`'s actual `Connection`, so callers elsewhere don't each need their
+        own annotation on the same untyped attribute access.
+        """
+        return self.get_thread_connection().handle
+
     @classmethod
     def get_result_from_cursor(cls, cursor: Cursor, limit: int | None) -> "agate.Table":
         from dbt_common.clients.agate_helper import table_from_data_flat
