@@ -26,6 +26,7 @@ from confluent_sql import (
     TableflowErrorHandlingLog,
     TableflowErrorHandlingSkip,
     TableflowErrorHandlingSuspend,
+    TableflowPhase,
     TableflowTopic,
     TableflowTopicConfig,
     TableFormat,
@@ -39,6 +40,7 @@ from confluent_sql.exceptions import (
 )
 from confluent_sql.tableflow import Fields, normalize_table_formats
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
+from dbt_common.ui import warning_tag
 
 from dbt.adapters.base import BaseRelation
 from dbt.adapters.events.logging import AdapterLogger
@@ -201,6 +203,12 @@ def reconcile_tableflow_config(
       against the current `tableflow` config (`compute_tableflow_patch`) and PATCH only
       if something actually changed, so an unchanged config is a true no-op rather than
       cycling the backing materialization job every run.
+      A true no-op (nothing to PATCH) still checks `existing.phase`: if the topic has FAILED
+      -- e.g. suspended after a poison-pill record -- `warn_tableflow_failed` logs a warning
+      rather than letting the run report success while Tableflow is dead with no way to
+      notice. Only FAILED, not any non-RUNNING phase -- PENDING is a normal state to be
+      caught in and isn't a problem. It's a warning, not a failure, and doesn't attempt to
+      fix anything: un-suspending a topic is a human's call, not dbt's.
 
     Calls the driver's `Connection` directly (no SQL statement, no cursor),
     bypassing `exception_handler`'s usual confluent_sql -> DbtDatabaseError
@@ -229,10 +237,26 @@ def reconcile_tableflow_config(
 
     patch = compute_tableflow_patch(existing, desired)
     if patch is None:
+        if existing.phase is TableflowPhase.FAILED:
+            warn_tableflow_failed(relation, existing)
         return
 
     logger.debug("Generated Tableflow patch: " + json.dumps(patch.to_spec(), indent=2))
     patch_tableflow_topic(handle, relation, patch)
+
+
+def warn_tableflow_failed(relation: BaseRelation, existing: TableflowTopic) -> None:
+    """Warn (never fail the run over it) when `relation`'s Tableflow config matches what's
+    configured -- so `compute_tableflow_patch` has nothing to send -- but the topic is FAILED."""
+
+    detail = existing.status.error_message or "no error message available"
+    message = f"Tableflow for {relation} has FAILED: {detail}."
+    if existing.status.failing_table_formats:
+        failing = ", ".join(
+            f"{f.format.value}: {f.error_message}" for f in existing.status.failing_table_formats
+        )
+        message += f" Failing formats: {failing}."
+    logger.warning(warning_tag(message))
 
 
 def probe_tableflow_state(handle, relation: BaseRelation) -> TableflowTopic | None:

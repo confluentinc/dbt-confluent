@@ -17,12 +17,24 @@ def relation(
     )
 
 
-def make_topic(*, table_formats=("ICEBERG",), config=None, phase="RUNNING") -> TableflowTopic:
+def make_topic(
+    *,
+    table_formats=("ICEBERG",),
+    config=None,
+    phase="RUNNING",
+    error_message=None,
+    failing_table_formats=None,
+) -> TableflowTopic:
     """A real `TableflowTopic`, parsed from realistic response JSON -- a bare `MagicMock`
     won't do anywhere `spec.config`/`spec.table_formats`/`spec.raw` need to be genuinely
     parsed, typed values (diffing) or JSON-serializable (debug logging), not attributes a
     mock would silently make up.
     """
+    status: dict = {"phase": phase}
+    if error_message is not None:
+        status["error_message"] = error_message
+    if failing_table_formats is not None:
+        status["failing_table_formats"] = failing_table_formats
     return TableflowTopic.from_response(
         {
             "spec": {
@@ -33,6 +45,6 @@ def make_topic(*, table_formats=("ICEBERG",), config=None, phase="RUNNING") -> T
                 "kafka_cluster": {"id": "lkc-1"},
                 "config": config or {},
             },
-            "status": {"phase": phase},
+            "status": status,
         }
     )

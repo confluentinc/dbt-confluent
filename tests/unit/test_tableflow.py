@@ -158,6 +158,42 @@ class TestEnsureTableflowConfig:
         handle.enable_tableflow.assert_not_called()
         handle.update_tableflow.assert_not_called()
         logger.info.assert_not_called()
+        logger.warning.assert_not_called()
+
+    def test_already_enabled_matching_config_but_failed_warns(self, handle, rel, logger):
+        """A no-op patch (config matches) must still surface an unhealthy topic -- e.g. one
+        suspended by a poison-pill record under error_handling: {mode: 'SUSPEND'} -- rather
+        than let the run report success while Tableflow is actually dead, with no path to
+        notice. A warning, not a failure: dbt has no way to fix this (un-suspending is a
+        human's call), only to surface it."""
+        handle.get_tableflow.side_effect = None
+        handle.get_tableflow.return_value = make_topic(
+            table_formats=("ICEBERG",),
+            phase="FAILED",
+            error_message="poison pill record at offset 42",
+            failing_table_formats=[{"format": "ICEBERG", "error_message": "bad schema"}],
+        )
+        tableflow.reconcile_tableflow_config(
+            handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
+        )
+        handle.enable_tableflow.assert_not_called()
+        handle.update_tableflow.assert_not_called()
+        logger.warning.assert_called_once()
+        message = logger.warning.call_args.args[0]
+        assert "my_table" in message
+        assert "FAILED" in message
+        assert "poison pill record at offset 42" in message
+        assert "ICEBERG: bad schema" in message
+
+    def test_already_enabled_matching_config_but_pending_does_not_warn(self, handle, rel, logger):
+        """PENDING is a normal state to be caught in -- e.g. an external, non-dbt enable that
+        hasn't come up yet -- not a problem, so only FAILED triggers the warning."""
+        handle.get_tableflow.side_effect = None
+        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",), phase="PENDING")
+        tableflow.reconcile_tableflow_config(
+            handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
+        )
+        logger.warning.assert_not_called()
 
     # --- already enabled, storage changed -> no in-place PATCH path, so recreate (#101) ---
 
