@@ -32,6 +32,7 @@ from confluent_sql import (
 )
 from confluent_sql import Error as ConfluentSqlError
 from confluent_sql.exceptions import (
+    OperationalError,
     ProgrammingError,
     TableflowTopicAlreadyExistsError,
     TableflowTopicNotFoundError,
@@ -191,6 +192,11 @@ def reconcile_tableflow_config(
       the underlying Kafka topic or its data -- unlike `--full-refresh`, which drops and
       recreates the topic itself -- and re-enabling backfills the full topic history from
       the earliest offset, so nothing here leaves a coverage gap (#101).
+      One transition -- a custom bucket to Confluent-managed storage -- can still fail even
+      after the disable/re-enable completes: Confluent enforces an unpollable grace period
+      (up to 1 hour) on that specific switch. `create_tableflow_topic` translates that 400
+      into an actionable error (wait and re-run, or `--full-refresh` to succeed immediately
+      at the cost of the topic's data) rather than the raw driver message.
     - Already enabled, only `table_formats`/`config` changed -> diff the live config
       against the current `tableflow` config (`compute_tableflow_patch`) and PATCH only
       if something actually changed, so an unchanged config is a true no-op rather than
@@ -338,7 +344,9 @@ def create_tableflow_topic(
     """Enable Tableflow on `relation` with `desired`."""
     # Blocks (by default) until the topic reaches RUNNING, up to 300s -- worth
     # logging at info, not debug, so the wait is visible without --debug.
-    logger.info(f"Enabling Tableflow for {relation} ({desired!r}) -- this can take a few minutes.")
+    logger.info(
+        f"Enabling Tableflow for {relation} ({desired.to_spec()!r}) -- this can take a few minutes."
+    )
     try:
         return handle.enable_tableflow(
             relation.identifier,
@@ -356,6 +364,26 @@ def create_tableflow_topic(
     except ProgrammingError as e:
         reraise_tableflow_auth_error(e)
     except ConfluentSqlError as e:
+        if (
+            isinstance(e, OperationalError)
+            and e.http_status_code == 400
+            and "previously enabled with a custom bucket" in str(e)
+        ):
+            # Confluent Cloud enforces an undocumented (no status field exposed anywhere to
+            # poll) grace period -- up to an hour -- after disabling Tableflow before a
+            # switch to Confluent-managed storage is accepted, even though the disable
+            # itself (including confluent_sql's own wait_for_removal) has already completed.
+            # A dbt run can't usefully wait that out, so fail with an actionable message
+            # instead of the raw, confusingly-worded API error.
+            raise DbtDatabaseError(
+                f"Error enabling Tableflow for {relation}: this topic's Tableflow storage is "
+                f"changing from a custom bucket to Confluent-managed storage. Confluent "
+                f"enforces a grace period (up to 1 hour) after disabling before this specific "
+                f"switch is accepted, with no way to poll for when it's done -- wait and "
+                f"re-run this model. Alternatively, --full-refresh succeeds immediately (it "
+                f"builds a new Kafka topic, so there's no prior-storage history to check "
+                f"against) but drops and recreates the topic, wiping its existing data."
+            ) from e
         raise DbtDatabaseError(f"Error enabling Tableflow for {relation}: {e}") from e
 
 

@@ -428,6 +428,31 @@ class TestEnsureTableflowConfig:
         assert exc_info.value.__cause__ is err
         assert "my_table" in str(exc_info.value)
 
+    def test_custom_bucket_to_managed_grace_period_gets_actionable_message(self, handle, rel):
+        """This specific 400 hits even after confluent_sql's own wait_for_removal has already
+        confirmed the topic is gone -- Confluent enforces an undocumented, unpollable grace
+        period on the custom-bucket -> managed-storage switch specifically. The raw driver
+        message must be replaced with one that explains the constraint and the --full-refresh
+        workaround, not just re-wrapped as-is."""
+        err = OperationalError(
+            "Error enabling Tableflow '400' - Bad Request: this topic was previously enabled "
+            "with a custom bucket. To switch to a Confluent-managed bucket, please disable "
+            "Tableflow on this topic, wait for cleanup to complete, then re-enable Tableflow "
+            "with the new storage configuration. Note: if you have already disabled Tableflow, "
+            "there is a 1 hour grace period before deletion begins",
+            http_status_code=400,
+        )
+        handle.enable_tableflow.side_effect = err
+        with pytest.raises(DbtDatabaseError) as exc_info:
+            tableflow.reconcile_tableflow_config(
+                handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
+            )
+        assert exc_info.value.__cause__ is err
+        message = str(exc_info.value)
+        assert "grace period" in message
+        assert "--full-refresh" in message
+        assert "wiping" in message
+
     def test_already_exists_race_is_swallowed(self, handle, rel, logger):
         """Narrow race: something else enabled it between our GET and this
         call. The desired end state (enabled) already holds, so this must
