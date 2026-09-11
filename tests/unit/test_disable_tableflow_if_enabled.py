@@ -21,6 +21,7 @@ from confluent_sql.exceptions import (
 from dbt_common.exceptions import DbtDatabaseError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
+from tests.unit._helpers import make_topic
 from tests.unit._helpers import relation as make_relation
 
 
@@ -50,7 +51,7 @@ class TestDisableTableflowIfEnabled:
         return mock
 
     def test_disables_when_enabled(self, wire_connection, handle, rel, logger):
-        handle.get_tableflow.return_value = MagicMock()
+        handle.get_tableflow.return_value = make_topic()
         wire_connection.disable_tableflow_if_enabled(rel)
         handle.disable_tableflow.assert_called_once_with("my_table")
         logger.info.assert_called_once()
@@ -68,7 +69,7 @@ class TestDisableTableflowIfEnabled:
         """A GET-then-DELETE order, not a blind DELETE -- a blind DELETE would
         404 (raise TableflowTopicNotFoundError) for the common case where
         Tableflow was never enabled."""
-        handle.get_tableflow.return_value = MagicMock()
+        handle.get_tableflow.return_value = make_topic()
         wire_connection.disable_tableflow_if_enabled(rel)
         assert handle.method_calls[0][0] == "get_tableflow"
         assert handle.method_calls[1][0] == "disable_tableflow"
@@ -85,7 +86,7 @@ class TestDisableTableflowIfEnabled:
         handle.disable_tableflow.assert_not_called()
 
     def test_disable_error_is_wrapped_as_dbt_database_error(self, wire_connection, handle, rel):
-        handle.get_tableflow.return_value = MagicMock()
+        handle.get_tableflow.return_value = make_topic()
         err = OperationalError("internal server error", http_status_code=500)
         handle.disable_tableflow.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
@@ -97,7 +98,7 @@ class TestDisableTableflowIfEnabled:
         disabled concurrently (another run, manual intervention) in between,
         the DELETE 404s too. That's the desired end state arriving a
         different way, not an error, so it must not raise."""
-        handle.get_tableflow.return_value = MagicMock()
+        handle.get_tableflow.return_value = make_topic()
         handle.disable_tableflow.side_effect = TableflowTopicNotFoundError(
             "not enabled", table_name="my_table"
         )
@@ -118,7 +119,7 @@ class TestDisableTableflowIfEnabled:
         handle.disable_tableflow.assert_not_called()
 
     def test_disable_auth_error_names_profile_field(self, wire_connection, handle, rel):
-        handle.get_tableflow.return_value = MagicMock()
+        handle.get_tableflow.return_value = make_topic()
         err = ProgrammingError(
             "Resolving the Kafka cluster id from the database name requires a global "
             "API key; alternatively pass database_kafka_cluster_id to connect()."
@@ -144,7 +145,7 @@ class TestDisableTableflowIfEnabled:
     def test_disable_unrelated_programming_error_bubbles_up_unchanged(
         self, wire_connection, handle, rel
     ):
-        handle.get_tableflow.return_value = MagicMock()
+        handle.get_tableflow.return_value = make_topic()
         err = ProgrammingError("SQL statement cannot be empty")
         handle.disable_tableflow.side_effect = err
         with pytest.raises(ProgrammingError) as exc_info:

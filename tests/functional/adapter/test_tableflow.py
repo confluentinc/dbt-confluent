@@ -60,7 +60,7 @@ pytestmark = pytest.mark.skipif(
 _RUN_TAG = format(int(time.time()), "08x")
 _TEST_RELATION_RE = re.compile(r"^dbttest_tf_(?:table|src|switch)_(?P<tag>[0-9a-f]{8})$")
 
-_TABLEFLOW_CONFIG = "{'formats': 'ICEBERG', 'storage': {'kind': 'Managed'}}"
+_TABLEFLOW_CONFIG = "{'table_formats': 'ICEBERG', 'storage': {'kind': 'Managed'}}"
 
 
 def _statement_label(dbt_profile_data):

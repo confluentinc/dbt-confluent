@@ -288,7 +288,7 @@ Available on every materialization that owns a real Kafka-backed table (`table`,
 {{ config(
     materialized='table',
     tableflow={
-        'formats': ['ICEBERG'],
+        'table_formats': ['ICEBERG'],
         'storage': {'kind': 'Managed'},
     }
 ) }}
@@ -296,19 +296,22 @@ select order_id, customer_id, price from {{ ref('orders') }}
 ```
 
 **Fields**:
-- `formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both.
+- `table_formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both.
 - `storage` (required) — a mapping with a `kind` key, using Tableflow's own API names verbatim:
     - `{'kind': 'Managed'}` — Confluent-managed storage, no further config.
     - `{'kind': 'ByobAws', 'bucket_name': '...', 'provider_integration_id': '...'}` — bring-your-own S3 bucket.
     - `{'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': '...', 'container_name': '...', 'provider_integration_id': '...'}` — customer-owned Azure Data Lake Storage Gen2.
-- `retention_ms` / `data_retention_ms` (optional) — non-negative integers (or numeric strings) controlling snapshot/data retention.
-- `error_handling` (optional) — how a bad record is handled: `{'mode': 'SUSPEND'}` (the server default — suspends materialization), `{'mode': 'SKIP'}` (skip and continue), or `{'mode': 'LOG', 'target': '...'}` (log to a dead-letter target, `target` defaults to `'error_log'`).
+- `config` (optional) — topic-level settings, mirroring Tableflow's own `spec.config` nesting verbatim rather than a flattened dbt-invented shape, so a `config` block copied straight from the API spec, the `confluent` CLI's own payload, or `confluent_sql` works unchanged:
+    - `retention_ms` / `data_retention_ms` (optional) — non-negative integers (or numeric strings) controlling snapshot/data retention.
+    - `error_handling` (optional) — how a bad record is handled: `{'mode': 'SUSPEND'}` (the server default — suspends materialization), `{'mode': 'SKIP'}` (skip and continue), or `{'mode': 'LOG', 'target': '...'}` (log to a dead-letter target, `target` defaults to `'error_log'`).
 
 The adapter validates this shape (`CompilationError` on a malformed `tableflow` config) when it's actually applied — unlike `distributed_by`/`start_mode`, `tableflow` is never baked into this DDL, so a bad value can't doom a `--full-refresh` recreate, and there's no need to validate it any earlier.
 
-**Ensured on every run — not diffed.** Whenever a model configures `tableflow`, every run (whether the relation was just created, already existed, or is being restarted) checks Tableflow's live state and:
+**Ensured on every run.** Whenever a model configures `tableflow`, every run (whether the relation was just created, already existed, or is being restarted) checks Tableflow's live state and:
 - **Not enabled** — enables it with the current config.
-- **Already enabled** — this version does not compare the live configuration against what's now configured; it just warns that dbt doesn't update an existing Tableflow configuration in place, and points at `--full-refresh` (or a manual disable) if you intended a change to take effect. Diffing and in-place updates are tracked as follow-up work.
+- **Already enabled** — diffs the live configuration against what's now configured and applies an in-place update only if `table_formats`/`config` actually changed, so an unchanged config is a true no-op rather than cycling the backing materialization job every run. `storage` can't be changed in place (Tableflow's API doesn't support it), but a change there is still detected and handled automatically: the adapter disables and re-enables Tableflow with the new storage config. This only ever touches the Tableflow sink, never the underlying Kafka topic or its data — unlike `--full-refresh`, which drops and recreates the topic itself — and re-enabling backfills the full topic history from the earliest offset, so this doesn't leave a coverage gap.
+
+    One specific storage transition — a custom bucket (`ByobAws`/`AzureDataLakeStorageGen2`) to Confluent-managed storage — can fail even after the automatic disable/re-enable above completes: Confluent Cloud enforces a grace period after disabling before it accepts the switch to managed storage, with no status to poll for when it's actually done. A run that hits this fails with a clear error rather than hanging — re-run the model after waiting, or use `--full-refresh` to succeed immediately (it builds a new Kafka topic with no prior-storage history to check against, but drops and recreates the topic, wiping its existing data).
 
 If `tableflow` is unset in the model, nothing is ever checked or touched, regardless of live state — this also means a table Tableflow was enabled on outside of dbt is never flagged just because the model doesn't mention it.
 
