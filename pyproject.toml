@@ -64,7 +64,7 @@ confluent = "dbt.adapters.confluent"
 # Pinned to the tableflow-update-patch branch tip (see issue #101, confluent-sql#214) so CI can
 # resolve update_tableflow/table_formats without a local checkout -- remove once the needed
 # confluent-sql release ships.
-confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "3623298ee093f67f05407fb61d40f731ff56f304" }
+confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "06b14e4073389b01421d98a1239414a376e2358d" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]

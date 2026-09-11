@@ -117,7 +117,7 @@ class TableflowDesiredState:
                 f"Allowed keys: {', '.join(sorted(_TABLEFLOW_CONFIG_KEYS))}."
             )
         return cls(
-            table_formats=translate_tableflow_formats(tableflow_config.get(Fields.TABLE_FORMATS)),
+            table_formats=translate_table_formats(tableflow_config.get(Fields.TABLE_FORMATS)),
             storage=translate_tableflow_storage(tableflow_config.get(Fields.STORAGE)),
             config=translate_tableflow_topic_config(tableflow_config.get(Fields.CONFIG)),
         )
@@ -359,7 +359,7 @@ def create_tableflow_topic(
     try:
         return handle.enable_tableflow(
             relation.identifier,
-            tableflow_formats=desired.table_formats,
+            table_formats=desired.table_formats,
             storage=desired.storage,
             config=desired.config,
         )
@@ -403,7 +403,7 @@ def patch_tableflow_topic(
         raise DbtDatabaseError(f"Error updating Tableflow for {relation}: {e}") from e
 
 
-def translate_tableflow_formats(formats: object) -> list[str]:
+def translate_table_formats(formats: object) -> list[str]:
     """Validate and normalize `tableflow.table_formats` into the driver's wire
     list. Exact case, matching `storage.kind`/`error_handling.mode` --
     every `tableflow` discriminator is a thin passthrough of the API's

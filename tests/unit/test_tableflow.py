@@ -66,7 +66,7 @@ class TestEnsureTableflowConfig:
         handle.enable_tableflow.assert_called_once()
         call = handle.enable_tableflow.call_args
         assert call.args[0] == "my_table"
-        assert call.kwargs["tableflow_formats"] == [TableFormat.ICEBERG]
+        assert call.kwargs["table_formats"] == [TableFormat.ICEBERG]
         assert call.kwargs["storage"] == ManagedStorage()
         assert call.kwargs["config"] is None
         # This blocks for up to 300s by default (waiting for RUNNING), so it
@@ -79,7 +79,7 @@ class TestEnsureTableflowConfig:
             handle, rel, {"table_formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}}
         )
         call = handle.enable_tableflow.call_args
-        assert call.kwargs["tableflow_formats"] == [TableFormat.ICEBERG, TableFormat.DELTA]
+        assert call.kwargs["table_formats"] == [TableFormat.ICEBERG, TableFormat.DELTA]
 
     def test_byob_aws_storage(self, handle, rel):
         tableflow.reconcile_tableflow_config(
@@ -190,7 +190,7 @@ class TestEnsureTableflowConfig:
         )
         # table_formats/config are re-applied fresh from the current dbt config, same as
         # any other create -- not just whatever happened to be already running.
-        assert call.kwargs["tableflow_formats"] == [TableFormat.ICEBERG]
+        assert call.kwargs["table_formats"] == [TableFormat.ICEBERG]
         # One info log announcing the storage-change recreate, one for the enable itself.
         assert logger.info.call_count == 2
         assert "my_table" in logger.info.call_args.args[0]
