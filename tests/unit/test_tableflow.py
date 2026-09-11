@@ -328,9 +328,7 @@ class TestEnsureTableflowConfig:
         )
         handle.update_tableflow.assert_not_called()
 
-    def test_already_enabled_config_removed_is_a_noop(
-        self, handle, rel
-    ):
+    def test_already_enabled_config_removed_is_a_noop(self, handle, rel):
         """The tableflow configurations are all required, though some have server-side defaults.
         Since you can't remove them, dbt treats missing config values as a no-op (keep the server
         value, regardless of whether it matches the defatul). This is similar to how dbt manages
