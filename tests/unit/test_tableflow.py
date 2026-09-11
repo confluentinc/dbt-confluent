@@ -261,6 +261,19 @@ class TestEnsureTableflowConfig:
         assert call.kwargs["table_formats"] == [TableFormat.ICEBERG, TableFormat.DELTA]
         assert call.kwargs["config"] is None  # unchanged config left alone
 
+    def test_already_enabled_same_formats_different_order_is_a_noop(self, handle, rel):
+        """`desired.table_formats` is always canonically ordered (ICEBERG before DELTA), but
+        the server's response order isn't guaranteed to match -- comparing as lists instead of
+        sets would see this as drift on every single run and PATCH pointlessly, exactly the
+        failure `tableflow`'s diffing is meant to eliminate (#101)."""
+        handle.get_tableflow.side_effect = None
+        handle.get_tableflow.return_value = make_topic(table_formats=("DELTA", "ICEBERG"))
+        tableflow.reconcile_tableflow_config(
+            handle, rel, {"table_formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}}
+        )
+        handle.enable_tableflow.assert_not_called()
+        handle.update_tableflow.assert_not_called()
+
     def test_already_enabled_config_removed_leaves_existing_values(self, handle, rel):
         """`retention_ms`/`data_retention_ms`/`error_handling` are optional on the request
         but not on the resource -- the server rejects clearing them. So a `tableflow` block

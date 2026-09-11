@@ -288,26 +288,7 @@ def compute_tableflow_patch(
     existing: TableflowTopic, desired: TableflowDesiredState
 ) -> TableflowPatch | None:
     """Diff `existing`'s live state against `desired`, returning the `TableflowPatch` needed to
-    reconcile them, or None if nothing's changed.
-
-    Compares each patchable field as its own typed value -- `existing.spec` is already parsed
-    into `TableFormat`/`TableflowTopicConfig`/`TableflowErrorHandling` by `confluent_sql`, so
-    there's no wire-shape juggling (int-vs-string retention, single-format-vs-list, ...) here at
-    all. `error_handling` is compared and replaced as one whole dataclass (`!=`), never diffed
-    field-by-field -- `TableflowPatch.config.error_handling`, when set, is `desired`'s own
-    `TableflowErrorHandling` object, later re-emitted via its own `to_spec()` (which always
-    includes `mode`) by the driver, so the discriminator can never be dropped from a patch that
-    changes one of its siblings (see module docstring).
-
-    `table_formats`/`config` are the only patchable fields; `storage`/`display_name` are
-    immutable via this API and are never compared.
-
-    `retention_ms`/`data_retention_ms`/`error_handling` are never cleared even when dbt's
-    config omits them -- they're optional on the request, but not on the resource itself, and
-    the server rejects an explicit null for any of them. `tableflow`'s otherwise-declarative
-    semantics (omitted means "shouldn't exist") don't apply to these three: once set, by dbt
-    or otherwise, they can only be changed to a new value, never unset, via this API.
-    """
+    reconcile them, or None if nothing's changed."""
     desired_config = desired.config if desired.config is not None else TableflowTopicConfig()
     existing_config = (
         existing.spec.config if existing.spec.config is not None else TableflowTopicConfig()
@@ -342,7 +323,9 @@ def compute_tableflow_patch(
 
     patch = TableflowPatch(
         table_formats=(
-            desired.table_formats if desired.table_formats != existing.spec.table_formats else None
+            desired.table_formats
+            if set(desired.table_formats) != set(existing.spec.table_formats)
+            else None
         ),
         config=config if config != TableflowTopicConfig() else None,
     )
