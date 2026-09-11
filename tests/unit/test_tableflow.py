@@ -328,6 +328,25 @@ class TestEnsureTableflowConfig:
         )
         handle.update_tableflow.assert_not_called()
 
+    def test_already_enabled_config_removed_is_a_noop(
+        self, handle, rel
+    ):
+        """The tableflow configurations are all required, though some have server-side defaults.
+        Since you can't remove them, dbt treats missing config values as a no-op (keep the server
+        value, regardless of whether it matches the defatul). This is similar to how dbt manages
+        only the tables that are declared in its models currently, and does not "undo" things that
+        are not explicitly declared. To revert to a server default, you would set that value in
+        your config explicitly.
+        """
+        handle.get_tableflow.side_effect = None
+        handle.get_tableflow.return_value = make_topic(
+            config={"error_handling": {"mode": "SUSPEND"}}
+        )
+        tableflow.reconcile_tableflow_config(
+            handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
+        )
+        handle.update_tableflow.assert_not_called()
+
     def test_already_enabled_changed_error_handling_target_includes_mode(self, handle, rel):
         """The discriminated-union bug this diffing exists to avoid (#101): `error_handling`
         is a `mode` + mode-specific-fields union, and the server needs `mode` in the patch
