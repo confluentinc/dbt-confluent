@@ -250,32 +250,54 @@ class TestEnsureTableflowConfig:
         )
         handle.enable_tableflow.assert_called_once()
 
-    def test_already_enabled_matching_config_ignores_int_vs_string_type(self, handle, rel):
-        """The API round-trips retention_ms as a string even though dbt
-        config supplies an int -- that alone must not look like drift."""
+    # --- retention_ms / data_retention_ms: unchanged, changed, and unchanged-but-cross-typed ---
+    #
+    # Both fields go through the exact same comparison shape in compute_tableflow_patch, so
+    # every case below is parametrized over both rather than only ever exercising retention_ms.
+
+    @pytest.mark.parametrize("field", ["retention_ms", "data_retention_ms"])
+    def test_unchanged_retention_field_is_a_noop(self, handle, rel, field):
         handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(config={"retention_ms": "604800000"})
+        handle.get_tableflow.return_value = make_topic(config={field: 604800000})
         tableflow.reconcile_tableflow_config(
             handle,
             rel,
             {
                 "table_formats": "ICEBERG",
                 "storage": {"kind": "Managed"},
-                "config": {"retention_ms": 604800000},
+                "config": {field: 604800000},
             },
         )
         handle.update_tableflow.assert_not_called()
 
-    def test_already_enabled_changed_retention_sends_update(self, handle, rel):
+    @pytest.mark.parametrize("field", ["retention_ms", "data_retention_ms"])
+    def test_unchanged_retention_field_ignores_int_vs_string_type(self, handle, rel, field):
+        """The API round-trips these fields as strings even though dbt config supplies an int
+        -- that alone must not look like drift."""
         handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(config={"retention_ms": "1209600000"})
+        handle.get_tableflow.return_value = make_topic(config={field: "604800000"})
         tableflow.reconcile_tableflow_config(
             handle,
             rel,
             {
                 "table_formats": "ICEBERG",
                 "storage": {"kind": "Managed"},
-                "config": {"retention_ms": 604800000},
+                "config": {field: 604800000},
+            },
+        )
+        handle.update_tableflow.assert_not_called()
+
+    @pytest.mark.parametrize("field", ["retention_ms", "data_retention_ms"])
+    def test_changed_retention_field_sends_update(self, handle, rel, field):
+        handle.get_tableflow.side_effect = None
+        handle.get_tableflow.return_value = make_topic(config={field: "1209600000"})
+        tableflow.reconcile_tableflow_config(
+            handle,
+            rel,
+            {
+                "table_formats": "ICEBERG",
+                "storage": {"kind": "Managed"},
+                "config": {field: 604800000},
             },
         )
         handle.enable_tableflow.assert_not_called()
@@ -285,7 +307,7 @@ class TestEnsureTableflowConfig:
         assert call.kwargs["table_formats"] is None  # unchanged formats left alone
         # In wire form (a str), like everything else desired is built from -- not the
         # int dbt config happened to supply; nothing about what's sent changes either way.
-        assert call.kwargs["config"].to_spec() == {"retention_ms": "604800000"}
+        assert call.kwargs["config"].to_spec() == {field: "604800000"}
 
     def test_already_enabled_changed_formats_sends_update(self, handle, rel):
         handle.get_tableflow.side_effect = None
