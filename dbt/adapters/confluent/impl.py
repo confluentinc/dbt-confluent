@@ -94,6 +94,21 @@ _START_MODE_RE = re.compile(
 )
 
 
+def _is_yes(val: Any) -> bool:
+    """Robustly coerce an unknown column value to a boolean 'YES' check.
+
+    The server currently returns the string ``"YES"``/``"NO"`` for boolean
+    columns, but may return Python ``True``/``False`` or ``1``/``0`` in the
+    future (or under certain driver versions). Checking all three forms avoids
+    silent failures when the driver changes its representation.
+    """
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, int):
+        return val != 0
+    return str(val).upper() == "YES"
+
+
 @dataclass(frozen=True, eq=False, repr=False)
 class ConfluentRelation(BaseRelation):
     quote_character: str = "`"
@@ -127,7 +142,7 @@ class _CleanupRegistry(threading.local):
     """
 
     def __init__(self) -> None:
-        self.relations: list = []
+        self.relations: list[ConfluentRelation] = []
 
 
 class ConfluentAdapter(SQLAdapter):
@@ -289,7 +304,7 @@ class ConfluentAdapter(SQLAdapter):
         )
         if len(table.rows) == 0:
             return "absent"
-        if any(str(row[0]).upper() == "YES" for row in table.rows):
+        if any(_is_yes(row[0]) for row in table.rows):
             return "materialized_table"
         return "regular"
 
@@ -579,8 +594,15 @@ class ConfluentAdapter(SQLAdapter):
             re.IGNORECASE | re.MULTILINE,
         )
 
-        # Create the cloned view
+        # Create the cloned view; guard against the substitution silently
+        # producing bad SQL if the server ever changes quoting/whitespace.
         new_ddl = pattern.sub(rf"\1{new_fqn}", ddl, count=1)
+        if new_ddl == ddl:
+            raise DbtDatabaseError(
+                f"rename_relation: could not find '{old_fqn}' in the DDL returned "
+                f"by SHOW CREATE VIEW. The substitution produced no change, so the "
+                f"cloned view would have the wrong name. DDL was:\n{ddl}"
+            )
         self.execute(new_ddl)
 
         # Drop the original one
@@ -633,6 +655,12 @@ class ConfluentAdapter(SQLAdapter):
             if row["table_type"] is not None:
                 table_type = row["table_type"]
                 continue
+            # Ensure we have a plain dict before mutating. execute_macro is
+            # cast() to list[dict[str, Any]], but cast() is not enforced at
+            # runtime — if the driver ever returns agate Row objects the
+            # in-place assignment below would silently succeed on some Row
+            # implementations and raise TypeError on others.
+            row = dict(row)
             row["table_type"] = table_type
             rows.append(row)
 
@@ -687,7 +715,12 @@ class ConfluentAdapter(SQLAdapter):
         for cte in extra_ctes:
             cte_sql = cte["sql"].strip()
             # Format is: __dbt__cte__<name> as (\n<body>\n)
-            as_idx = cte_sql.index(" as (")
+            as_idx = cte_sql.find(" as (")
+            if as_idx == -1:
+                raise ValueError(
+                    f"parse_unit_test_ctes: expected CTE format "
+                    f"'<name> as (<body>)' but got: {cte_sql!r}"
+                )
             cte_name = cte_sql[:as_idx].strip()
             body = cte_sql[as_idx + 5 : -1]  # skip " as (" and trailing ")"
             original_identifier = cte_name.replace("__dbt__cte__", "")
@@ -1078,9 +1111,9 @@ class ConfluentAdapter(SQLAdapter):
                 if row["table_name"] == existing_identifier and row["dist_position"] is not None:
                     positions.append((row["dist_position"], row["col_name"]))
             elif section == "TABLES":
-                if str(row["is_materialized"]).upper() == "YES":
+                if _is_yes(row["is_materialized"]):
                     is_materialized = True
-                if str(row["is_distributed"]).upper() == "YES":
+                if _is_yes(row["is_distributed"]):
                     is_distributed = True
                     buckets = row["dist_buckets"]
             elif section == "TABLE_OPTIONS":

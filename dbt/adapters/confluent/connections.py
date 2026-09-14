@@ -87,10 +87,7 @@ class ConfluentCredentials(Credentials):
         Hashed and included in anonymous telemetry to track adapter adoption.
         Pick a field that can uniquely identify one team/organization building with this adapter
         """
-        if self.endpoint:
-            return self.endpoint
-        else:
-            return f"{self.cloud_provider}-{self.cloud_region}-{self.organization_id}"
+        return self.endpoint or f"{self.cloud_provider}-{self.cloud_region}-{self.organization_id}"
 
     def _connection_keys(self):
         """
@@ -114,171 +111,156 @@ def _execute_query_with_retry(
     statement_labels: list[str] | None = None,
     compute_pool_id: str | None = None,
     statement_properties: dict[str, str | int | bool] | None = None,
-):
+) -> None:
     """Execute the cursor and retry on transient failures.
 
-    A success sees the try exit cleanly and avoid any recursive retries.
-    Failure begins a sleep and retry routine.
+    Iterates instead of recursing so that the call stack stays flat and
+    all mutable state (``attempt``, ``limit``) is carried as loop variables.
+    The extended 12-retry budget for slow transient conditions is therefore
+    correctly accumulated across iterations rather than being re-applied
+    per-frame.
 
     Lives at module scope (not as a closure inside add_query) so it can
     be unit-tested in isolation.
 
     compute_pool_id: if provided, overrides the connection-default compute pool
-    for this statement (per-model `compute_pool_id` config). If None, the
+    for this statement (per-model ``compute_pool_id`` config). If None, the
     connection's default compute pool is used.
 
-    statement_properties: if provided (per-model `statement_properties` config),
+    statement_properties: if provided (per-model ``statement_properties`` config),
     passed through to the driver as Flink SET-style statement properties.
     """
-    try:
-        cursor.execute(
-            sql,
-            bindings,
-            statement_name=statement_name,
-            statement_labels=statement_labels,
-            compute_pool_id=compute_pool_id,
-            properties=statement_properties,
-        )
-    except retryable_exceptions as e:
-        # Cease retries and fail when limit is hit.
-        if attempt >= retry_limit:
-            raise e
-
-        backoff = min(attempt * 3, 15)
-        retries_left = retry_limit - attempt
-
-        if isinstance(e, ComputePoolExhaustedError):
-            fire_event(
-                AdapterEventWarning(
-                    base_msg=f"Compute pool exhausted. {retries_left} retries left. "
-                    f"Retrying in {backoff} seconds."
-                )
-            )
-        else:
-            fire_event(
-                AdapterEventDebug(
-                    base_msg=f"Got a retryable error {type(e)}. {retries_left} retries left. "
-                    f"Retrying in {backoff} seconds.\nError:\n{e}"
-                )
-            )
-        time.sleep(backoff)
-
-        # Reuse the same statement name on retry. ComputePoolExhaustedError
-        # cleans up the failed statement, so the name is available for reuse.
-        return _execute_query_with_retry(
-            cursor=cursor,
-            sql=sql,
-            bindings=bindings,
-            retryable_exceptions=retryable_exceptions,
-            retry_limit=retry_limit,
-            attempt=attempt + 1,
-            statement_labels=statement_labels,
-            statement_name=statement_name,
-            compute_pool_id=compute_pool_id,
-            statement_properties=statement_properties,
-        )
-    except OperationalError as e:
-        # Three transient conditions we wait out by retrying:
-        #  - "being modified": a materialized table's prior CREATE OR ALTER is
-        #    still establishing/evolving; it always settles on its own.
-        #  - "kafka topic does not exist": a recreate found the dying catalog
-        #    entry of a recently dropped relation; it clears within tens of
-        #    seconds.
-        #  - 409: a prior statement with the same name is still tearing down
-        #    asynchronously after a DELETE.
-        # "table already exists" is deliberately NOT retried: it never clears
-        # by waiting, and retrying would delay every genuine name conflict by
-        # the whole budget.
-        # Message matches are checked before the status: Confluent may surface
-        # them with a 409 too, and keying off the status would misreport (and
-        # mis-budget) them as a name-reuse race.
-        msg = str(e).lower()
-        if "table already exists" in msg:
-            raise
-        if "schema registry subject" in msg and (
-            "doesn't match" in msg or "does not match" in msg
-        ):
-            # Not retried: a dropped relation's Schema Registry subjects are
-            # not deleted with it, so this never clears by waiting. Typical
-            # cause: recreating a dropped relation under the same name with a
-            # differently-shaped schema — e.g. replacing a materialized table
-            # (keyed schema) with a `table` model's snapshot CTAS (keyless).
-            # The raw server message is cryptic, so append recovery guidance.
-            raise OperationalError(
-                f"{e}\nA Schema Registry subject registered by a previously "
-                f"dropped relation with this name still exists and is "
-                f"incompatible with the schema this statement would register "
-                f"(subjects are not deleted when a relation is dropped). "
-                f"Either delete the lingering subject(s) in Schema Registry "
-                f"and re-run, or give the model a different relation name "
-                f"(e.g. via an alias)."
-            ) from e
-        is_being_modified = "being modified" in msg
-        is_topic_gone = "kafka topic does not exist" in msg
-        is_409 = getattr(e, "http_status_code", None) == 409
-        if not (is_being_modified or is_topic_gone or is_409):
-            raise
-
-        # The message-matched conditions are slow and variable to clear, so
-        # they get a generous dedicated budget; the 409 name-reuse race is
-        # quick and keeps the smaller default one.
-        if is_being_modified:
-            limit, backoff = max(retry_limit, 12), 10
-            reason = (
-                "Materialized table is still being modified by a prior statement "
-                "(still establishing/evolving)"
-            )
-        elif is_topic_gone:
-            limit, backoff = max(retry_limit, 12), 10
-            reason = (
-                "A recently dropped relation with this name has not finished "
-                "tearing down (its Kafka topic is already gone)"
-            )
-        else:
-            limit, backoff = retry_limit, min(attempt * 3, 15)
-            reason = (
-                f"Statement name '{statement_name}' is already in use "
-                f"(prior statement may still be tearing down)"
-            )
-        if attempt >= limit:
-            raise
-
-        # A rejection that reached the FAILED phase leaves the statement in
-        # place, still occupying statement_name — without this delete the
-        # retry would bounce off 409 name conflicts instead of seeing the
-        # condition clear. Best-effort: after an HTTP-level rejection no
-        # statement exists, and on budget exhaustion (raise above) the FAILED
-        # statement is left in place for debugging.
+    limit = retry_limit
+    while True:
         try:
-            cursor.delete_statement()
-        except Exception as cleanup_error:  # noqa: BLE001
+            cursor.execute(
+                sql,
+                bindings,
+                statement_name=statement_name,
+                statement_labels=statement_labels,
+                compute_pool_id=compute_pool_id,
+                properties=statement_properties,
+            )
+            return  # success — exit the loop
+        except retryable_exceptions as e:
+            # Cease retries and fail when limit is hit.
+            if attempt >= limit:
+                raise
+
+            backoff = min(attempt * 3, 15)
+            retries_left = limit - attempt
+
+            if isinstance(e, ComputePoolExhaustedError):
+                fire_event(
+                    AdapterEventWarning(
+                        base_msg=f"Compute pool exhausted. {retries_left} retries left. "
+                        f"Retrying in {backoff} seconds."
+                    )
+                )
+            else:
+                fire_event(
+                    AdapterEventDebug(
+                        base_msg=f"Got a retryable error {type(e)}. {retries_left} retries left. "
+                        f"Retrying in {backoff} seconds.\nError:\n{e}"
+                    )
+                )
+            time.sleep(backoff)
+            # Reuse the same statement name on retry. ComputePoolExhaustedError
+            # cleans up the failed statement, so the name is available for reuse.
+            attempt += 1
+
+        except OperationalError as e:
+            # Three transient conditions we wait out by retrying:
+            #  - "being modified": a materialized table's prior CREATE OR ALTER is
+            #    still establishing/evolving; it always settles on its own.
+            #  - "kafka topic does not exist": a recreate found the dying catalog
+            #    entry of a recently dropped relation; it clears within tens of
+            #    seconds.
+            #  - 409: a prior statement with the same name is still tearing down
+            #    asynchronously after a DELETE.
+            # "table already exists" is deliberately NOT retried: it never clears
+            # by waiting, and retrying would delay every genuine name conflict by
+            # the whole budget.
+            # Message matches are checked before the status: Confluent may surface
+            # them with a 409 too, and keying off the status would misreport (and
+            # mis-budget) them as a name-reuse race.
+            msg = str(e).lower()
+            if "table already exists" in msg:
+                raise
+            if "schema registry subject" in msg and (
+                "doesn't match" in msg or "does not match" in msg
+            ):
+                # Not retried: a dropped relation's Schema Registry subjects are
+                # not deleted with it, so this never clears by waiting. Typical
+                # cause: recreating a dropped relation under the same name with a
+                # differently-shaped schema — e.g. replacing a materialized table
+                # (keyed schema) with a `table` model's snapshot CTAS (keyless).
+                # The raw server message is cryptic, so append recovery guidance.
+                raise OperationalError(
+                    f"{e}\nA Schema Registry subject registered by a previously "
+                    f"dropped relation with this name still exists and is "
+                    f"incompatible with the schema this statement would register "
+                    f"(subjects are not deleted when a relation is dropped). "
+                    f"Either delete the lingering subject(s) in Schema Registry "
+                    f"and re-run, or give the model a different relation name "
+                    f"(e.g. via an alias)."
+                ) from e
+            is_being_modified = "being modified" in msg
+            is_topic_gone = "kafka topic does not exist" in msg
+            is_409 = getattr(e, "http_status_code", None) == 409
+            if not (is_being_modified or is_topic_gone or is_409):
+                raise
+
+            # The message-matched conditions are slow and variable to clear, so
+            # they get a generous dedicated budget accumulated across iterations;
+            # the 409 name-reuse race keeps the smaller default one.
+            if is_being_modified:
+                limit = max(limit, 12)
+                backoff = 10
+                reason = (
+                    "Materialized table is still being modified by a prior statement "
+                    "(still establishing/evolving)"
+                )
+            elif is_topic_gone:
+                limit = max(limit, 12)
+                backoff = 10
+                reason = (
+                    "A recently dropped relation with this name has not finished "
+                    "tearing down (its Kafka topic is already gone)"
+                )
+            else:
+                backoff = min(attempt * 3, 15)
+                reason = (
+                    f"Statement name '{statement_name}' is already in use "
+                    f"(prior statement may still be tearing down)"
+                )
+            if attempt >= limit:
+                raise
+
+            # A rejection that reached the FAILED phase leaves the statement in
+            # place, still occupying statement_name — without this delete the
+            # retry would bounce off 409 name conflicts instead of seeing the
+            # condition clear. Best-effort: after an HTTP-level rejection no
+            # statement exists, and on budget exhaustion (raise above) the FAILED
+            # statement is left in place for debugging.
+            try:
+                cursor.delete_statement()
+            except Exception as cleanup_error:  # noqa: BLE001
+                fire_event(
+                    AdapterEventDebug(
+                        base_msg=f"Could not delete failed statement "
+                        f"'{statement_name}' before retrying: {cleanup_error}"
+                    )
+                )
+
+            retries_left = limit - attempt
             fire_event(
                 AdapterEventDebug(
-                    base_msg=f"Could not delete failed statement "
-                    f"'{statement_name}' before retrying: {cleanup_error}"
+                    base_msg=f"{reason}. {retries_left} retries left. Retrying in {backoff} seconds."
                 )
             )
-
-        retries_left = limit - attempt
-        fire_event(
-            AdapterEventDebug(
-                base_msg=f"{reason}. {retries_left} retries left. Retrying in {backoff} seconds."
-            )
-        )
-        time.sleep(backoff)
-
-        return _execute_query_with_retry(
-            cursor=cursor,
-            sql=sql,
-            bindings=bindings,
-            retryable_exceptions=retryable_exceptions,
-            retry_limit=retry_limit,
-            attempt=attempt + 1,
-            statement_labels=statement_labels,
-            statement_name=statement_name,
-            compute_pool_id=compute_pool_id,
-            statement_properties=statement_properties,
-        )
+            time.sleep(backoff)
+            attempt += 1
 
 
 class ConfluentConnectionManager(SQLConnectionManager):
@@ -452,11 +434,21 @@ class ConfluentConnectionManager(SQLConnectionManager):
             logger.debug(msg)
             raise DbtDatabaseError(msg) from e
         except confluent_sql.Error as e:
-            # TODO: Use logger, or fire a dbt event? Or both?
+            # confluent_sql.Error is the public base for all driver errors; we
+            # intentionally catch the full hierarchy here so that any new
+            # driver-level subclass is reported as a DbtDatabaseError (a dbt
+            # operational failure) rather than a generic DbtRuntimeError.
+            # fire_event is deliberately not used: these errors are query-level
+            # failures best surfaced through the standard dbt exception path.
             msg = f"confluent_sql error for '{sql}': {e}"
             logger.debug(msg)
             raise DbtDatabaseError(msg) from e
         except Exception as e:
+            # Catch-all for unexpected non-driver errors (e.g. network stack,
+            # serialisation). Kept broad on purpose: we cannot enumerate every
+            # possible infrastructure exception, and dbt expects all query
+            # failures to be wrapped in a DbtRuntimeError so its error-handling
+            # machinery can present them consistently.
             msg = f"Error running SQL '{sql}': {e}"
             logger.debug(msg)
             raise DbtRuntimeError(msg) from e
@@ -468,7 +460,6 @@ class ConfluentConnectionManager(SQLConnectionManager):
         and moves it to the "open" state.
         """
         if connection.state is ConnectionState.OPEN:
-            # TODO: Use logger, or fire a dbt event? Or both?
             logger.debug("Connection is already open, skipping open.")
             return connection
 
@@ -496,11 +487,21 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 # metadata lookups, surfacing as a "read operation timed out".
                 http_timeout_secs=60,
             )
-            connection.state = "open"
+            connection.state = ConnectionState.OPEN
             connection.handle = handle
             return connection
+        except confluent_sql.Error:
+            # confluent_sql.connect() raises confluent_sql.Error (or a subclass)
+            # for all connection-level failures (bad credentials, unreachable
+            # endpoint, invalid configuration). We mark the connection as failed
+            # and re-raise so dbt can present the original driver message.
+            connection.state = ConnectionState.FAIL
+            connection.handle = None
+            raise
         except Exception:
-            connection.state = "fail"
+            # Unexpected non-driver failure (e.g. import error, misconfigured
+            # proxy). Mark failed and re-raise with original diagnostics intact.
+            connection.state = ConnectionState.FAIL
             connection.handle = None
             raise
 
@@ -522,13 +523,15 @@ class ConfluentConnectionManager(SQLConnectionManager):
         connection.handle.close()
 
     def commit(self):
-        # Confluent cloud SQL does not support transactions, so commit is a noop here.
-        # TODO: Should we raise an exception if a non supported feature is used instead?
+        # Confluent Cloud SQL does not support transactions. Silently no-op so
+        # dbt's generic transaction machinery (which calls begin/commit around
+        # every query) does not break. Raising here would break every query.
         pass
 
     def begin(self):
-        # Confluent cloud SQL does not support transactions, so begin is a noop here.
-        # TODO: Should we raise an exception if a non supported feature is used instead?
+        # Confluent Cloud SQL does not support transactions. Silently no-op so
+        # dbt's generic transaction machinery (which calls begin/commit around
+        # every query) does not break. Raising here would break every query.
         pass
 
     @classmethod
