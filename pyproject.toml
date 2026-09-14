@@ -49,6 +49,7 @@ lint = [
 ]
 test = [
   "pytest>=8.4.2",
+  "pytest-cov>=6.0.0",
   "pytest-dotenv>=0.5.2",
   "dbt-tests-adapter>=1.10",
 ]
@@ -68,7 +69,7 @@ confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
-addopts = "-v --color=yes"
+addopts = "-v --color=yes --cov=dbt/adapters/confluent --cov-report=term-missing --cov-fail-under=80"
 env_files = ["test.env"]
 
 [tool.ruff]
