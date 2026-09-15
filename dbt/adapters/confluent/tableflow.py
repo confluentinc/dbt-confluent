@@ -602,7 +602,7 @@ def translate_tableflow_topic_config(config: object) -> TableflowTopicConfig | N
 
 def reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
     """Translate the driver's Kafka-cluster-id-resolution failure into
-    guidance that names the actual profile field, or bubble it up
+    guidance that names the actual profile fields, or bubble it up
     unchanged if it's not that specific error.
 
     `ProgrammingError` covers more than this one case, so only the
@@ -611,17 +611,22 @@ def reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
     rewritten. Anything else re-raises as-is rather than risk
     mislabeling an unrelated `ProgrammingError`.
 
-    Only `global_api_key`/`global_api_secret` is offered as a fix: CMK
-    cluster-id resolution requires the global key specifically, so a
-    Tableflow-scoped key pair can't satisfy it -- this adapter doesn't
-    expose `database_kafka_cluster_id` to skip the lookup instead (#105).
+    The driver's message names its own `connect()` parameter for
+    short-circuiting the lookup, which this adapter deliberately doesn't
+    expose -- `schema` is the cluster's display name and CMK resolves it,
+    so there is nothing for a profile to restate. The remedy the user can
+    act on is the control-plane credential: the lookup runs against CMK,
+    which only a `cloud`- or `global`-scoped key reaches. See
+    `ConfluentCredentials` for the scope matrix.
     """
     if "requires a global API key" not in str(e):
         raise e
     raise DbtDatabaseError(
-        "Tableflow needs to resolve your Kafka cluster id, which requires a Global "
-        "API key. Add `global_api_key`/`global_api_secret` to your profile -- see "
-        "README.md#configuration."
+        "Tableflow needs your Kafka cluster id and couldn't resolve it from "
+        "`schema`. That lookup runs against CMK with "
+        "`global_api_key`/`global_api_secret` -- check both are set in your "
+        "profile and that the key's scope reaches CMK (`resource_type=cloud` "
+        "or `global`). See README.md#configuration."
     ) from e
 
 
