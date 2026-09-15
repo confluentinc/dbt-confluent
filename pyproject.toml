@@ -69,8 +69,20 @@ confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
-addopts = "-v --color=yes --cov=dbt/adapters/confluent --cov-report=term-missing --cov-fail-under=80"
+addopts = "-v --color=yes"
 env_files = ["test.env"]
+
+[tool.coverage.run]
+source = ["dbt", "adapters", "confluent"]
+omit = [
+  "**/__init__.py",
+  "**/__version__.py"
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_covered = false
 
 [tool.ruff]
 target-version = "py310"

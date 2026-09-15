@@ -18,10 +18,11 @@ shape a unit test author assumed it would).
   block entirely, making `existing`'s parsed value `None` while `desired`'s is a real
   `TableflowErrorHandlingSuspend()`, which would compare unequal and PATCH every run.
 
-Requires a Global API key: Tableflow's control-plane routes need one
-regardless of the Flink-region pair every other functional test uses (see
-MATERIALIZATIONS.md#tableflow). Skipped entirely when
-CONFLUENT_GLOBAL_API_KEY/CONFLUENT_GLOBAL_API_SECRET aren't both set.
+Requires a Tableflow-capable API key in CONFLUENT_GLOBAL_API_KEY/SECRET: Tableflow's
+control-plane routes need one regardless of the Flink-region pair every other
+functional test uses (see MATERIALIZATIONS.md#tableflow). Skipped entirely when
+either half of the pair is unset. Scope matters, and the failure mode is misleading. Create the key with
+`confluent api-key create --resource global`.
 
 Notes:
 - Both enable_tableflow and disable_tableflow block (by default) until the
@@ -87,7 +88,7 @@ def _disable_tableflow_best_effort(project, name):
         conn = project.adapter.connections.get_thread_connection()
         try:
             conn.handle.disable_tableflow(name)
-        except TableflowTopicNotFoundError:
+        except Exception:  # noqa: BLE001
             pass
 
 
@@ -102,8 +103,16 @@ def sweep_leftovers_once():
         if swept:
             return
         swept = True
-        sweep_stale_test_relations(project, _TEST_RELATION_RE, _RUN_TAG)
-        sweep_stale_test_statements(project)
+        # Best-effort: infrastructure failures (stale credentials, deleted
+        # environments) must not block the test from running.
+        try:
+            sweep_stale_test_relations(project, _TEST_RELATION_RE, _RUN_TAG)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            sweep_stale_test_statements(project)
+        except Exception:  # noqa: BLE001
+            pass
 
     return sweep
 

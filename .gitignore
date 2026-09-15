@@ -137,3 +137,6 @@ dmypy.json
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# VS Code
+.vscode/launch.json

@@ -321,7 +321,20 @@ If `tableflow` is unset in the model, nothing is ever checked or touched, regard
 
 The corollary: if a model's `tableflow` config is removed (rather than the table being dropped outright), an old Tableflow configuration left enabled on that relation is not disabled and is not touched on subsequent runs. If that relation is later full-refreshed, the drop is **not** preceded by a disable, since the new config no longer mentions `tableflow` — this can race Tableflow the same way an unguarded drop would. Explicitly turning Tableflow off (without dropping the table) is not yet supported; it's tracked as follow-up work.
 
-**Credentials**: Tableflow's control-plane routes require a Global API key (`global_api_key` / `global_api_secret`) — they resolve `database` to a Kafka cluster id via CMK, which only a Global key can do. A model that configures `tableflow` on a profile without one raises a clear error naming these fields, rather than the raw driver error.
+**Credentials**: Tableflow's control-plane routes require a Global API key, supplied as `global_api_key` / `global_api_secret`. A Flink-region key can't reach those routes.
+
+Get the scope right — key types are not interchangeable, and each backend accepts only its own:
+
+| `confluent api-key create --resource` | Flink SQL | Tableflow | cluster-id lookup (CMK) |
+| --- | --- | --- | --- |
+| `flink` (with `--cloud`/`--region`) | ✅ | ❌ | ❌ |
+| `tableflow` | ❌ | ✅ | ❌ |
+| `cloud` | ❌ | ❌ | ✅ |
+| `global` | ✅ | ✅ | ✅ |
+
+Use `--resource global`. A `--resource cloud` key is rejected by Tableflow with a bare `401`, which reads as a bad credential but is really a scope mismatch — that one is easy to lose an afternoon to. `--resource tableflow` is narrower and does reach Tableflow itself, but not the cluster-id lookup below.
+
+The Kafka cluster id Tableflow works against isn't configured separately: `schema` *is* the cluster's display name, and CMK's clusters route resolves it to the `lkc-…` id. That route is the reason the key has to be `global`-scoped — it rejects a `tableflow` key with a `401`. A model that configures `tableflow` on a profile whose key can't make that lookup raises a clear error naming these profile fields, rather than the raw driver error.
 
 ## Adopting Existing Tables and Statements
 
