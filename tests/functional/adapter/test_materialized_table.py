@@ -699,7 +699,7 @@ class TestMaterializedTableInvalidConfig(ConfluentFixtures):
             return r.message
 
         assert "not supported by the 'materialized_table'" in msg("mt_freshness")
-        assert "Supported config options are: distributed_by, with, start_mode" in msg(
+        assert "Supported config options include: compute_pool_id, contract, distributed_by" in msg(
             "mt_freshness"
         )
         assert "not a valid value for 'start_mode'" in msg("mt_start_mode")

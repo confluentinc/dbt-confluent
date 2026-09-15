@@ -20,3 +20,9 @@ def test_translate_type_does_not_apply_dbt_core_default_string_to_text_mapping()
     # result here confirms the fix didn't change translate_type's behavior
     # in general -- just removed the one bad STRING entry.
     assert ConfluentColumn.translate_type("bigint") == "bigint"
+
+
+def test_quoted_uses_backtick_not_double_quote():
+    col = ConfluentColumn("my_col", "STRING")
+    assert col.quoted == "`my_col`"
+    assert '"' not in col.quoted

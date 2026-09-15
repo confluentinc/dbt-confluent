@@ -1,0 +1,843 @@
+#!/bin/sh
+# IBM-managed Vault Radar pre-commit hook v2.0.1
+# Do not modify. Tampering is logged and reviewable by CISO, and the MDM
+# platform reinstalls the managed hook on its next converge.
+#
+# Control flow:
+#   1. setup_log         - establish user-scoped log path with umask 077
+#   2. rotate_log        - in-hook size-based rotation with atomic mkdir lock
+#   3. check_breakglass  - if active window, skip Vault Radar scan only
+#   4. probe_chain       - detect Husky/pre-commit framework/lefthook/custom
+#   5. run_chained_hook  - execute detected chain; exit code governs
+#   6. run_vault_radar_scan - invoke binary against staged diff (if not bypassed)
+#   7. handle_block      - emit blocked-commit message and exit nonzero
+#
+# Shell options: set -e is in effect. Rotation, log writes, and breakglass
+# operations use explicit non-fatal carve-outs (|| true, 2>/dev/null) because
+# their failure should not block a commit. Real failures (missing binary,
+# scan crash) exit the hook.
+
+set -e
+
+VR_ROOT="/opt/vault-radar"
+VR_BIN="${VR_ROOT}/bin/vault-radar"
+VAULT_RADAR_LICENSE_PATH="${VR_ROOT}/vault-radar.hclic"
+VAULT_RADAR_CONFIG_PATH="${VR_ROOT}/config.json"
+export VAULT_RADAR_LICENSE_PATH VAULT_RADAR_CONFIG_PATH
+
+# Support channel (single edit point per platform). The Slack channel name
+# below is printed in every user-facing message this hook emits. Set it once
+# here and redeploy through the MDM platform to propagate it to all endpoints.
+VR_SUPPORT_CHANNEL="#block-secrets-pilot"
+
+# Never die silently: git shows nothing for a non-zero pre-commit unless the
+# hook prints. Deliberate block paths set VR_BANNER_SHOWN=1; this EXIT trap
+# covers every other non-zero death (set -e included) with a visible message.
+VR_BANNER_SHOWN=0
+vr_unexpected_exit() {
+    _uex_rc=$?
+    if [ "$_uex_rc" -ne 0 ] && [ "${VR_BANNER_SHOWN:-0}" = "0" ]; then
+        printf 'Block Secrets: the pre-commit hook failed unexpectedly (exit %s) and your commit was aborted.\nThis is not a secret finding. Reach out in %s and include any output above.\n' "$_uex_rc" "${VR_SUPPORT_CHANNEL}" >&2
+    fi
+}
+trap vr_unexpected_exit EXIT
+
+# Note on config precedence (v1.2.2 Sec. 17.3):
+# The vault-radar binary may auto-discover ./.hashicorp/vault-radar/config.json
+# in the repo and give it precedence over our env-var path. This is a
+# documented limitation; a repo-local config can weaken the local scan.
+
+ts() { date -u '+%Y-%m-%dT%H:%M:%SZ'; }
+
+setup_log() {
+    VR_LOG_DIR="$HOME/.cache/ibm-vault-radar"
+    umask 077
+    mkdir -p "$VR_LOG_DIR" 2>/dev/null || true
+    VR_LOG="$VR_LOG_DIR/hook.log"
+    [ -f "$VR_LOG" ] || : > "$VR_LOG" 2>/dev/null || VR_LOG=/dev/null
+}
+
+rotate_log() {
+    # v1.2.2 Sec. 3.4: in-hook size-based rotation, 10 MB threshold.
+    # mkdir lock is atomic across POSIX filesystems; serves as rotation lock
+    # to prevent concurrent hooks (across different repos) from racing.
+    if mkdir "${VR_LOG}.rotate-lock" 2>/dev/null; then
+        if [ -s "$VR_LOG" ] && [ "$(wc -c < "$VR_LOG")" -gt 10485760 ]; then
+            if ! mv -f "$VR_LOG" "${VR_LOG}.1" 2>/dev/null; then
+                printf '%s [WARN] log rotation failed\n' "$(ts)" >> "$VR_LOG" 2>/dev/null || true
+            fi
+        fi
+        rmdir "${VR_LOG}.rotate-lock" 2>/dev/null || true
+    fi
+}
+
+log_event() {
+    # Non-fatal. Failure to log does not block commit.
+    printf '%s [%s] %s\n' "$(ts)" "$1" "$2" >> "$VR_LOG" 2>/dev/null || true
+}
+
+# ---- commit-result emitter (separate file, fail-open, 500-line trim) ----
+# Appends one keyworded UTC line per commit decision to commit-results.log so
+# the MDM platform team can count blocked vs allowed commits (collection is
+# platform owned, not performed here). BLOCKED records also carry the scanner's
+# masked finding lines (file path and rule; secret values stay masked by Vault
+# Radar) for triage. Paths resolve at call time from VR_LOG_DIR (set by
+# setup_log). Every operation is fail-open: a logging failure never changes the
+# commit exit code.
+# Retention is line-count based: the file is trimmed in place to the most
+# recent VR_RESULT_MAX_LINES lines on the first commit after it grows past
+# that cap. Line count was chosen over a time window so one historical
+# BLOCKED entry survives on the device as evidence the control runs, and so
+# an infrequent committer never loses data to a clock. The trim also
+# migrates from the retired 96-hour window mechanism: a leftover
+# commit-results.log.1 generation is folded back in ahead of the live file
+# and the rotate-epoch sidecar is removed.
+VR_RESULT_MAX_LINES=500
+VR_RESULT_FINDING_CAP=50
+
+vr_repo_name() {
+    _tl="$(git rev-parse --show-toplevel 2>/dev/null)"
+    if [ -n "$_tl" ]; then basename "$_tl" 2>/dev/null || printf 'unknown'; else printf 'unknown'; fi
+}
+
+vr_repo_remote() {
+    _ru="$(git config --get remote.origin.url 2>/dev/null)"
+    [ -n "$_ru" ] || { printf 'none'; return 0; }
+    _slug="$(printf '%s' "$_ru" | sed -E 's#^[^/]*//[^/]*/##; s#^[^:]+:##; s#\.git$##' 2>/dev/null)"
+    [ -n "$_slug" ] && printf '%s' "$_slug" || printf 'none'
+}
+
+vr_branch() {
+    # On an unborn HEAD, git prints "HEAD" AND exits nonzero, so a bare
+    # `|| printf unknown` yields a two-line value that splits the telemetry
+    # line. Collapse to a single clean token.
+    _b="$(git rev-parse --abbrev-ref HEAD 2>/dev/null | head -1)"
+    [ -n "$_b" ] || _b="unknown"
+    printf '%s' "$_b"
+}
+
+vr_result_trim() {
+    _rl="${VR_LOG_DIR}/commit-results.log"
+    # One-time migration from the retired 96-hour window mechanism. Fold the
+    # prior generation back in ahead of the live file (oldest first) so pilot
+    # evidence is kept; retire the epoch sidecar. Inert once clean. The
+    # append-create keeps cat's operand list valid when only .1 exists.
+    if [ -f "${_rl}.1" ]; then
+        : >> "$_rl" 2>/dev/null || true
+        _mt="${_rl}.merge.$$"
+        if cat "${_rl}.1" "$_rl" > "$_mt" 2>/dev/null; then
+            mv -f "$_mt" "$_rl" 2>/dev/null && rm -f "${_rl}.1" 2>/dev/null || true
+        fi
+        rm -f "$_mt" 2>/dev/null || true
+    fi
+    rm -f "${VR_LOG_DIR}/commit-results.rotate-epoch" 2>/dev/null || true
+    [ -f "$_rl" ] || return 0
+    # macOS wc pads its count with leading spaces; strip so both the numeric
+    # guard and the comparison behave identically on dash, bash-as-sh, and
+    # the msys sh Git for Windows uses.
+    _lc="$(wc -l < "$_rl" 2>/dev/null | tr -d ' \t')"
+    case "$_lc" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$_lc" -gt "$VR_RESULT_MAX_LINES" ] || return 0
+    # Keep the newest VR_RESULT_MAX_LINES lines, then drop any leading
+    # VR_COMMIT_FINDING lines whose parent decision line fell off the cut so
+    # the file always starts with a whole record. Write to a temp in the same
+    # directory and rename, so a reader never sees a half-written file.
+    _tt="${_rl}.trim.$$"
+    if tail -n "$VR_RESULT_MAX_LINES" "$_rl" 2>/dev/null | sed -n '/VR_COMMIT_RESULT=/,$p' > "$_tt" 2>/dev/null && [ -s "$_tt" ]; then
+        mv -f "$_tt" "$_rl" 2>/dev/null || true
+    fi
+    rm -f "$_tt" 2>/dev/null || true
+}
+
+emit_result() {
+    # $1 = BLOCKED|ALLOWED ; $2 = optional trailing key=value fields
+    {
+        mkdir -p "$VR_LOG_DIR" 2>/dev/null || true
+        vr_result_trim
+        _rl="${VR_LOG_DIR}/commit-results.log"
+        _ts="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; [ -n "$_ts" ] || _ts="unknown"
+        _extra=""
+        [ -n "$2" ] && _extra=" $2"
+        printf '%s VR_COMMIT_RESULT=%s repo=%s remote=%s branch=%s%s\n' \
+            "$_ts" "$1" "$(vr_repo_name)" "$(vr_repo_remote)" "$(vr_branch)" "$_extra" >> "$_rl" 2>/dev/null
+    } 2>/dev/null || true
+    return 0
+}
+
+emit_block() {
+    # $1 = masked scanner findings. Countable header then capped, masked
+    # per-finding lines (file path and rule come from the scanner output).
+    _bf="$1"
+    {
+        _rl="${VR_LOG_DIR}/commit-results.log"
+        _sev="$(sed -nE 's/.*"fail_severity"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$VAULT_RADAR_CONFIG_PATH" 2>/dev/null | head -1)"
+        [ -n "$_sev" ] || _sev="configured"
+        _fl=0
+        [ -n "$_bf" ] && _fl="$(printf '%s\n' "$_bf" | grep -c . 2>/dev/null)"
+        case "$_fl" in ''|*[!0-9]*) _fl=0 ;; esac
+        emit_result "BLOCKED" "finding_lines=${_fl} threshold=${_sev}"
+        if [ -n "$_bf" ]; then
+            _rn="$(vr_repo_name)"
+            _tb="$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; [ -n "$_tb" ] || _tb="unknown"
+            printf '%s\n' "$_bf" | sed -n "1,${VR_RESULT_FINDING_CAP}p" | while IFS= read -r _ln; do
+                printf '%s VR_COMMIT_FINDING repo=%s | %s\n' "$_tb" "$_rn" "$_ln" >> "$_rl" 2>/dev/null
+            done
+            if [ "$_fl" -gt "$VR_RESULT_FINDING_CAP" ]; then
+                printf '%s VR_COMMIT_FINDING repo=%s | ...truncated at %s lines\n' "$_tb" "$_rn" "$VR_RESULT_FINDING_CAP" >> "$_rl" 2>/dev/null
+            fi
+        fi
+    } 2>/dev/null || true
+    return 0
+}
+
+read_state_field() {
+    _sf="${VR_ROOT}/.installed-state"
+    [ -f "$_sf" ] || { printf ''; return 0; }
+    sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$_sf" 2>/dev/null | head -1
+}
+
+print_protected_message() {
+    printf '%s\n' "Your commit was protected by Block Secrets powered by IBM Vault Radar." >&2
+}
+
+resolve_breakglass_mode() {
+    # Mode comes from a root-owned file written at install. Default honor keeps
+    # UAT behavior. privileged makes breakglass tamper-resistant: the hook trusts
+    # only the root-owned sentinel, so a forged user sentinel cannot bypass.
+    VR_BG_MODE="honor"
+    _mf="${VR_ROOT}/breakglass-mode"
+    if [ -f "$_mf" ]; then
+        _m="$(head -1 "$_mf" 2>/dev/null | tr -d " \\n\\r\\t")"
+        if [ "$_m" = "privileged" ]; then VR_BG_MODE="privileged"; fi
+    fi
+}
+
+check_breakglass() {
+    # v1.2.2 Sec. 3.18: self-service breakglass mechanism.
+    # Reads sentinel file containing UTC ISO-8601 timestamp.
+    # If timestamp in future, skip Vault Radar scan; chained hook still runs.
+    BREAKGLASS_ACTIVE=0
+    resolve_breakglass_mode
+    if [ "$VR_BG_MODE" = "privileged" ]; then
+        # Tamper-resistant: trust only the root-owned sentinel. A forged
+        # user-writable sentinel is ignored, so the scan still blocks.
+        sentinel="${VR_ROOT}/state/.breakglass-until"
+    else
+        sentinel="${VR_LOG_DIR}/.breakglass-until"
+    fi
+    [ -f "$sentinel" ] || return 0
+
+    # tr -d strips spaces, newlines, CR, tabs. CRLF line endings can appear
+    # if the sentinel file is touched by cross-platform editors.
+    until_ts="$(head -1 "$sentinel" 2>/dev/null | tr -d ' \n\r\t')"
+    [ -n "$until_ts" ] || { rm -f "$sentinel" 2>/dev/null || true; return 0; }
+
+    now_ts="$(ts)"
+
+    # R-G3 clock-skew / tamper guard: a legitimate window never extends beyond the
+    # fixed 4h cap from now. Compute the max-allowed future timestamp (now + 4h +
+    # 5min skew) and reject a sentinel beyond it (forged value or badly skewed
+    # clock), failing closed. The honor-mode sentinel is user-writable, so this
+    # guard matters. Lexicographic comparison is valid for fixed-width UTC ISO-8601.
+    max_future_ts="$(/bin/date -u -v+4H -v+5M '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || true)"
+    if [ -n "$max_future_ts" ] && [ "$until_ts" \> "$max_future_ts" ]; then
+        rm -f "$sentinel" 2>/dev/null || true
+        log_event "BREAKGLASS-EXPIRED" "VR_EVENT=BREAKGLASS_EXPIRE sentinel beyond max window (until=$until_ts max=$max_future_ts); forged or skewed; resuming normal operation"
+        BREAKGLASS_ACTIVE=0
+        return 0
+    fi
+
+    # Lexicographic comparison works because UTC ISO-8601 in the fixed-width
+    # 'YYYY-MM-DDTHH:MM:SSZ' format is strictly sortable. Every component
+    # is zero-padded; lexical and chronological orders are identical.
+    if [ "$until_ts" \> "$now_ts" ]; then
+        log_event "BREAKGLASS-ACTIVE" "until=$until_ts pwd=$(pwd)"
+        BREAKGLASS_ACTIVE=1
+        return 0
+    fi
+
+    rm -f "$sentinel" 2>/dev/null || true
+    log_event "BREAKGLASS-EXPIRED" "VR_EVENT=BREAKGLASS_EXPIRE previously_until=$until_ts resuming normal operation"
+    BREAKGLASS_ACTIVE=0
+}
+
+probe_chain() {
+    CHAIN_LIST=""
+    CHAIN_SEEN=""
+
+    REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || git rev-parse --git-dir 2>/dev/null)"
+    LOCAL_HOOKS="${GIT_COMMON_DIR}/hooks"
+    SELF_RP="$(realpath "$0" 2>/dev/null || echo "$0")"
+
+    add_chain() {
+        _kind="$1"; _t="$2"
+        [ -n "$_t" ] || return 0
+        case "$_kind" in
+            lefthook|pre-commit-framework)
+                CHAIN_LIST="${CHAIN_LIST}${_kind}|${_t}
+"
+                return 0 ;;
+        esac
+        [ -x "$_t" ] || return 0
+        _rp="$(realpath "$_t" 2>/dev/null || echo "$_t")"
+        if [ "$_rp" = "$SELF_RP" ]; then return 0; fi
+        case "
+${CHAIN_SEEN}" in *"
+${_rp}
+"*) return 0 ;; esac
+        CHAIN_SEEN="${CHAIN_SEEN}${_rp}
+"
+        CHAIN_LIST="${CHAIN_LIST}${_kind}|${_t}
+"
+    }
+
+    if [ -x "${REPO_ROOT}/.husky/pre-commit" ]; then
+        add_chain husky "${REPO_ROOT}/.husky/pre-commit"
+    elif [ -x "${LOCAL_HOOKS}/pre-commit" ]; then
+        if grep -q -E "husky|HUSKY" "${LOCAL_HOOKS}/pre-commit" 2>/dev/null; then
+            add_chain husky-shim "${LOCAL_HOOKS}/pre-commit"
+        elif grep -q "lefthook" "${LOCAL_HOOKS}/pre-commit" 2>/dev/null; then
+            add_chain lefthook-shim "${LOCAL_HOOKS}/pre-commit"
+        else
+            add_chain custom "${LOCAL_HOOKS}/pre-commit"
+        fi
+    elif command -v lefthook >/dev/null 2>&1 && { [ -f "${REPO_ROOT}/lefthook.yml" ] || [ -f "${REPO_ROOT}/.lefthook.yml" ]; }; then
+        add_chain lefthook lefthook
+    elif command -v pre-commit >/dev/null 2>&1 && [ -f "${REPO_ROOT}/.pre-commit-config.yaml" ]; then
+        add_chain pre-commit-framework pre-commit
+    fi
+
+    EFF_HP="$(git config --get core.hooksPath 2>/dev/null || true)"
+    if [ -n "$EFF_HP" ]; then
+        case "$EFF_HP" in
+            /*) _eff="$EFF_HP" ;;
+            *)  _eff="${REPO_ROOT}/${EFF_HP}" ;;
+        esac
+        add_chain effective-hookspath "${_eff}/pre-commit"
+    fi
+
+    _pg="$(read_state_field prior_global_hooksPath)"
+    if [ -n "$_pg" ]; then add_chain prior-global "${_pg}/pre-commit"; fi
+    _ps="$(read_state_field prior_system_hooksPath)"
+    if [ -n "$_ps" ]; then add_chain prior-system "${_ps}/pre-commit"; fi
+
+    return 0
+}
+
+run_chained_hook() {
+    [ -n "$CHAIN_LIST" ] || return 0
+
+    _oldifs="$IFS"
+    IFS='
+'
+    set -f
+    for _entry in $CHAIN_LIST; do
+        IFS="$_oldifs"; set +f
+        [ -n "$_entry" ] || { IFS='
+'; set -f; continue; }
+        _kind="${_entry%%|*}"
+        _target="${_entry#*|}"
+        log_event "CHAIN" "kind=${_kind} target=${_target}"
+        set +e
+        case "$_kind" in
+            lefthook)             lefthook run pre-commit ;;
+            pre-commit-framework) pre-commit run ;;
+            *)                    "$_target" ;;
+        esac
+        _rc=$?
+        set -e
+        if [ "$_rc" -ne 0 ]; then
+            log_event "CHAIN-BLOCK" "${_kind} exited ${_rc}"
+            emit_result "BLOCKED" "reason=chained_hook rc=${_rc}"
+            printf 'Block Secrets: a pre-existing repository hook (%s) blocked this commit (exit %s). This is not a secret finding.\n' "$_kind" "$_rc" >&2
+            VR_BANNER_SHOWN=1
+            IFS="$_oldifs"; set +f
+            exit "$_rc"
+        fi
+        IFS='
+'
+        set -f
+    done
+    IFS="$_oldifs"
+    set +f
+}
+
+# Return 0 when the scanner-reported path is a CISO-managed false-positive surface.
+is_managed_fp_path() {
+    case "$1" in
+        .secrets.baseline|*/.secrets.baseline) return 0 ;;
+        .bob/rules/*|*/.bob/rules/*) return 0 ;;
+    esac
+    return 1
+}
+
+# Drop findings in managed false-positive paths; set _vr_fp_suppressed, _vr_block_remain,
+# and _vr_filter_out for the remaining blocking lines.
+suppress_managed_fp_findings() {
+    _vr_fp_suppressed=0
+    _vr_block_remain=0
+    _vr_filter_out=""
+    _vr_unrecognized=0
+    _vr_summary=""
+    _vr_fp_tmp="${VR_LOG_DIR}/.scan-fp-filter.$$.tmp"
+    printf '%s\n' "$1" > "$_vr_fp_tmp" 2>/dev/null || return 1
+    while IFS= read -r _vr_line || [ -n "$_vr_line" ]; do
+        case "$_vr_line" in
+            error:*|notice:*|warning:*|critical:*)
+                _vr_path="$(printf '%s' "$_vr_line" | sed -nE 's/^(error|notice|warning|critical):[[:space:]]+([^:]+):[0-9]+:[0-9]+:.*/\2/p')"
+                if [ -n "$_vr_path" ] && is_managed_fp_path "$_vr_path"; then
+                    _vr_fp_suppressed=$((_vr_fp_suppressed + 1))
+                    continue
+                fi
+                if [ -z "$_vr_path" ]; then
+                    _vr_unrecognized=$((_vr_unrecognized + 1))
+                    continue
+                fi
+                _vr_block_remain=$((_vr_block_remain + 1))
+                _vr_filter_out="${_vr_filter_out}${_vr_line}
+"
+                ;;
+            found\ risks\ with\ severity*)
+                _vr_summary="${_vr_line}"
+                ;;
+            "")
+                ;;
+            *)
+                _vr_unrecognized=$((_vr_unrecognized + 1))
+                ;;
+        esac
+    done < "$_vr_fp_tmp"
+    rm -f "$_vr_fp_tmp" 2>/dev/null || true
+}
+
+# ---- scanner infrastructure error classification (field issue #15) ----
+# A non-zero scanner exit does not always mean findings. Classify the output
+# before any block decision so an infrastructure fault never prints the
+# "potential secret" banner. Findings are present when at least one prefixed
+# finding line or a risk summary line exists; classification never fails
+# open when the scanner asserted risks in any form.
+scan_output_has_findings() {
+    printf '%s' "$1" | grep -Eq '^(error|notice|warning|critical):[[:space:]]' && return 0
+    printf '%s' "$1" | grep -Eq 'found risks with severity' && return 0
+    return 1
+}
+
+# Return 0 only for the user-home scan-config permission class: the scanner
+# could not read $HOME/.hashicorp/vault-radar (typically root-owned after an
+# elevated scanner run created it). This is the ONLY fail-open trigger for a
+# scan failure; keep it this narrow.
+scan_output_is_user_config_fault() {
+    printf '%s' "$1" | grep -Eqi 'failed to get (default )?scan config|unable to open custom patterns' && return 0
+    if printf '%s' "$1" | grep -Fq '.hashicorp/vault-radar' \
+       && printf '%s' "$1" | grep -Eqi 'permission denied|operation not permitted'; then
+        return 0
+    fi
+    return 1
+}
+
+print_scan_deferred_banner() {
+    {
+        printf '\n'
+        printf '==================================================================\n'
+        printf ' Block Secrets: SCAN DEFERRED (scanner configuration problem)\n'
+        printf ' Powered by IBM Vault Radar\n'
+        printf '==================================================================\n'
+        printf '\n'
+        printf 'The secret scanner on this device could not read your user scan\n'
+        printf 'configuration, so this commit was allowed WITHOUT a local scan.\n'
+        printf 'This is a tooling problem on this device, not a finding. The\n'
+        printf 'event was logged for remediation. Server-side checks still apply.\n'
+        printf '\n'
+        printf 'Likely cause: %s/.hashicorp is owned by root after a prior\n' "$HOME"
+        printf 'elevated vault-radar run. Fix it by pasting these three commands\n'
+        printf 'into your terminal:\n'
+        printf '\n'
+        printf '    ls -la "$HOME/.hashicorp" "$HOME/.hashicorp/vault-radar"\n'
+        printf '    sudo chown -R "$(id -un):$(id -gn)" "$HOME/.hashicorp"\n'
+        printf '    chmod -R u+rwX "$HOME/.hashicorp"\n'
+        printf '\n'
+        printf 'Then commit again to restore normal scanning.\n'
+        printf '\n'
+        printf 'Scanner message:\n'
+        printf '%s\n' "$1" | sed -n '1,10p' | sed 's/^/    /'
+        printf '\n'
+        printf 'Questions? Reach out in %s and the team is happy to help.\n' "${VR_SUPPORT_CHANNEL}"
+        printf '\n'
+    } >&2
+}
+
+# Sibling of handle_block for infrastructure faults: the scanner failed to
+# run and reported zero findings. Fail closed, but never with the "potential
+# secret" banner; the corrected banner keeps support triage and developer
+# trust intact (field issue #15).
+handle_infra_block() {
+    _fault="$1"
+    {
+        printf '\n'
+        printf '==================================================================\n'
+        printf ' Block Secrets: COMMIT BLOCKED (scanner could not run)\n'
+        printf ' Powered by IBM Vault Radar\n'
+        printf '==================================================================\n'
+        printf '\n'
+        printf 'No secret finding was reported. The secret scanner itself failed\n'
+        printf 'to run on this device, so the commit was stopped as a safety\n'
+        printf 'measure. This is a tooling problem, not a finding.\n'
+        printf '\n'
+        printf 'Scanner message:\n'
+        printf '%s\n' "$_fault" | sed -n '1,20p' | sed 's/^/    /'
+        printf '\n'
+        printf 'What to do now:\n'
+        printf '  1. Report this through the support channels below and include\n'
+        printf '     the scanner message above; remediation is usually a converge\n'
+        printf '     re-run or a license refresh.\n'
+        printf '  2. For a sanctioned emergency only, breakglass grants a single\n'
+        printf '     time-boxed bypass. Open Self Service and run the\n'
+        printf '     Block Secrets Breakglass item.\n'
+        printf '\n'
+        printf 'Questions? Reach out in %s and the team is happy to help.\n' "${VR_SUPPORT_CHANNEL}"
+        printf '\n'
+    } >&2
+    VR_BANNER_SHOWN=1
+    emit_block "$_fault"
+    exit 1
+}
+
+run_vault_radar_scan() {
+    SCAN_CLEAN=0
+    # No-work-tree guard. A non-standard --git-dir, an exported GIT_DIR with no
+    # work tree, or a bare repository makes the scanner exit non-zero and, without
+    # this guard, blocks every commit. Resolve git's authoritative view of the
+    # repository before scanning. Allow the commit only when git runs cleanly and
+    # reports there is genuinely no work tree to scan. If git cannot produce a
+    # definitive answer (missing or broken git) this guard does nothing and the
+    # normal path runs and fails closed on a real scan error; this is deliberately
+    # not a blanket allow-on-error.
+    _vr_bare="$(git rev-parse --is-bare-repository 2>/dev/null)" && _vr_bare_rc=0 || _vr_bare_rc=$?
+    _vr_top="$(git rev-parse --show-toplevel 2>/dev/null)" && _vr_top_rc=0 || _vr_top_rc=$?
+    if [ "$_vr_bare_rc" -eq 0 ] && { [ "$_vr_bare" = "true" ] || [ "$_vr_top_rc" -ne 0 ] || [ -z "$_vr_top" ]; }; then
+        log_event "SCAN-SKIPPED" "no work tree to scan (bare or detached git-dir); commit allowed"
+        SCAN_CLEAN=1
+        return 0
+    fi
+    if [ ! -x "$VR_BIN" ]; then
+        log_event "SCANNER-ABSENT" "vault-radar binary missing at ${VR_BIN}; commit allowed unscanned; reported for remediation"
+        printf '%s\n' "Block Secrets notice: the secret scanner is unavailable on this device, so this commit was allowed without a local scan. This has been reported for remediation. Once the scanner is available, re-run it on this repository and rotate any secret that may have been committed." >&2
+        printf 'Questions? Reach out in %s and the team is happy to help.\n' "${VR_SUPPORT_CHANNEL}" >&2
+        return 0
+    fi
+
+    if [ ! -r "$VAULT_RADAR_CONFIG_PATH" ]; then
+        # Tracker A02: the scanner without a fail_severity config reports
+        # findings but does not block. Absence here is converge drift or an
+        # administrative action (the file is root-owned), not developer
+        # tamper, so warn and continue; failing closed would brick commits
+        # fleet-wide on a packaging fault. Converge rewrites the file
+        # unconditionally on its next run.
+        log_event "CONFIG-MISSING" "managed config unreadable at ${VAULT_RADAR_CONFIG_PATH}; scan runs without a blocking threshold; converge repairs"
+        printf '%s\n' "Block Secrets notice: the managed scan policy file is missing on this device, so this commit is not being enforced locally. This was reported for remediation." >&2
+        printf 'Questions? Reach out in %s and the team is happy to help.\n' "${VR_SUPPORT_CHANNEL}" >&2
+    fi
+
+    # Repo-local config detection. The Vault Radar binary may auto-discover a
+    # repo-local .hashicorp/vault-radar/config.json and prefer it over the managed
+    # config. A repo that raises fail_severity above the managed floor (medium) or
+    # omits it (the documented default is no enforcement) weakens the local gate.
+    # Default posture is warn-and-continue: the managed scan still runs and the
+    # repo-local config is only a warning under this posture. Set
+    # VR_BLOCK_ON_WEAK_REPO_CONFIG=1 to block locally instead (a developer can
+    # still bypass a client hook with --no-verify).
+    _vr_root="${REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+    _vr_rl="${_vr_root}/.hashicorp/vault-radar/config.json"
+    if [ -f "$_vr_rl" ]; then
+        _vr_rlsev="$(sed -nE 's/.*"fail_severity"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$_vr_rl" 2>/dev/null | head -1)"
+        case "$_vr_rlsev" in
+            info|low|medium) _vr_weak=0 ;;
+            *)               _vr_weak=1 ;;
+        esac
+        if [ "$_vr_weak" -eq 1 ]; then
+            log_event "CONFIG-WARN" "repo-local config fail_severity=${_vr_rlsev:-unset} weaker than managed floor medium"
+            # Dial first, then log the outcome the dial actually produces: the
+            # audit line must never claim warn-only on a commit the dial then
+            # blocks. 2.0 default stays warn-only (dial 0); only the log order
+            # and truthfulness change here (fast-follow of the 3.0 obs2 fix).
+            _vr_block_dial=0
+            _vr_pol="${VR_ROOT}/ciso-policy.json"
+            if [ -f "$_vr_pol" ] && grep -Eq '"block_on_weak_repo_config"[[:space:]]*:[[:space:]]*true' "$_vr_pol" 2>/dev/null; then
+                _vr_block_dial=1
+            elif [ "${VR_BLOCK_ON_WEAK_REPO_CONFIG:-0}" = "1" ]; then
+                _vr_block_dial=1
+            fi
+            if [ "$_vr_block_dial" = "1" ]; then
+                log_event "CONFIG-WEAK-AUDIT" "repo-local fail_severity=${_vr_rlsev:-unset} at ${_vr_rl}; managed floor medium; action=block; remove repo-local config to restore managed policy"
+            else
+                log_event "CONFIG-WEAK-AUDIT" "repo-local fail_severity=${_vr_rlsev:-unset} at ${_vr_rl}; managed floor medium; action=warn-only; commit allowed; remove repo-local config to restore managed policy"
+            fi
+            printf '%s\n' "Block Secrets: a repo-local Vault Radar config sets fail_severity=${_vr_rlsev:-unset}, weaker than the managed policy (medium). To restore the managed policy, remove the repo-local config: ${_vr_rl}" >&2
+            printf 'Questions? Reach out in %s and the team is happy to help.\n' "${VR_SUPPORT_CHANNEL}" >&2
+            if [ "$_vr_block_dial" = "1" ]; then
+                handle_block "repo-local config weakens managed secret policy (fail_severity=${_vr_rlsev:-unset})"
+            fi
+        else
+            log_event "CONFIG-INFO" "repo-local config present fail_severity=${_vr_rlsev:-unset}; not weaker than floor"
+        fi
+    fi
+    # Non-standard git-dir support (dotfiles / custom --git-dir layouts). The
+    # scanner opens the repo from the working directory and looks for a literal
+    # .git there; it ignores GIT_DIR. When git confirms this IS a work tree but
+    # no .git exists at the toplevel, drop a temporary gitdir-pointer so the
+    # scan can open the repo, then remove it. This changes only repository
+    # DISCOVERY: a real secret still blocks and a real scan error still fails
+    # closed. The block is gated so it stays inert for every standard repo, and
+    # a trap plus an explicit post-scan removal guarantee cleanup on block or
+    # interrupt.
+    _vr_made_gitlink=0
+    if [ "${VR_IN_WORKTREE:-false}" = "true" ]; then
+        _vr_gl_top="${VR_REPO_TOP:-}"
+        _vr_gl_gcd="${VR_GIT_COMMON_DIR:-}"
+        if [ -n "$_vr_gl_top" ] && [ -n "$_vr_gl_gcd" ] && [ "$_vr_gl_top" != "$HOME" ] && [ "$_vr_gl_top" != "/" ] && [ ! -e "$_vr_gl_top/.git" ]; then
+            if printf 'gitdir: %s\n' "$_vr_gl_gcd" > "$_vr_gl_top/.git" 2>/dev/null; then
+                _vr_made_gitlink=1
+                printf '%s\ngitdir: %s\n' "$_vr_gl_top/.git" "$_vr_gl_gcd" > "${VR_LOG_DIR}/.gitlink-active" 2>/dev/null || true
+                trap 'vr_unexpected_exit; if [ "${_vr_made_gitlink:-0}" = "1" ]; then rm -f "$_vr_gl_top/.git" 2>/dev/null || true; fi' EXIT INT TERM HUP
+            fi
+        fi
+    fi
+    set +e
+    _scan_out="$("$VR_BIN" scan git pre-commit --offline --skip-activeness 2>&1)"
+    _rc=$?
+    set -e
+    if [ "$_rc" -ne 0 ] && printf '%s' "$_scan_out" | grep -Eqi 'unknown flag|flag provided but not defined|unknown shorthand'; then
+        log_event "WARN" "vault-radar rejected --skip-activeness; retrying offline-only"
+        set +e
+        _scan_out="$("$VR_BIN" scan git pre-commit --offline 2>&1)"
+        _rc=$?
+        set -e
+    fi
+    printf '%s\n' "$_scan_out" >> "$VR_LOG" 2>/dev/null || true
+
+    if [ "$_rc" -ne 0 ]; then
+        # #11 non-standard git-dir fallback (home/root layout the gitlink guard skipped).
+        # git (authoritative) already confirmed we are inside a work tree; if we did NOT
+        # lay down a gitlink (work-tree top is $HOME or /, or the write failed), there is
+        # no .git at that top, AND the scanner failed specifically because it could not
+        # DISCOVER the non-standard repo, then this is the dotfiles layout, not a finding.
+        # Allow, audit, and instruct the one-time self-fix, the same posture as the
+        # bare/detached SCAN-SKIPPED guard above. A real finding emits a findings message
+        # (not a discovery error) so it still fails closed here, as does any other
+        # non-discovery scan error.
+        if [ "${_vr_made_gitlink:-0}" != "1" ] \
+           && [ "${VR_IN_WORKTREE:-false}" = "true" ] \
+           && [ -n "${VR_REPO_TOP:-}" ] && [ ! -e "${VR_REPO_TOP}/.git" ] \
+           && printf '%s' "$_scan_out" | grep -Eqi 'not (a|in a) git (directory|repository)|could not find repository|cannot open repository'; then
+            log_event "SCAN-SKIPPED" "non-standard git-dir at ${VR_REPO_TOP} (home/root) not auto-fixable here; commit allowed unscanned; advise git init --separate-git-dir"
+            printf '%s\n' "Block Secrets: this repository uses a non-standard git directory (no .git at ${VR_REPO_TOP}) and the local scanner cannot open it here. The commit is allowed without a local scan. To enable local scanning, run once in this work tree:  git init --separate-git-dir \"<your-existing-git-dir>\" \"${VR_REPO_TOP}\"" >&2
+            printf 'Questions? Reach out in %s and the team is happy to help.\n' "${VR_SUPPORT_CHANNEL}" >&2
+            SCAN_CLEAN=1
+            return 0
+        fi
+        # Field issue #15: classify the failure before any block decision.
+        # Zero finding lines means the scanner did not assert a risk; route
+        # to the infrastructure paths instead of the secret banner.
+        if ! scan_output_has_findings "$_scan_out"; then
+            if scan_output_is_user_config_fault "$_scan_out"; then
+                # Fail-open, narrowly: a device tooling fault must not brick
+                # every commit. Logged for remediation; the server-side gate
+                # still applies. Same posture as SCANNER-ABSENT.
+                log_event "SCANNER-CONFIG" "user scan config unreadable under HOME/.hashicorp/vault-radar; commit allowed unscanned; self-fix guidance shown"
+                print_scan_deferred_banner "$_scan_out"
+                VR_FP_ALLOW_RESULT="reason=scanner_config_unavailable"
+                if [ "${_vr_made_gitlink:-0}" = "1" ]; then
+                    rm -f "$_vr_gl_top/.git"
+                    rm -f "${VR_LOG_DIR}/.gitlink-active" 2>/dev/null || true
+                    _vr_made_gitlink=0
+                fi
+                SCAN_CLEAN=1
+                return 0
+            fi
+            log_event "SCANNER-CONFIG-BLOCK" "scanner infrastructure fault with zero findings; commit stopped"
+            handle_infra_block "$_scan_out"
+        fi
+        set +e
+        suppress_managed_fp_findings "$_scan_out"
+        _vr_fp_rc=$?
+        set -e
+        if [ "$_vr_fp_rc" -ne 0 ]; then
+            # Filter could not run (for example the temp write failed). Fail
+            # closed on the original scanner output rather than exiting with no
+            # message.
+            log_event "FP-FILTER-ERROR" "suppress_managed_fp_findings rc=${_vr_fp_rc}; blocking on original scanner output"
+            handle_block "$_scan_out"
+        fi
+        if [ "$_vr_unrecognized" -eq 0 ] && [ "$_vr_fp_suppressed" -gt 0 ] && [ "$_vr_block_remain" -eq 0 ]; then
+            log_event "FP-SUPPRESS" "suppressed ${_vr_fp_suppressed} managed false-positive finding(s) (.secrets.baseline or .bob/rules/*)"
+            if [ -f "${_vr_root}/.secrets.baseline" ]; then
+                log_event "DS-BASELINE" "detect-secrets baseline present; findings suppressed as managed false-positive class"
+            fi
+            # Record the reason in the shipped commit-results telemetry so an
+            # FP-suppressed allow is distinguishable from a clean scan.
+            VR_FP_ALLOW_RESULT="reason=fp_suppress count=${_vr_fp_suppressed}"
+            if [ "${_vr_made_gitlink:-0}" = "1" ]; then
+                rm -f "$_vr_gl_top/.git"
+                rm -f "${VR_LOG_DIR}/.gitlink-active" 2>/dev/null || true
+                _vr_made_gitlink=0
+            fi
+            SCAN_CLEAN=1
+            return 0
+        fi
+        if [ "$_vr_unrecognized" -eq 0 ] && [ "$_vr_fp_suppressed" -gt 0 ] && [ "$_vr_block_remain" -gt 0 ]; then
+            handle_block "${_vr_filter_out}${_vr_summary}"
+        else
+            handle_block "$_scan_out"
+        fi
+    fi
+    if [ "${_vr_made_gitlink:-0}" = "1" ]; then
+        rm -f "$_vr_gl_top/.git"
+        rm -f "${VR_LOG_DIR}/.gitlink-active" 2>/dev/null || true
+        _vr_made_gitlink=0
+    fi
+    SCAN_CLEAN=1
+}
+
+handle_block() {
+    _findings="$1"
+    log_event "BLOCK" "vault-radar detected potential secret in $(pwd)"
+    {
+        printf '\n'
+        printf '==================================================================\n'
+        printf ' Block Secrets: COMMIT BLOCKED\n'
+        printf ' Powered by IBM Vault Radar\n'
+        printf '==================================================================\n'
+        printf '\n'
+        printf 'A potential secret was detected in your staged changes. The commit\n'
+        printf 'was stopped before it could reach the remote repository.\n'
+        printf '\n'
+        printf 'Location: %s\n' "$(pwd)"
+        printf '\n'
+        _eff_rl="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.hashicorp/vault-radar/config.json"
+        if [ -f "$_eff_rl" ]; then
+            _eff_sev="$(sed -nE 's/.*"fail_severity"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$_eff_rl" 2>/dev/null | head -1)"
+            printf 'Effective policy: managed floor is medium. A repo-local config is present (fail_severity=%s). Remove it to restore the managed floor for local scans.\n' "${_eff_sev:-unset}"
+        else
+            printf 'Effective policy: medium (managed).\n'
+        fi
+        printf '\n'
+        if [ -n "$_findings" ]; then
+            printf 'Scanner findings (secret values are masked by Vault Radar):\n'
+            printf '%s\n' "$_findings" | sed -n '1,40p' | sed 's/^/    /'
+            printf '\n'
+        fi
+        printf 'What to do now:\n'
+        printf '  1. Remove the secret from the staged change. Use a secret manager\n'
+        printf '     or an environment variable instead of committing the value.\n'
+        printf '  2. Re-stage and commit again. The scan will re-run automatically.\n'
+        printf '  3. If this is a genuine test fixture or example, "breakglass" grants\n'
+        printf '     a single time-boxed bypass. Refer to instructions: ibm.biz/breakglass\n'
+        printf '\n'
+        printf 'Questions? Reach out in %s and the team is happy to help.\n' "${VR_SUPPORT_CHANNEL}"
+        printf '\n'
+        printf 'This control is Block Secrets, powered by IBM Vault Radar.\n'
+        printf '\n'
+    } >&2
+    VR_BANNER_SHOWN=1
+    emit_block "$_findings"
+    exit 1
+}
+
+vr_git_caps() {
+    # One-shot git topology probe, cached for this hook invocation so the gitlink
+    # path reads one consistent snapshot instead of re-invoking git rev-parse.
+    if [ -n "${VR_CAPS_DONE:-}" ]; then return 0; fi
+    VR_CAPS_DONE=1
+    VR_IN_WORKTREE="$(git rev-parse --is-inside-work-tree 2>/dev/null || echo false)"
+    VR_REPO_TOP="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+    VR_GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+    case "$VR_GIT_COMMON_DIR" in
+        /*) : ;;
+        ?*) VR_GIT_COMMON_DIR="$(cd "$VR_GIT_COMMON_DIR" 2>/dev/null && pwd)" ;;
+    esac
+}
+
+selfheal_stale_gitlink() {
+    # Recover from a prior hard stop (SIGKILL or power loss) that left our temporary
+    # .git pointer behind; a trap cannot fire on SIGKILL. We remove ONLY a file we
+    # recorded as ours whose first line still byte-matches the exact gitdir pointer
+    # we wrote, so a legitimate gitlink (submodule or worktree) is never touched.
+    _bc="${VR_LOG_DIR}/.gitlink-active"
+    [ -f "$_bc" ] || return 0
+    _stale_path="$(sed -n '1p' "$_bc" 2>/dev/null)"
+    _stale_line="$(sed -n '2p' "$_bc" 2>/dev/null)"
+    if [ -n "$_stale_path" ] && [ -f "$_stale_path" ] && [ "$(head -1 "$_stale_path" 2>/dev/null)" = "$_stale_line" ]; then
+        rm -f "$_stale_path" 2>/dev/null || true
+        log_event "GITLINK-SELFHEAL" "removed a stale temp gitlink from a prior hard stop: $_stale_path"
+    fi
+    rm -f "$_bc" 2>/dev/null || true
+}
+
+# --- main ---
+setup_log
+selfheal_stale_gitlink
+rotate_log
+check_breakglass
+log_event "INVOKE" "$(pwd) user=${USER:-unknown} breakglass=${BREAKGLASS_ACTIVE}"
+vr_git_caps
+if [ "${VR_CONFIG_HOOK_MODE:-0}" != "1" ]; then
+    # core.hooksPath (Git < 2.54) path: this managed hook is the only hook git
+    # invokes, so it must chain any displaced user hook itself.
+    probe_chain
+    run_chained_hook
+fi
+# Git 2.54+ config-hook path (VR_CONFIG_HOOK_MODE=1): git runs the user's
+# directory hook last on its own, so we run the managed scan only.
+if [ "${BREAKGLASS_ACTIVE}" -eq 0 ]; then
+    run_vault_radar_scan
+    if [ "${SCAN_CLEAN:-0}" -eq 1 ]; then
+        print_protected_message
+    fi
+else
+    log_event "SCAN-SKIPPED" "breakglass active; chained hook ran normally"
+    printf '%s\n' "Block Secrets: scan skipped (breakglass active). Bypass is logged." >&2
+    printf 'Questions? Reach out in %s and the team is happy to help.\n' "${VR_SUPPORT_CHANNEL}" >&2
+fi
+log_event "PASS" "$(pwd) breakglass=${BREAKGLASS_ACTIVE}"
+if [ "${BREAKGLASS_ACTIVE}" -eq 1 ]; then
+    emit_result "ALLOWED" "reason=breakglass"
+elif [ "${SCAN_CLEAN:-0}" -eq 1 ]; then
+    emit_result "ALLOWED" "${VR_FP_ALLOW_RESULT:-}"
+else
+    emit_result "ALLOWED" "reason=scanner_unavailable"
+fi
+exit 0
+
+# --- BEGIN BEADS INTEGRATION v1.2.2 ---
+# This section is managed by beads. Do not remove these markers.
+if command -v bd >/dev/null 2>&1; then
+  export BD_GIT_HOOK=1
+  _bd_timeout=${BEADS_HOOK_TIMEOUT:-300}
+  _bd_used_perl=0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$_bd_timeout" bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$_bd_timeout" bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  elif command -v perl >/dev/null 2>&1; then
+    _bd_used_perl=1
+    perl -e 'alarm shift; exec @ARGV' "$_bd_timeout" bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  else
+    echo >&2 "beads: hook 'pre-commit' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT"
+    bd hooks run pre-commit "$@"
+    _bd_exit=$?
+  fi
+  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then
+    echo >&2 "beads: hook 'pre-commit' timed out after ${_bd_timeout}s — continuing without beads"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -eq 3 ]; then
+    echo >&2 "beads: database not initialized — skipping hook 'pre-commit'"
+    _bd_exit=0
+  fi
+  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi
+fi
+# --- END BEADS INTEGRATION v1.2.2 ---

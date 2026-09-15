@@ -33,7 +33,8 @@ def fetchmany_with_retry(cursor, limit, attempts=4, interval=5):
             results = cursor.fetchmany(limit)
         else:
             for _ in range(attempts):
-                results += cursor.fetchmany(limit)
+                remaining = limit - len(results)
+                results += cursor.fetchmany(remaining)
                 if len(results) >= limit or not cursor.may_have_results:
                     break
                 time.sleep(interval)

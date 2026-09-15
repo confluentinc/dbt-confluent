@@ -1,0 +1,73 @@
+{
+  "skill_name": "confluent-python-standards",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I'm starting a new dbt adapter project called dbt-confluent-sink for Confluent's new sink connector. Can you scaffold the project structure and generate pyproject.toml, pre-commit config, and a GitHub Actions CI workflow?",
+      "expected_output": "A complete project skeleton with pyproject.toml (hatchling build backend, ruff + mypy + pytest + towncrier config), .pre-commit-config.yaml (ruff-check, ruff-format, gitleaks, mypy), .github/workflows/ci.yml (separate lint/typecheck/unit-tests/functional-tests jobs), src/dbt_confluent_sink/ with __init__.py and py.typed, and tests/unit/ + tests/functional/ directories.",
+      "files": [],
+      "assertions": [
+        "pyproject.toml uses hatchling as build-backend",
+        "pyproject.toml [tool.ruff.lint].select includes 'E', 'F', 'I', 'UP', 'B'",
+        "pyproject.toml includes [tool.mypy] with strict = true or ignore_missing_imports = true",
+        "pyproject.toml includes [tool.towncrier] with directory = 'changes'",
+        ".pre-commit-config.yaml includes ruff-pre-commit repo with ruff-check and ruff-format hooks",
+        ".pre-commit-config.yaml includes gitleaks hook for secret scanning",
+        ".pre-commit-config.yaml includes a local mypy hook",
+        ".github/workflows/ci.yml defines separate jobs named lint, typecheck, unit-tests",
+        ".github/workflows/ci.yml pins third-party Actions to commit SHAs (not floating tags like v4)",
+        "src/dbt_confluent_sink/py.typed marker file is included",
+        "tests/unit/ and tests/functional/ directories are created",
+        "license = { text = 'Apache-2.0' } appears in pyproject.toml",
+        "requires-python includes lower bound >= 3.10"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Audit my dbt-confluent project against Confluent Python standards. The project root is the current workspace. Tell me what's compliant, what's partial, and what's missing.",
+      "expected_output": "A gap report with three sections (Compliant / Partial / Missing) covering pyproject.toml, uv.lock, ruff config, mypy config, test directory structure, pre-commit, CI workflow, supply chain scanning, and changelog mechanism.",
+      "files": [],
+      "assertions": [
+        "Output contains three distinct sections: compliant (or ✅), partial (or ⚠️), and missing (or ❌)",
+        "Report checks for presence of uv.lock in version control",
+        "Report checks ruff [tool.ruff.lint].select for required rule groups E, F, I, UP, B",
+        "Report checks for tests/unit/ and tests/functional/ directory split",
+        "Report checks for .pre-commit-config.yaml with ruff and gitleaks",
+        "Report checks CI workflow for pip-audit or OSV-Scanner",
+        "Report checks GitHub Actions for SHA-pinned third-party actions (NOT floating tags)",
+        "Report states a coverage floor of 80-90% on src/ (e.g. --cov-fail-under=80 or pytest coverage config)",
+        "Report checks for a single changelog mechanism (NOT both towncrier and conventional commits)"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Help me migrate my existing Confluent Python SDK project to modern standards. I currently have requirements.txt, setup.py, flake8, and no type checking. Where do I start and what should go in the first PR?",
+      "expected_output": "A sequenced migration plan starting with step 1 (add pyproject.toml + uv.lock, delete requirements.txt and setup.py in the same PR), then step 2 (ruff in a dedicated PR), etc. Shows exact content for the first PR's pyproject.toml changes.",
+      "files": [],
+      "assertions": [
+        "Response identifies step 1 as: add pyproject.toml + uv.lock AND delete requirements.txt/setup.py in the same PR",
+        "Response explicitly warns NOT to leave setup.py temporarily alongside pyproject.toml",
+        "Response includes step 2 as: add ruff in a dedicated PR separate from step 1",
+        "Response includes step 3 as: wire pre-commit before or alongside CI integration",
+        "Response includes type checker migration with permissive mode first (ignore_missing_imports or disallow_untyped_defs = false) before strict",
+        "Response includes test split into unit/ and functional/ as a distinct step",
+        "Response does NOT suggest adding ruff and type checking and CI all in the same PR (steps must be sequential)"
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "What's the correct ruff configuration for a new Confluent dbt adapter? I want to enforce docstrings with Google style and security checks, but not break on existing long lines.",
+      "expected_output": "A pyproject.toml [tool.ruff] + [tool.ruff.lint] section with line-length = 99, target-version = py310, select including D and S rule groups, pydocstyle convention = google, E501 in the ignore list, and D203/D213 in the ignore list to resolve convention conflicts.",
+      "files": [],
+      "assertions": [
+        "[tool.ruff.lint].select includes 'D' for docstring enforcement",
+        "[tool.ruff.lint].select includes 'S' for security/bandit checks",
+        "[tool.ruff.lint.pydocstyle] convention = 'google'",
+        "[tool.ruff.lint].ignore includes 'D203' and 'D213' to resolve convention conflict",
+        "[tool.ruff.lint].ignore includes 'E501' to suppress line-too-long on existing code",
+        "[tool.ruff] line-length = 99 (matching dbt-confluent convention)",
+        "Answer explains WHY D203 and D213 must both be in ignore (they conflict with each other)"
+      ]
+    }
+  ]
+}

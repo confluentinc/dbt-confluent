@@ -1,0 +1,3 @@
+[submodule ".bob/custom_plugins/superpowers"]
+	path = .bob/custom_plugins/superpowers
+	url = https://github.ibm.com/ibm-data-observability/bob-superpowers.git
