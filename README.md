@@ -44,9 +44,20 @@ dbt init my_project
 
 Select `confluent` as the adapter and fill in the prompts for your Confluent Cloud credentials (API key, compute pool, environment, etc.).
 
-You can authenticate with either a **Global** Confluent Cloud API key (`global_api_key` / `global_api_secret`, which works against every route) or a **Flink-region** key (`flink_api_key` / `flink_api_secret`). The `compute_pool_id` is optional: omit it to run statements in the environment+region [default compute pool](https://docs.confluent.io/cloud/current/flink/concepts/compute-pools.html#default-compute-pools). This profile-level pool is the default for every model; individual models can override it with `config(compute_pool_id='...')` — see [Materializations](MATERIALIZATIONS.md#compute-pool).
+Authenticate with a **Flink-region** key (`flink_api_key` / `flink_api_secret`) — it is required, and it is what every Flink SQL statement uses. A second key (`global_api_key` / `global_api_secret`) is additionally accepted but is used *only* for Tableflow's control-plane routes; it never takes over Flink SQL auth. The `compute_pool_id` is optional: omit it to run statements in the environment+region [default compute pool](https://docs.confluent.io/cloud/current/flink/concepts/compute-pools.html#default-compute-pools). This profile-level pool is the default for every model; individual models can override it with `config(compute_pool_id='...')` — see [Materializations](MATERIALIZATIONS.md#compute-pool).
 
-[Tableflow](MATERIALIZATIONS.md#tableflow) requires a Global key — it resolves your Kafka cluster id via a route a Flink-region key can't reach.
+[Tableflow](MATERIALIZATIONS.md#tableflow) additionally requires a Global key in `global_api_key` / `global_api_secret`. API key scopes are not interchangeable — each route is served by a backend that accepts only its own key type:
+
+| `confluent api-key create --resource` | Flink SQL | Tableflow | cluster-id lookup (CMK) |
+| --- | --- | --- | --- |
+| `flink` (with `--cloud`/`--region`) | ✅ | ❌ | ❌ |
+| `tableflow` | ❌ | ✅ | ❌ |
+| `cloud` | ❌ | ❌ | ✅ |
+| `global` | ✅ | ✅ | ✅ |
+
+So use `--resource global` for `global_api_key` — Tableflow also needs your Kafka cluster id, which is looked up from `schema` (the cluster's display name) through CMK, and a `--resource tableflow` key can't reach that route. A `--resource cloud` key is **not** accepted by Tableflow — it returns 401, which looks like a bad credential but is a scope mismatch.
+
+`./scripts/bootstrap.sh` provisions all of this and writes a ready-to-use `test.env`.
 
 ### Concept mapping
 
@@ -182,10 +193,11 @@ export CONFLUENT_FLINK_API_SECRET=xxx
 # The test is skipped when this is unset or equal to CONFLUENT_COMPUTE_POOL_ID.
 export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 
-# Optional: a Global API key, used only by the Tableflow functional tests
-# (Tableflow's control-plane routes require one regardless of the Flink-region
-# pair above -- see MATERIALIZATIONS.md#tableflow). Those tests are skipped
-# when either of these is unset.
+# Optional: a `--resource global` API key, used only by the Tableflow functional
+# tests -- Tableflow's control-plane routes reject the Flink-region pair above,
+# and the Kafka cluster-id lookup they need rejects `--resource tableflow` and
+# `--resource cloud` keys. See MATERIALIZATIONS.md#tableflow. Those tests are
+# skipped when either is unset.
 export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
 ```

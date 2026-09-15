@@ -55,11 +55,29 @@ class ConfluentCredentials(Credentials):
 
     # Add credentials members here, like:
     organization_id: str
-    # API credentials: supply either a Global key pair (works against every
-    # Confluent Cloud route) or a Flink-region key pair. confluent_sql.connect()
-    # validates that at least one complete pair is present, rejects half-supplied
-    # pairs, and prefers the Global pair when both are given — so we pass these
-    # straight through without re-validating here.
+    # API credentials:
+    # - flink_api_key / flink_api_secret: Flink-region key, used for all Flink SQL
+    #   statement operations. Required — since `open` no longer forwards the global
+    #   pair to confluent_sql's own `global_api_key`, a profile supplying only the
+    #   global pair fails at connect() with confluent_sql's "Either ... must be
+    #   provided". (Before that rewiring a global-only profile did connect.)
+    # - global_api_key / global_api_secret: a Tableflow-capable key, forwarded as
+    #   tableflow_api_key/tableflow_api_secret and therefore used only for Tableflow
+    #   control-plane routes. Deliberately never takes over Flink SQL auth even when
+    #   it's the only pair given. Scope matters here — each route is served by a
+    #   backend that accepts only its own key type (verified against a live org):
+    #
+    #       key type         Flink SQL   /tableflow/v1   /cmk/v2
+    #       flink (region)      200          401           401
+    #       tableflow           404          200           401
+    #       cloud               404          401           200
+    #       global              200          200           200
+    #
+    #   So use `resource_type=global`: Tableflow also needs the Kafka cluster id,
+    #   which the driver resolves from `schema` (the cluster's display name) via
+    #   /cmk/v2 — a route a `tableflow` key can't reach. A `resource_type=cloud`
+    #   key does NOT work for Tableflow — it 401s, which is the one failure that
+    #   looks like a credential problem but is really a scope problem.
     global_api_key: str | None = None
     global_api_secret: str | None = None
     flink_api_key: str | None = None

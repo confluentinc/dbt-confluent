@@ -2,9 +2,9 @@
 connection — helper functions, class methods, and pure logic.
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
+import pytest
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
@@ -15,7 +15,6 @@ from dbt.adapters.confluent.impl import (
     _is_yes,
 )
 from tests.unit._helpers import relation
-
 
 # ---------------------------------------------------------------------------
 # _is_yes
