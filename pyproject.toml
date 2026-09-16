@@ -70,6 +70,10 @@ confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "
 testpaths = ["tests/functional", "tests/unit"]
 addopts = "-v --color=yes"
 env_files = ["test.env"]
+markers = [
+    "unit: tests that do not require Confluent Cloud credentials",
+    "functional: tests that require a live Confluent Cloud environment",
+]
 
 [tool.ruff]
 target-version = "py310"

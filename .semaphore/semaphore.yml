@@ -61,13 +61,7 @@ blocks:
       jobs:
         - name: "Run Tests"
           commands:
-            - |
-              if [ -z "${CONFLUENT_FLINK_API_KEY:-}" ]; then
-                echo "CONFLUENT_FLINK_API_KEY not set, skipping integration tests"
-                uv run --frozen pytest tests/unit --junitxml=test-results.xml
-              else
-                uv run --frozen pytest --junitxml=test-results.xml
-              fi
+            - uv run --frozen pytest -m unit --junitxml=test-results.xml
       epilogue:
         always:
           commands:

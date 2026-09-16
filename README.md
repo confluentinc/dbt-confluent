@@ -165,7 +165,15 @@ uv run ruff format --check dbt/ tests/
 
 ### Running tests
 
-Tests require a Confluent Cloud environment. Set the following environment variables (or add them to a `test.env` file):
+Unit tests need no credentials:
+
+```bash
+uv run pytest -m unit
+```
+
+Functional tests require a Confluent Cloud environment. If those credentials
+are not set, the functional suite is skipped rather than failed. Set the
+following environment variables (or add them to a `test.env` file):
 
 ```bash
 export CONFLUENT_ENV_ID=env-xxxxxx
@@ -191,6 +199,8 @@ export CONFLUENT_GLOBAL_API_SECRET=xxx
 ```
 
 ```bash
+uv run pytest -m functional
+# or the full suite (functional tests skip when env vars are absent):
 uv run pytest
 ```
 

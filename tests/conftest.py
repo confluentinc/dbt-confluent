@@ -14,6 +14,39 @@ from dbt.tests.fixtures.project import TestProjInfo
 
 pytest_plugins = ["dbt.tests.fixtures.project"]
 
+# Env vars required to construct a functional-test profile. Optional Tableflow
+# global keys are not included; those tests already skip when unset.
+_FUNCTIONAL_ENV_VARS = (
+    "CONFLUENT_TEST_DBNAME",
+    "CONFLUENT_FLINK_API_KEY",
+    "CONFLUENT_FLINK_API_SECRET",
+    "CONFLUENT_ENV_ID",
+    "CONFLUENT_ORG_ID",
+    "CONFLUENT_COMPUTE_POOL_ID",
+    "CONFLUENT_CLOUD_PROVIDER",
+    "CONFLUENT_CLOUD_REGION",
+)
+
+
+def pytest_collection_modifyitems(config, items):
+    """Auto-mark tests from tests/unit and tests/functional so `-m` works."""
+    unit_marker = pytest.mark.unit
+    functional_marker = pytest.mark.functional
+    for item in items:
+        path = str(item.fspath)
+        if f"{os.sep}tests{os.sep}unit{os.sep}" in path or path.endswith(
+            f"{os.sep}tests{os.sep}unit"
+        ):
+            item.add_marker(unit_marker)
+        elif f"{os.sep}tests{os.sep}functional{os.sep}" in path or path.endswith(
+            f"{os.sep}tests{os.sep}functional"
+        ):
+            item.add_marker(functional_marker)
+
+
+def _missing_functional_env_vars():
+    return [name for name in _FUNCTIONAL_ENV_VARS if not os.getenv(name)]
+
 
 @pytest.fixture(scope="class")
 def unique_schema(request, prefix):
@@ -25,10 +58,12 @@ def unique_schema(request, prefix):
     we expect it to be already present, and the name should be passed
     as an env var. The same env var is used in the test profile fixture.
     """
-    dbname = os.getenv("CONFLUENT_TEST_DBNAME")
-    if not dbname:
-        raise ValueError("CONFLUENT_TEST_DBNAME env var needs to be set")
-    return dbname
+    missing = _missing_functional_env_vars()
+    if missing:
+        pytest.skip(
+            "functional tests require env vars: " + ", ".join(missing)
+        )
+    return os.getenv("CONFLUENT_TEST_DBNAME")
 
 
 @pytest.fixture(scope="class")
@@ -74,10 +109,10 @@ def schema_yml(unique_schema):
         version: 2
         sources:
           - name: raw
-            schema: "{unique_schema}"
+            schema: \"{unique_schema}\"
             tables:
               - name: seed
-                identifier: "{{{{ var('seed_name', 'base') }}}}"
+                identifier: \"{{{{ var('seed_name', 'base') }}}}\"
     """)
 
 
