@@ -24,7 +24,7 @@ Covers:
   preserved across retries (each in its own Test*Forwarding class below).
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from confluent_sql.exceptions import ComputePoolExhaustedError, OperationalError
@@ -33,10 +33,9 @@ from dbt.adapters.confluent.connections import _execute_query_with_retry
 
 
 @pytest.fixture(autouse=True)
-def no_sleep():
+def no_sleep(mocker):
     """Replace time.sleep so the retry tests run instantly."""
-    with patch("dbt.adapters.confluent.connections.time.sleep"):
-        yield
+    mocker.patch("dbt.adapters.confluent.connections.time.sleep")
 
 
 def _run(cursor, **overrides):

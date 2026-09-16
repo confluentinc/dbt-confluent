@@ -15,7 +15,7 @@ creates fail "table already exists", and the MT resurfaces. The failed drop
 raises no error, so only the pre-check can prevent it.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from confluent_sql.exceptions import OperationalError
@@ -25,10 +25,9 @@ from dbt.adapters.confluent.impl import ConfluentAdapter
 
 
 @pytest.fixture(autouse=True)
-def no_sleep():
+def no_sleep(mocker):
     """Replace time.sleep so the catalog-absence polling runs instantly."""
-    with patch("dbt.adapters.confluent.impl.time.sleep"):
-        yield
+    mocker.patch("dbt.adapters.confluent.impl.time.sleep")
 
 
 def _catalog_result(row_count):
