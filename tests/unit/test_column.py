@@ -5,6 +5,7 @@ string column (dbt-core's ctx_model rewrites data_type through translate_type
 before the schema-probe query and the rendered column DDL; see providers.py).
 """
 
+import pytest
 from dbt.adapters.confluent.column import ConfluentColumn
 
 
@@ -20,3 +21,16 @@ def test_translate_type_does_not_apply_dbt_core_default_string_to_text_mapping()
     # result here confirms the fix didn't change translate_type's behavior
     # in general -- just removed the one bad STRING entry.
     assert ConfluentColumn.translate_type("bigint") == "bigint"
+
+
+@pytest.mark.parametrize(
+    "col_name, expected_quoted",
+    [
+        pytest.param("my_col", "`my_col`", id="simple-name"),
+        pytest.param("$rowtime", "`$rowtime`", id="system-column"),
+        pytest.param("order", "`order`", id="reserved-word"),
+    ],
+)
+def test_quoted_uses_backtick_not_double_quote(col_name, expected_quoted):
+    col = ConfluentColumn(col_name, "STRING")
+    assert col.quoted == expected_quoted
