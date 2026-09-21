@@ -31,13 +31,13 @@ blocks:
       jobs:
         - name: "Ruff Check"
           commands:
-            - uv run --frozen ruff check dbt/ tests/
+            - uv run --frozen poe ruff-check
         - name: "Ruff Format Check"
           commands:
-            - uv run --frozen ruff format --check dbt/ tests/
+            - uv run --frozen poe ruff-format-check
         - name: "Mypy Check"
           commands:
-            - uv run --frozen mypy dbt/
+            - uv run --frozen poe mypy
         - name: "Changelog Check"
           commands:
             - |
@@ -64,9 +64,9 @@ blocks:
             - |
               if [ -z "${CONFLUENT_FLINK_API_KEY:-}" ]; then
                 echo "CONFLUENT_FLINK_API_KEY not set, skipping integration tests"
-                uv run --frozen pytest tests/unit --junitxml=test-results.xml --cov
+                uv run --frozen poe unit
               else
-                uv run --frozen pytest --junitxml=test-results.xml --cov
+                uv run --frozen poe test-all
               fi
       epilogue:
         always:
