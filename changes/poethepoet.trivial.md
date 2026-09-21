@@ -1,0 +1,1 @@
+Replaced `tox` with `poethepoet` as the task runner. Added `poe_tasks.toml` with tasks for linting (`ruff-check`, `ruff-format-check`, `mypy`) and testing (`unit`, `integration`, `test-all`), removed `tox.ini`, and updated Semaphore CI to invoke tasks via `uv run poe`.
