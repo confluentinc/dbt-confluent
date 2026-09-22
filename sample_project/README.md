@@ -99,6 +99,6 @@ SELECT
     max(tempf) as max_temp,
     min(tempf) as min_temp,
     avg(tempf) as avg_temp
-FROM `TableAPI`.`2026-08-bug-bash-dbt-mt`.`WeatherData`
+FROM `TableAPI`.`bug-bash-tableflow-oauth-2026-09`.`WeatherData`
 GROUP BY cast(when_reported as date)
 ```
