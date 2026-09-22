@@ -48,6 +48,8 @@ You can authenticate with either a **Global** Confluent Cloud API key (`global_a
 
 [Tableflow](MATERIALIZATIONS.md#tableflow) requires a Global key — it resolves your Kafka cluster id via a route a Flink-region key can't reach.
 
+Alternatively, set `auth: oauth` in the profile to authenticate via interactive Confluent Cloud sign-in instead of an API key — the first connection opens a browser for a one-time login, which is then shared across the run. Omit `global_api_key`/`global_api_secret`/`flink_api_key`/`flink_api_secret` when using `auth: oauth`.
+
 ### Concept mapping
 
 Confluent Cloud Flink uses different terminology than traditional databases. Here's how dbt concepts map to Flink and Confluent Cloud:

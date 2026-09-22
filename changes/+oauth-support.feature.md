@@ -1,0 +1,1 @@
+Add an `auth` profile config (`api_key` default, or `oauth` for interactive Confluent Cloud sign-in) that is passed through to `confluent_sql.connect()`. Points the `confluent-sql` dependency at its `oauth-epic-integration` development branch, which has not yet shipped a tagged release.
