@@ -1,0 +1,47 @@
+{
+  "skill_name": "confluent-python-standards",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Review this PR diff for our dbt-confluent adapter. The changed file adds a new helper:\n\nimport os.path\nfrom typing import Optional, List\n\ndef load_props(path: str, keys: List[str]) -> Optional[dict]:\n    cfg = os.path.join(os.path.dirname(__file__), path)\n    try:\n        with open(cfg) as f:\n            data = f.read()\n    except Exception:\n        pass\n    for k in keys:\n        try:\n            v = data[k]\n        except KeyError:\n            return None\n    assert data is not None, \"no data\"\n    try:\n        return parse(data)\n    except ValueError as e:\n        raise ConfigError(\"bad config\")",
+      "expected_output": "A review flagging: legacy typing aliases (Optional/List) that should be X | None and list[str]; os.path usage that should be pathlib; a silently swallowed bare except Exception; KeyError used as routine control flow where a membership test or .get() is clearer; assert used in production code; and a missing exception chain (from e) on the re-raise. Each finding cites the relevant ruff rule or reference section. Does NOT flag missing py.typed or missing OpenTelemetry.",
+      "files": [],
+      "assertions": [
+        "Flags Optional[dict] and List[str] and recommends dict | None and list[str] for Python 3.10+ (ruff UP006/UP007)",
+        "Flags os.path usage and recommends pathlib.Path (ruff PTH)",
+        "Flags the missing encoding argument in open() call",
+        "Flags 'except Exception: pass' as silently swallowing the error (ruff B)",
+        "Flags try/except KeyError as control flow and recommends a membership test or .get()",
+        "Flags the assert as unsafe in production code because -O strips it, and recommends an explicit raise (ruff S101)",
+        "Flags the missing 'from e' exception chain on the ConfigError raise (ruff B904)",
+        "Groups findings by severity: Blocking, Warning, or Nit",
+        "Does NOT recommend adding a py.typed marker or OpenTelemetry instrumentation"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Please review this diff to our dbt adapter connections module. I'm using unittest.mock patches and I want to know if there are any issues:\n\nfrom unittest.mock import patch, MagicMock\n\ndef test_retries_on_pool_exhausted(cursor):\n    with patch(\"dbt.adapters.confluent.connections.time.sleep\"):\n        with patch(\"dbt.adapters.confluent.connections.fire_event\") as mock_event:\n            cursor.execute.side_effect = [ComputePoolExhaustedError(), None]\n            _run(cursor)\n    mock_event.assert_called()",
+      "expected_output": "A review recommending pytest-mock's mocker fixture over unittest.mock.patch context managers, citing that mocker composes with pytest fixtures and unwinds automatically. Shows the corrected version using mocker.patch() instead of nested with patch() blocks.",
+      "files": [],
+      "assertions": [
+        "Flags nested unittest.mock.patch context managers as the anti-pattern",
+        "Recommends mocker.patch() from pytest-mock instead (references/code-style.md § Testing Patterns)",
+        "Shows corrected code using mocker fixture with flat mocker.patch() calls",
+        "Notes that mocker.MagicMock is unittest.mock.MagicMock re-exported, so the unittest.mock import can be removed entirely",
+        "Does NOT flag the test for missing type annotations (test code is exempt from that rule)"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "I have a PR that adds a property to our adapter class:\n\nclass ConfluentAdapter(SQLAdapter):\n    @property\n    def active_schema_count(self) -> int:\n        return len(self._registry_client.list_subjects())\n\nIs this fine?",
+      "expected_output": "A review flagging the property as performing a network call (O(n) list operation), violating the O(1) property rule. Recommends renaming to an explicit method fetch_active_schema_count() or caching the result. Cites references/code-style.md § Properties and magic methods must be O(1).",
+      "files": [],
+      "assertions": [
+        "Flags the property as doing a network/I/O call (ruff B — or references/code-style.md § Properties and magic methods must be O(1))",
+        "Recommends renaming to an explicit method name like fetch_active_schema_count() to signal the cost",
+        "Does NOT flag the missing return-type annotation (it is present)",
+        "Does NOT suggest adding OpenTelemetry instrumentation to the method"
+      ]
+    }
+  ]
+}
