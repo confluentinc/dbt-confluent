@@ -44,7 +44,13 @@ export CONFLUENT_CLOUD_REGION=us-east-2
 export CONFLUENT_TEST_DBNAME=bug-bash-tableflow-oauth-2026-09
 ```
 
-Then make sure you have a Flink API key or Global API Key for the "Flink is Fine" organization exported:
+### Two ways now to drive auth: oauth vs API key!
+
+#### Oauth
+Nothing to do here, the sample project's `profile.yml` already is configured for `auth: oauth`. The first time you run `dbt debug` or `dbt run` you'll be bounced over to the browser to log into your FiF account on prod, then the browser will be redirected back to a static page served by `confluent-sql` as it obtains the auth token. Subsequent `dbt` runs will then perform the browser bounce, but will be a relative no-op as long as your browser session with Confluent Cloud remains active. 
+
+#### API Key
+To reconfigure to use API-key based auth, make sure you have a Flink API key or Global API Key for the "Flink is Fine" organization exported:
 
 ```bash
 export CONFLUENT_FLINK_API_KEY=<your-api-key>
@@ -52,6 +58,9 @@ export CONFLUENT_FLINK_API_SECRET=<your-api-secret>
 ```
 
 _You can make a new key at https://confluent.cloud/settings/api-keys if needed (ensuring you're in the Flink is Fine org)._
+
+and then edit `profiles.yml` and comment out the `auth: oauth` line, then uncomment the `global_api_key` / `global_api_secret` lines.
+
 
 ## 3. Install dependencies
 
