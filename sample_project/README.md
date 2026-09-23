@@ -98,7 +98,9 @@ If you got this far, congrats! You're ready to make and run some DBT models of y
 - **`dbt run -s <model_name>+`:** Also build anything downstream of the selected model — useful for e.g. reprocessing workflows
 - **`dbt run --full-refresh ...`:** Drops and recreates instead of evolving in place. Useful when you need to make a breaking schema change that can't be made in-place.
 
-We have a live data stream table holding
+We have a live data stream table holding live streaming weather data from ten sensors (identified in identical columns `key` and `sensor_id`). There might be some weird anomalies in their data though. Can you figure them out in your dbting?
+
+Table `env-d0v2k7`.`bug-bash-tableflow-oauth-2026-09`.`WeatherData`.
 
 Its Flink schema is:
 ```sql
@@ -140,8 +142,6 @@ WITH (
   'value.format' = 'avro-registry'
 )
 ```
-
-I have 10 weather sensors (ids 0-9 in the `key` and value-side `sensor_id` columns) reporting streaming live weather data into our cloud environment. See if in your DBT explorations you can determine what is curious about this data.
 
 A sample HOP query producing an updating stream of the past 5-minute min/max temps, updating every 10s might make an interesting MT or streaming_table:
 
