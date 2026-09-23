@@ -98,14 +98,78 @@ If you got this far, congrats! You're ready to make and run some DBT models of y
 - **`dbt run -s <model_name>+`:** Also build anything downstream of the selected model — useful for e.g. reprocessing workflows
 - **`dbt run --full-refresh ...`:** Drops and recreates instead of evolving in place. Useful when you need to make a breaking schema change that can't be made in-place.
 
-When you're ready to create your own model by hand, you can use the following SQL to query a live weather data source:
+We have a live data stream table holding
+
+Its Flink schema is:
+```sql
+"CREATE TABLE `env-d0v2k7`.`bug-bash-tableflow-oauth-2026-09`.`WeatherData` (
+  `key` INT NOT NULL,
+  `sensor_id` INT NOT NULL,
+  `tempf` DOUBLE NOT NULL,
+  `windspeedmph` DOUBLE NOT NULL,
+  `windgustmph` DOUBLE NOT NULL,
+  `winddir` BIGINT NOT NULL,
+  `winddir_avg10m` BIGINT NOT NULL,
+  `uv` DOUBLE NOT NULL,
+  `solarradiation` DOUBLE NOT NULL,
+  `hourlyrainin` DOUBLE NOT NULL,
+  `dailyrainin` DOUBLE NOT NULL,
+  `weeklyrainin` DOUBLE NOT NULL,
+  `monthlyrainin` DOUBLE NOT NULL,
+  `yearlyrainin` DOUBLE NOT NULL,
+  `tempinf` DOUBLE NOT NULL,
+  `humidityin` DOUBLE NOT NULL,
+  `baromrelin` DOUBLE NOT NULL,
+  `baromabsin` DOUBLE NOT NULL,
+  `when_reported` TIMESTAMP(3) WITH LOCAL TIME ZONE NOT NULL,
+  WATERMARK FOR `when_reported` AS `when_reported` - INTERVAL '5' SECOND
+)
+DISTRIBUTED BY HASH(`key`) INTO 3 BUCKETS
+WITH (
+  'changelog.mode' = 'append',
+  'connector' = 'confluent',
+  'kafka.cleanup-policy' = 'delete',
+  'kafka.compaction.time' = '0 ms',
+  'kafka.max-message-size' = '2097164 bytes',
+  'kafka.message-timestamp-type' = 'create-time',
+  'kafka.retention.size' = '0 bytes',
+  'kafka.retention.time' = '7 d',
+  'key.format' = 'avro-registry',
+  'scan.bounded.mode' = 'unbounded',
+  'scan.startup.mode' = 'earliest-offset',
+  'value.format' = 'avro-registry'
+)
+```
+
+I have 10 weather sensors (ids 0-9 in the `key` and value-side `sensor_id` columns) reporting streaming live weather data into our cloud environment. See if in your DBT explorations you can determine what is curious about this data.
+
+A sample HOP query producing an updating stream of the past 5-minute min/max temps, updating every 10s might make an interesting MT or streaming_table:
 
 ```sql
 SELECT
+    sensor_id,
+    MAX(tempf) AS max_tempf,
+    MIN(tempf) AS min_tempf
+FROM TABLE(
+    HOP(
+        TABLE `bug-bash-tableflow-oauth-2026-09`.`WeatherData`,
+        DESCRIPTOR(when_reported),
+        INTERVAL '10' SECONDS,
+        INTERVAL '5' MINUTE
+    )
+)
+GROUP BY sensor_id
+```
+
+Whereas a more for-snapshot-data-warehouse aggregation might be:
+
+```sql
+SELECT
+    sensor_id,
     cast(when_reported as date) as day_reported,
     max(tempf) as max_temp,
     min(tempf) as min_temp,
     avg(tempf) as avg_temp
 FROM `TableAPI`.`bug-bash-tableflow-oauth-2026-09`.`WeatherData`
-GROUP BY cast(when_reported as date)
+GROUP BY `sensor_id`, cast(when_reported as date)
 ```
