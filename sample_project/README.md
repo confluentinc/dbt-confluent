@@ -84,8 +84,6 @@ uv run dbt debug
 uv run dbt run
 ```
 
-If that works, you should be able to find your new materialized table [here](https://confluent.cloud/environments/env-d0v2k7/flink/materialized-tables?mtable_account_type_env-d0v2k7=&mtable_active_compute_pools_only_env-d0v2k7=true&mtable_compute_pool_id_env-d0v2k7=lfcp-j58nndq&mtable_filter_status_env-d0v2k7=&mtable_principal_env-d0v2k7=&tab=cloud).
-
 Note that all models & their associated tables are namespaced by the current user's `$USER` name. So, this builds `${USER}_source_values` (a regular table), then `$USER_total_val` — a `materialized_table` model (`models/total_val.sql`) that's the actual subject of this bug bash. From here, try the scenarios in the bug bash doc against `$USER_total_val` (or new models of your own).
 
 *WARNING: If your $USER name is not unique (e.g. on a shared machine) or not set, you may hit conflicts with others. You can set `BUGBASH_USER` explicitly to override this value.*
