@@ -1,15 +1,19 @@
 import re
 import threading
 import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 import agate
+from confluent_sql import HIDDEN_LABEL
 from confluent_sql.exceptions import (
     OperationalError,
     StatementNotFoundError,
 )
+from confluent_sql.execution_mode import ExecutionMode
+from confluent_sql.statement import Statement
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
@@ -93,6 +97,52 @@ _START_MODE_RE = re.compile(
     r"(?:\((?P<arg>(?:'(?:[^']|'')*'|[\w \t])*)\)\s*)?"
 )
 
+# Flink types whose DDL form is a single parenthesized parameter -
+# <type>(<param>) - taken from ColumnTypeDefinition.length or .precision.
+_DRY_RUN_LENGTH_TYPES = frozenset({"CHAR", "VARCHAR", "BINARY", "VARBINARY"})
+_DRY_RUN_PRECISION_TYPES = frozenset({"TIME", "TIMESTAMP", "TIMESTAMP_LTZ"})
+
+# Structured/composite Flink types with no single scalar literal to CAST a
+# unit test fixture value into - see _dry_run_castable_type.
+_DRY_RUN_UNSUPPORTED_TYPES = frozenset({"ARRAY", "MAP", "MULTISET", "ROW", "RAW"})
+
+# ColumnTypeDefinition.type reports these three by Flink's internal/full type
+# name (confirmed against a live dry run), but CAST(x AS ...) only accepts
+# the short keyword form - "Unknown identifier 'TIMESTAMP_WITHOUT_TIME_ZONE'"
+# otherwise. Every other type's dry-run name already matches its CAST keyword
+# (including INTEGER, which - unlike these three - Flink accepts as-is).
+_DRY_RUN_CAST_TYPE_ALIASES = {
+    "TIME_WITHOUT_TIME_ZONE": "TIME",
+    "TIMESTAMP_WITHOUT_TIME_ZONE": "TIMESTAMP",
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE": "TIMESTAMP_LTZ",
+}
+
+
+def _dry_run_castable_type(type_def) -> str:
+    """A Flink DDL type string, suitable for `CAST(x AS ...)`, for a dry run's
+    ColumnTypeDefinition (confluent_sql.types).
+
+    Passes the driver's own type name straight through - see the
+    thin-passthrough precedent in ConfluentColumn.TYPE_LABELS - appending
+    only the one parameter (length, or precision) the type itself carries.
+    DECIMAL is the only type with two parameters, so it gets its own case.
+    """
+    kind = _DRY_RUN_CAST_TYPE_ALIASES.get(type_def.type, type_def.type)
+    if kind in _DRY_RUN_UNSUPPORTED_TYPES:
+        raise DbtDatabaseError(
+            f"Cannot determine a unit test's expected-row types from a dry run for a "
+            f"'{kind}' column - composite/structured types aren't supported without an "
+            "enforced contract. Either declare `contract: {enforced: true}` with explicit "
+            "column data_types on the tested model, or `dbt run` it first."
+        )
+    if kind == "DECIMAL" and type_def.precision is not None and type_def.scale is not None:
+        return f"DECIMAL({type_def.precision}, {type_def.scale})"
+    if kind in _DRY_RUN_LENGTH_TYPES and type_def.length is not None:
+        return f"{kind}({type_def.length})"
+    if kind in _DRY_RUN_PRECISION_TYPES and type_def.precision is not None:
+        return f"{kind}({type_def.precision})"
+    return kind
+
 
 @dataclass(frozen=True, eq=False, repr=False)
 class ConfluentRelation(BaseRelation):
@@ -147,6 +197,38 @@ class ConfluentAdapter(SQLAdapter):
         # worker thread; _CleanupRegistry.__init__ gives each of those threads
         # its own empty list on first access.
         self._deferred_cleanups = _CleanupRegistry()
+        # unique_id -> {lower(column_name): data_type} for every model with an
+        # enforced contract, captured from the full manifest in
+        # set_relations_cache (called before unit tests run). Unit tests
+        # compile against a manifest trimmed down to just the unit test node
+        # (dbt.parser.unit_tests.UnitTestManifestLoader), so the tested
+        # model's config is otherwise unrecoverable by the time
+        # get_tested_model_columns runs. A unit test should trust an enforced
+        # contract's declared types outright rather than resolving anything
+        # live - see get_tested_model_columns. Populated once up front,
+        # read-only after, so it's safe to share across the per-node worker threads.
+        self._contract_columns_by_unique_id: dict[str, dict[str, str]] = {}
+
+    def set_relations_cache(
+        self,
+        relation_configs,
+        clear: bool = False,
+        required_schemas=None,
+    ) -> None:
+        for relation_config in relation_configs:
+            unique_id = getattr(relation_config, "unique_id", None)
+            contract = getattr(relation_config, "contract", None)
+            if unique_id and getattr(contract, "enforced", False):
+                # dbt-core requires every column to declare a data_type once a
+                # contract is enforced (parse-time error otherwise), so no
+                # per-column fallback is needed here.
+                self._contract_columns_by_unique_id[unique_id] = {
+                    name.lower(): column.data_type
+                    for name, column in relation_config.columns.items()
+                }
+        super().set_relations_cache(
+            relation_configs, clear=clear, required_schemas=required_schemas
+        )
 
     @classmethod
     def quote(cls, identifier: str) -> str:
@@ -643,28 +725,68 @@ class ConfluentAdapter(SQLAdapter):
         return self._catalog_filter_table(table, used_schemas)
 
     @available
-    def get_tested_model_relation(self, tested_node_unique_id, database, schema):
-        """Resolve the tested model's relation from its unique_id.
+    def get_tested_model_columns(self, tested_node_unique_id, main_sql):
+        """Resolve the tested model's columns (name, castable data_type) for a unit test.
 
-        Unit tests run in a separate manifest where graph.nodes is empty,
-        so we can't look up nodes directly. Instead, we extract the model
-        identifier from the unique_id (format: model.<package>.<name>)
-        and find the relation in the adapter's cache.
+        Prefers the model's enforced contract, cached off the full manifest in
+        set_relations_cache for the same reason identifiers are (see
+        _contract_columns_by_unique_id) - a unit test asserts what the model
+        should produce, so an enforced contract's declared types are exactly
+        that assertion; trust them outright rather than resolving anything
+        live. Falls back to a dry run of the unit test's own compiled query
+        (fixture inputs already substituted with real temp tables by this
+        point) when no contract is enforced, so a model can be unit tested
+        without needing `dbt run` first, and without the tested column types
+        going stale relative to whatever was last deployed.
         """
-        # unique_id format:
-        #   non-versioned: model.<package>.<name>
-        #   versioned:     model.<package>.<name>.v<version>
-        _, _, name, *v = tested_node_unique_id.split(".")
-        version = f"_{v[0]}" if v and v[0].startswith("v") else ""
-        identifier = f"{name}{version}"
-        relation = self.get_relation(database, schema, identifier)
-        if relation is None:
+        contract_columns = self._contract_columns_by_unique_id.get(tested_node_unique_id)
+        if contract_columns is not None:
+            return [
+                ConfluentColumn.create(name, data_type)
+                for name, data_type in contract_columns.items()
+            ]
+        return self._dry_run_columns(main_sql)
+
+    def _dry_run_columns(self, sql):
+        """Resolve `sql`'s result columns via a Flink dry run (sql.dry-run),
+        which validates and compiles the query without executing it.
+
+        Reads the driver's rich per-column schema (name, type, length/
+        precision/scale) directly off the statement, rather than through
+        adapter.execute()'s agate-table result - agate's column types are
+        inferred from the fetched data, which a dry run never produces.
+
+        Submits via Connection._execute_statement directly instead of
+        adapter.execute()/Cursor.execute() - confirmed empirically that a
+        dry-run statement's own submission response already comes back
+        COMPLETED with its full schema, but the server never persists it as
+        a gettable resource, so Cursor.execute()'s unconditional post-submit
+        poll (a GET by name) always 404s for one. There's no public
+        confluent_sql entry point that submits without that poll.
+        TODO: revisit (drop this workaround, go through adapter.execute())
+        once confluent-sql exposes one, or dry-run statements become
+        GET-able. https://github.com/confluentinc/confluent-sql (driver repo)
+        """
+        connection = self.connections.get_thread_connection()
+        statement_name = f"{connection.credentials.statement_name_prefix}{uuid.uuid4()}"
+        response = connection.handle._execute_statement(
+            sql,
+            ExecutionMode.SNAPSHOT,
+            statement_name,
+            [connection.credentials.statement_label, HIDDEN_LABEL],
+            {"sql.dry-run": "true"},
+            compute_pool_id=None,
+        )
+        statement = Statement.from_response(connection.handle, response)
+        if statement.is_failed:
             raise DbtDatabaseError(
-                "Could not find relation for tested model with unique_id "
-                f"'{tested_node_unique_id}'. Looked for relation with identifier "
-                f"'{identifier}' in database '{database}', schema '{schema}'"
+                f"Dry run failed for tested model query: {statement.status.get('detail', '')}"
             )
-        return relation
+        columns = statement.schema.columns if statement.has_schema() else []
+        return [
+            ConfluentColumn.create(column.name, _dry_run_castable_type(column.type))
+            for column in columns
+        ]
 
     @available
     def parse_unit_test_ctes(self, extra_ctes, compiled_sql):

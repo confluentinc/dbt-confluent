@@ -51,14 +51,15 @@
     {%- endcall %}
   {%- endfor -%}
 
-  {# Get column metadata from the TESTED MODEL (not 'this', which is the unit test node) #}
-  {%- set tested_relation = adapter.get_tested_model_relation(
-      model['tested_node_unique_id'], this.database, this.schema
+  {# Get column metadata for the TESTED MODEL (not 'this', which is the unit test node):
+     its enforced contract if it has one, otherwise a dry run of main_sql above (fixture
+     inputs are already real temp tables by this point) - see get_tested_model_columns. #}
+  {%- set tested_columns = adapter.get_tested_model_columns(
+      model['tested_node_unique_id'], main_sql
   ) -%}
-  {%- set columns_in_relation = adapter.get_columns_in_relation(tested_relation) -%}
   {%- set column_name_to_data_types = {} -%}
   {%- set column_name_to_quoted = {} -%}
-  {%- for column in columns_in_relation -%}
+  {%- for column in tested_columns -%}
     {%- do column_name_to_data_types.update({column.name|lower: column.data_type}) -%}
     {%- do column_name_to_quoted.update({column.name|lower: column.quoted}) -%}
   {%- endfor -%}

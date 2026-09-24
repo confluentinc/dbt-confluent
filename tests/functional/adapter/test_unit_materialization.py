@@ -186,6 +186,137 @@ class TestJoinOnExplicitTimestamp(ConfluentFixtures):
         run_dbt(["test"])
 
 
+# Deliberately declares no `models:` block (no contract), and the test below
+# never `dbt run`s this table - get_tested_model_columns must resolve its
+# columns via a Flink dry run rather than a live catalog lookup.
+MY_UNBUILT_TABLE = """
+{{ config(
+    materialized='streaming_table',
+) }}
+select order_id, price, order_time from {{ ref('my_unbuilt_source') }}
+"""
+
+MY_UNBUILT_SOURCE = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '100',
+        'number-of-rows': '100',
+    }
+) }}
+order_id BIGINT,
+price DECIMAL(10, 2),
+order_time TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time + INTERVAL '10' SECONDS,
+PRIMARY KEY(`order_id`) NOT ENFORCED
+"""
+
+UNBUILT_SCHEMA_YML = """
+unit_tests:
+  - name: test_unbuilt_table
+    model: my_unbuilt_table
+    given:
+      - input: ref('my_unbuilt_source')
+        rows:
+          - order_id: 1
+            price: 10.0
+            order_time: '2024-01-01 10:00:00'
+    expect:
+      rows:
+        - order_id: 1
+          price: 10.0
+          order_time: '2024-01-01 10:00:00'
+"""
+
+
+class TestUnitTestWithoutPriorRun(ConfluentFixtures):
+    """The tested model is never `dbt run` - only its fixture input is (its
+    real relation is still needed to clone the fixture's temp table via
+    CREATE TABLE ... LIKE). Column resolution for the tested model itself
+    must come from a dry run, not a live relation lookup."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "my_unbuilt_source.sql": MY_UNBUILT_SOURCE,
+            "my_unbuilt_table.sql": MY_UNBUILT_TABLE,
+            "schema.yml": UNBUILT_SCHEMA_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def custom_clean_up(self, project):
+        yield
+        project.run_sql("drop table if exists my_unbuilt_source")
+        project.run_sql("drop table if exists my_unbuilt_table")
+
+    def test_dry_run_resolves_tested_model_columns(self, project):
+        run_dbt(["run", "--select", "my_unbuilt_source"])
+        run_dbt(["test"])
+
+
+# Declares an enforced contract on the tested model, so column resolution
+# should come straight from the contract's declared types - not a dry run,
+# and not (as above) a live relation lookup. The tested model is never
+# `dbt run` here either.
+CONTRACT_TABLE = """
+{{ config(
+    materialized='streaming_table',
+) }}
+select order_id, price, order_time from {{ ref('my_unbuilt_source') }}
+"""
+
+CONTRACT_SCHEMA_YML = """
+unit_tests:
+  - name: test_contract_table
+    model: my_contract_table
+    given:
+      - input: ref('my_unbuilt_source')
+        rows:
+          - order_id: 1
+            price: 10.0
+            order_time: '2024-01-01 10:00:00'
+    expect:
+      rows:
+        - order_id: 1
+          price: 10.0
+          order_time: '2024-01-01 10:00:00'
+
+models:
+  - name: my_contract_table
+    config:
+      contract:
+        enforced: true
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: price
+        data_type: decimal(10,2)
+      - name: order_time
+        data_type: timestamp(3)
+"""
+
+
+class TestUnitTestWithEnforcedContract(ConfluentFixtures):
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "my_unbuilt_source.sql": MY_UNBUILT_SOURCE,
+            "my_contract_table.sql": CONTRACT_TABLE,
+            "schema.yml": CONTRACT_SCHEMA_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def custom_clean_up(self, project):
+        yield
+        project.run_sql("drop table if exists my_unbuilt_source")
+        project.run_sql("drop table if exists my_contract_table")
+
+    def test_contract_columns_resolve_tested_model_columns(self, project):
+        run_dbt(["run", "--select", "my_unbuilt_source"])
+        run_dbt(["test"])
+
+
 class TestStreamingTests(ConfluentFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
