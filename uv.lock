@@ -279,7 +279,7 @@ requires-dist = [
     { name = "confluent-sql", specifier = "~=0.5.4" },
     { name = "dbt-adapters", specifier = "~=1.16" },
     { name = "dbt-common", specifier = "~=1.12" },
-    { name = "dbt-core", specifier = "~=1.11" },
+    { name = "dbt-core", specifier = "~=1.11.0" },
     { name = "httpx", specifier = ">=0.23.0,<0.29.0" },
 ]
 

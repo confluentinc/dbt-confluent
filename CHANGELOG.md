@@ -1,3 +1,9 @@
+dbt-confluent 0.3.1 (2026-09-24)
+
+# Bugfixes
+
+- Pinned the dbt-core dependency to dbt-core~=1.11.0 to avoid picking up the incompatible 1.12 version.
+
 dbt-confluent 0.3.1 (2026-09-10)
 
 # Bugfixes
