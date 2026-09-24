@@ -353,7 +353,7 @@ requires-dist = [
     { name = "confluent-sql", git = "https://github.com/confluentinc/confluent-sql?rev=06b14e4073389b01421d98a1239414a376e2358d" },
     { name = "dbt-adapters", specifier = "~=1.16" },
     { name = "dbt-common", specifier = "~=1.12" },
-    { name = "dbt-core", specifier = "~=1.11" },
+    { name = "dbt-core", specifier = "~=1.11.0" },
     { name = "httpx", specifier = ">=0.23.0,<0.29.0" },
 ]
 
