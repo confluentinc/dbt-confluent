@@ -237,11 +237,82 @@ class TestParseUnitTestCtes:
 
     def test_main_sql_stripped_of_cte_prefix(self):
         adapter = self._adapter()
-        cte_sql = "__dbt__cte__fix as (\nSELECT 1\n)"
+        # dbt-core's InjectedCTE.sql carries a leading space (compilation.py's
+        # _recursively_prepend_ctes builds it as f" {cte_name} as (\n...\n)"),
+        # which is what actually ends up between "with" and the CTE name.
+        cte_sql = " __dbt__cte__fix as (\nSELECT 1\n)"
         extra_ctes = [{"sql": cte_sql}]
         compiled_sql = f"with{cte_sql} SELECT * FROM t"
         result = adapter.parse_unit_test_ctes(extra_ctes, compiled_sql)
         assert result["main_sql"] == "SELECT * FROM t"
+
+    def test_main_sql_with_nested_parens_in_fixture_body(self):
+        adapter = self._adapter()
+        # Regression test: fixture bodies rendered by dbt-core's get_fixture_sql
+        # contain their own casts/parens (e.g. cast(x as DECIMAL(10, 2))) and a
+        # leading comment/blank lines. A naive "with" + cte_sql + " " length
+        # reconstruction previously mis-sliced main_sql, leaving a stray ")"
+        # at the front of the dry-run query.
+        cte_sql = (
+            " __dbt__cte__jbreeden_raw_orders as (\n"
+            "-- Fixture for order_summary\n\n"
+            "select cast(2 as INT) as order_id,"
+            " cast(15 as DECIMAL(10, 2)) as price\n"
+            ")"
+        )
+        extra_ctes = [{"sql": cte_sql}]
+        main_query = "select order_id, price from __dbt__cte__jbreeden_raw_orders"
+        compiled_sql = f"with{cte_sql} {main_query}"
+        result = adapter.parse_unit_test_ctes(extra_ctes, compiled_sql)
+        assert result["main_sql"] == main_query
+
+    def test_multiple_ctes_prefix_stripped(self):
+        adapter = self._adapter()
+        cte_a = " __dbt__cte__a as (\nSELECT 1\n)"
+        cte_b = " __dbt__cte__b as (\nSELECT 2\n)"
+        extra_ctes = [{"sql": cte_a}, {"sql": cte_b}]
+        compiled_sql = f"with{cte_a},{cte_b} SELECT * FROM a JOIN b"
+        result = adapter.parse_unit_test_ctes(extra_ctes, compiled_sql)
+        assert result["main_sql"] == "SELECT * FROM a JOIN b"
+        assert [cte["cte_name"] for cte in result["ctes"]] == [
+            "__dbt__cte__a",
+            "__dbt__cte__b",
+        ]
+
+    def test_main_sql_not_confused_by_repeated_fixture_text(self):
+        # Regression test for the substring-search approach this replaced:
+        # if the main query happens to contain a literal value equal to the
+        # fixture's own raw CTE text (e.g. echoed back in a string column),
+        # a naive "find the CTE text and slice after it" search would anchor
+        # on the wrong occurrence. sqlparse's structural WITH-clause lookup
+        # can't be fooled by this.
+        adapter = self._adapter()
+        cte_sql = " __dbt__cte__x as (\nselect 1 as id\n)"
+        extra_ctes = [{"sql": cte_sql}]
+        main_query = f"select id, '{cte_sql}' as decoy from __dbt__cte__x"
+        compiled_sql = f"with{cte_sql} {main_query}"
+        result = adapter.parse_unit_test_ctes(extra_ctes, compiled_sql)
+        assert result["main_sql"] == main_query
+
+    def test_main_sql_preserves_models_own_with_clause(self):
+        # The tested model's own SQL may already have a CTE the author wrote
+        # (unrelated to fixture inputs). dbt-core's inject_ctes_into_sql
+        # merges fixture CTEs into that same WITH list rather than nesting a
+        # second one - only the fixture CTE has a real temp table backing it
+        # by the time main_sql runs, so the model's own CTE must stay in
+        # main_sql's own `with` clause, or the query is left with a dangling
+        # reference to `own_cte`.
+        adapter = self._adapter()
+        cte_sql = " __dbt__cte__fix as (\nSELECT 1\n)"
+        extra_ctes = [{"sql": cte_sql}]
+        compiled_sql = (
+            f"with{cte_sql}, own_cte as (SELECT 2) SELECT * FROM own_cte JOIN __dbt__cte__fix"
+        )
+        result = adapter.parse_unit_test_ctes(extra_ctes, compiled_sql)
+        assert (
+            result["main_sql"]
+            == "with own_cte as (SELECT 2) SELECT * FROM own_cte JOIN __dbt__cte__fix"
+        )
 
     def test_no_ctes_returns_compiled_sql_unchanged(self):
         adapter = self._adapter()
