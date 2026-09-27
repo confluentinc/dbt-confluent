@@ -23,7 +23,7 @@ from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import tableflow
+from . import dry_run, tableflow
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
@@ -148,6 +148,41 @@ class ConfluentAdapter(SQLAdapter):
         # worker thread; _CleanupRegistry.__init__ gives each of those threads
         # its own empty list on first access.
         self._deferred_cleanups = _CleanupRegistry()
+        # unique_id -> {lower(column_name): data_type} for every model with an
+        # enforced contract, captured from the full manifest in
+        # set_relations_cache (called before unit tests run). Unit tests
+        # compile against a manifest trimmed down to just the unit test node
+        # (dbt.parser.unit_tests.UnitTestManifestLoader), so the tested
+        # model's config is otherwise unrecoverable by the time
+        # get_tested_model_columns runs. A unit test should trust an enforced
+        # contract's declared types outright rather than resolving anything
+        # live - see get_tested_model_columns. Populated once up front,
+        # read-only after, so it's safe to share across the per-node worker threads.
+        #
+        # TODO: Is it ok for this to be a singleton on the adapter class?
+        #       If this is shared by parallel tests, will we be sad?
+        self._contract_columns_by_unique_id: dict[str, dict[str, str]] = {}
+
+    def set_relations_cache(
+        self,
+        relation_configs,
+        clear: bool = False,
+        required_schemas=None,
+    ) -> None:
+        for relation_config in relation_configs:
+            unique_id = getattr(relation_config, "unique_id", None)
+            contract = getattr(relation_config, "contract", None)
+            if unique_id and getattr(contract, "enforced", False):
+                # dbt-core requires every column to declare a data_type once a
+                # contract is enforced (parse-time error otherwise), so no
+                # per-column fallback is needed here.
+                self._contract_columns_by_unique_id[unique_id] = {
+                    name.lower(): column.data_type
+                    for name, column in relation_config.columns.items()
+                }
+        super().set_relations_cache(
+            relation_configs, clear=clear, required_schemas=required_schemas
+        )
 
     @classmethod
     def quote(cls, identifier: str) -> str:
@@ -644,28 +679,43 @@ class ConfluentAdapter(SQLAdapter):
         return self._catalog_filter_table(table, used_schemas)
 
     @available
-    def get_tested_model_relation(self, tested_node_unique_id, database, schema):
-        """Resolve the tested model's relation from its unique_id.
+    def get_tested_model_columns(self, tested_node_unique_id, main_sql):
+        """Resolve the tested model's columns (name, castable data_type) for a unit test.
 
-        Unit tests run in a separate manifest where graph.nodes is empty,
-        so we can't look up nodes directly. Instead, we extract the model
-        identifier from the unique_id (format: model.<package>.<name>)
-        and find the relation in the adapter's cache.
+        Prefers the model's enforced contract, cached off the full manifest in
+        set_relations_cache for the same reason identifiers are (see
+        _contract_columns_by_unique_id) - a unit test asserts what the model
+        should produce, so an enforced contract's declared types are exactly
+        that assertion; trust them outright rather than resolving anything
+        live. Falls back to a dry run of the unit test's own compiled query
+        (fixture inputs already substituted with real temp tables by this
+        point) when no contract is enforced, so a model can be unit tested
+        without needing `dbt run` first, and without the tested column types
+        going stale relative to whatever was last deployed.
         """
-        # unique_id format:
-        #   non-versioned: model.<package>.<name>
-        #   versioned:     model.<package>.<name>.v<version>
-        _, _, name, *v = tested_node_unique_id.split(".")
-        version = f"_{v[0]}" if v and v[0].startswith("v") else ""
-        identifier = f"{name}{version}"
-        relation = self.get_relation(database, schema, identifier)
-        if relation is None:
-            raise DbtDatabaseError(
-                "Could not find relation for tested model with unique_id "
-                f"'{tested_node_unique_id}'. Looked for relation with identifier "
-                f"'{identifier}' in database '{database}', schema '{schema}'"
-            )
-        return relation
+        contract_columns = self._contract_columns_by_unique_id.get(tested_node_unique_id)
+        if contract_columns is not None:
+            return [
+                ConfluentColumn.create(name, data_type)
+                for name, data_type in contract_columns.items()
+            ]
+        return self._dry_run_columns(main_sql)
+
+    def _dry_run_columns(self, sql: str):
+        """Resolve `sql`'s result columns via a Flink dry run, cast-able for a
+        unit test's fixture values - see dry_run.try_get_castable_type.
+
+        Uses try_get_castable_type directly rather than dry_run.get_schema:
+        get_schema's reconstruction always succeeds (it's meant for
+        faithfully reproducing a dry run's schema), but a unit test fixture
+        needs the stricter guarantee that a fixture value can actually be
+        CAST into the resolved type, which try_get_castable_type enforces.
+        """
+        connection = self.connections.get_thread_connection()
+        return [
+            ConfluentColumn.create(column.name, dry_run.try_get_castable_type(column.type))
+            for column in dry_run.get_raw_columns(connection, sql)
+        ]
 
     @available
     def parse_unit_test_ctes(self, extra_ctes, compiled_sql):
