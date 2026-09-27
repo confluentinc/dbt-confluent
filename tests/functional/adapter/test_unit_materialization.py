@@ -339,3 +339,54 @@ class TestStreamingTests(ConfluentFixtures):
         # the wiring (the unit-test runner also fires the model hooks). The
         # fixture table is named after the input CTE dbt-core generates.
         assert_tables_absent(project, "__dbt__cte__my_streaming_source")
+
+
+# `aliased_source`'s deployed identifier ('the_actual_deployed_name') differs
+# from its dbt model name - a `given` input's fixture temp table is cloned
+# via `CREATE TABLE ... LIKE original_relation`, where `original_relation` is
+# resolved from `cte['original_identifier']` (parse_unit_test_ctes, impl.py),
+# a string extracted from dbt-core's own compiled CTE name. dbt-core names
+# that CTE after the input's `identifier` (the alias, when one's configured -
+# see dbt-core's `_recursively_prepend_ctes`), not its model/file name, so
+# this must resolve to the deployed name, not `aliased_source`.
+ALIASED_INPUT_SOURCE = """
+{{ config(materialized='table', alias='the_actual_deployed_name') }}
+select 1 as id
+"""
+
+ALIASED_INPUT_TESTED_MODEL = """
+{{ config(materialized='table') }}
+select * from {{ ref('aliased_source') }}
+"""
+
+ALIASED_INPUT_UNIT_TEST_YML = """
+unit_tests:
+  - name: test_aliased_input
+    model: my_aliased_input_table
+    given:
+      - input: ref('aliased_source')
+        rows:
+          - id: 1
+    expect:
+      rows:
+        - id: 1
+"""
+
+
+class TestUnitTestAliasedInput(ConfluentFixtures):
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "aliased_source.sql": ALIASED_INPUT_SOURCE,
+            "my_aliased_input_table.sql": ALIASED_INPUT_TESTED_MODEL,
+            "unit_test.yml": ALIASED_INPUT_UNIT_TEST_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def custom_clean_up(self, project):
+        yield
+        project.run_sql("drop table if exists the_actual_deployed_name")
+
+    def test_given_input_resolves_the_deployed_alias(self, project):
+        run_dbt(["run", "--select", "aliased_source"])
+        run_dbt(["test", "--select", "test_aliased_input"])

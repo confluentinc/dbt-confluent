@@ -1,0 +1,1 @@
+Added a functional test proving a unit test's `given` input can be a model whose deployed alias differs from its dbt model name - `parse_unit_test_ctes`'s identifier resolution already handles this correctly (unlike the tested-model side before it was fixed), but it was previously untested.
