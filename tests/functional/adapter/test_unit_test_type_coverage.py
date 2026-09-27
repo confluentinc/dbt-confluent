@@ -32,7 +32,7 @@ In every case, the tested model (a bare `select *`) is deliberately never
 import pytest
 import yaml
 
-from dbt.tests.util import run_dbt
+from dbt.tests.util import run_dbt, run_dbt_and_capture
 from tests.functional.adapter.fixtures import ConfluentFixtures
 from tests.functional.adapter.test_dry_run_type_translation import COLUMN_TYPES
 
@@ -166,3 +166,203 @@ class TestUnitTestAllSupportedTypes(ConfluentFixtures):
     )
     def test_castability_across_nullability(self, project, unit_test_name, expect_pass):
         run_dbt(["test", "--select", unit_test_name], expect_pass=expect_pass)
+
+
+# ---------------------------------------------------------------------------
+# An unsupported column type must fail `dbt test` with the same clear,
+# actionable error try_get_castable_type raises - not something opaque, and
+# not a silent pass.
+# ---------------------------------------------------------------------------
+
+# ARRAY is representative of dry_run.NOT_CASTABLE_TYPES - every type in that
+# set is already exhaustively proven to raise try_get_castable_type, in
+# isolation, at both the unit level (test_dry_run.py) and the dry-run
+# functional level (test_dry_run_type_translation.py); this file's job is
+# only to prove that failure actually propagates through the real `unit`
+# materialization macro as the expected `dbt test` failure, not to
+# re-verify which types are unsupported (that's the other two files' job).
+#
+# `tags` is deliberately given no value in `given` (only `id` is) - putting an
+# ARRAY literal in a `given` row hits a separate, pre-existing limitation
+# first: dbt-core's fixture rendering (format_row/safe_cast) can only ever
+# produce `CAST([1, 2, 3] AS ARRAY<INT>)` for a YAML list value, which Flink
+# rejects as a SQL parse error on `[` - before try_get_castable_type, the
+# thing this test is actually about, ever runs. Needing `tags` only in
+# `expect` reaches try_get_castable_type instead, since get_tested_model_columns
+# runs (and can raise) before any expected_sql/main statement referencing the
+# fixture value is ever built.
+UNSUPPORTED_SOURCE_MODEL = (
+    "{{ config(materialized='table') }}\n"
+    "select\n"
+    "    CAST(1 AS INT) AS id,\n"
+    "    CAST(NULL AS ARRAY<INT>) AS tags"
+)
+
+UNSUPPORTED_TESTED_MODEL = """
+{{ config(materialized='table') }}
+select * from {{ ref('my_unsupported_type_source') }}
+"""
+
+UNSUPPORTED_UNIT_TEST_YML = yaml.safe_dump(
+    {
+        "unit_tests": [
+            {
+                "name": "test_unsupported_column_type",
+                "model": "my_unsupported_type_table",
+                "given": [{"input": "ref('my_unsupported_type_source')", "rows": [{"id": 1}]}],
+                "expect": {"rows": [{"id": 1, "tags": [1, 2, 3]}]},
+            }
+        ]
+    },
+    sort_keys=False,
+)
+
+
+class TestUnitTestUnsupportedColumnType(ConfluentFixtures):
+    """The tested model is never `dbt run` - only its source is, same as
+    TestUnitTestAllSupportedTypes above. `expect` names `tags` (the
+    unsupported column) so needed_columns still includes it - this is the
+    "the fixture actually needs this column" counterpart to
+    TestUnitTestUnsupportedColumnTypeNotInFixture below."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "my_unsupported_type_source.sql": UNSUPPORTED_SOURCE_MODEL,
+            "my_unsupported_type_table.sql": UNSUPPORTED_TESTED_MODEL,
+            "unit_test.yml": UNSUPPORTED_UNIT_TEST_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def custom_clean_up(self, project):
+        yield
+        project.run_sql("drop table if exists my_unsupported_type_source")
+
+    def test_fails_with_the_clear_unsupported_type_error(self, project):
+        run_dbt(["run", "--select", "my_unsupported_type_source"])
+        _, stdout = run_dbt_and_capture(
+            ["test", "--select", "test_unsupported_column_type"], expect_pass=False
+        )
+        assert "isn't supported without an enforced contract" in stdout
+        assert "'ARRAY'" in stdout
+
+
+# ---------------------------------------------------------------------------
+# A `given` fixture that supplies a value for an unsupported-type column
+# fails at a different point than the `expect`-side test above: the
+# fixture's own INSERT (into a real temp table cloned from the source),
+# via insert_unit_test_fixture - not get_tested_model_columns. Left
+# unhandled, that INSERT fails with a raw Flink SQL parse error
+# (`Encountered '[' ...`, confirmed live); this proves it instead surfaces
+# the same kind of clear, actionable message.
+# ---------------------------------------------------------------------------
+
+GIVEN_SIDE_UNSUPPORTED_UNIT_TEST_YML = yaml.safe_dump(
+    {
+        "unit_tests": [
+            {
+                "name": "test_unsupported_column_type_in_given",
+                "model": "my_unsupported_type_table",
+                "given": [
+                    {
+                        "input": "ref('my_unsupported_type_source')",
+                        "rows": [{"id": 1, "tags": [1, 2, 3]}],
+                    }
+                ],
+                "expect": {"rows": [{"id": 1, "tags": [1, 2, 3]}]},
+            }
+        ]
+    },
+    sort_keys=False,
+)
+
+
+class TestUnitTestUnsupportedColumnTypeInGivenFixture(ConfluentFixtures):
+    """Same source/tested models as TestUnitTestUnsupportedColumnType above,
+    but the unsupported value is supplied in `given` (not just `expect`) -
+    reaching insert_unit_test_fixture's error-clarifying path instead of
+    get_tested_model_columns's."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "my_unsupported_type_source.sql": UNSUPPORTED_SOURCE_MODEL,
+            "my_unsupported_type_table.sql": UNSUPPORTED_TESTED_MODEL,
+            "unit_test.yml": GIVEN_SIDE_UNSUPPORTED_UNIT_TEST_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def custom_clean_up(self, project):
+        yield
+        project.run_sql("drop table if exists my_unsupported_type_source")
+
+    def test_fails_with_a_clear_error_naming_the_column_not_a_raw_parse_error(self, project):
+        run_dbt(["run", "--select", "my_unsupported_type_source"])
+        _, stdout = run_dbt_and_capture(
+            ["test", "--select", "test_unsupported_column_type_in_given"], expect_pass=False
+        )
+        assert "column(s) tags" in stdout
+        assert "YAML fixture can't represent a literal value" in stdout
+
+
+# ---------------------------------------------------------------------------
+# get_tested_model_columns/_dry_run_columns only demand try_get_castable_type's
+# stricter guarantee for the columns a unit test's `expect` block actually
+# names (unit.sql's needed_columns) - a column the fixture never references,
+# even an otherwise-unsupported one, must not block the unit test at all.
+# ---------------------------------------------------------------------------
+
+UNREFERENCED_UNSUPPORTED_SOURCE_MODEL = (
+    "{{ config(materialized='table') }}\n"
+    "select\n"
+    "    CAST(1 AS INT) AS id,\n"
+    "    CAST(NULL AS ARRAY<INT>) AS tags"
+)
+
+UNREFERENCED_UNSUPPORTED_TESTED_MODEL = """
+{{ config(materialized='table') }}
+select * from {{ ref('my_unreferenced_unsupported_source') }}
+"""
+
+# Deliberately omits `tags` from both given and expect - the fixture only
+# exercises `id`, the one column this unit test actually cares about.
+UNREFERENCED_UNSUPPORTED_UNIT_TEST_YML = yaml.safe_dump(
+    {
+        "unit_tests": [
+            {
+                "name": "test_unreferenced_unsupported_column_type",
+                "model": "my_unreferenced_unsupported_table",
+                "given": [
+                    {"input": "ref('my_unreferenced_unsupported_source')", "rows": [{"id": 1}]}
+                ],
+                "expect": {"rows": [{"id": 1}]},
+            }
+        ]
+    },
+    sort_keys=False,
+)
+
+
+class TestUnitTestUnsupportedColumnTypeNotInFixture(ConfluentFixtures):
+    """Same shape as TestUnitTestUnsupportedColumnType above, except the
+    unsupported-type column (`tags`) is never named in the fixture's given
+    or expect rows - only `id` is. This unit test has nothing to do with
+    `tags`, so it must pass even though the tested model has a column no
+    fixture could ever cast."""
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "my_unreferenced_unsupported_source.sql": UNREFERENCED_UNSUPPORTED_SOURCE_MODEL,
+            "my_unreferenced_unsupported_table.sql": UNREFERENCED_UNSUPPORTED_TESTED_MODEL,
+            "unit_test.yml": UNREFERENCED_UNSUPPORTED_UNIT_TEST_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def custom_clean_up(self, project):
+        yield
+        project.run_sql("drop table if exists my_unreferenced_unsupported_source")
+
+    def test_passes_despite_the_untouched_unsupported_column(self, project):
+        run_dbt(["run", "--select", "my_unreferenced_unsupported_source"])
+        run_dbt(["test", "--select", "test_unreferenced_unsupported_column_type"])

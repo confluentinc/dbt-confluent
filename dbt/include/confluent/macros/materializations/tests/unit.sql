@@ -8,8 +8,14 @@
   {%- set expected_sql = config.get('expected_sql') -%}
   {%- if (expected_rows | length) > 0 -%}
     {%- set tested_expected_column_names = expected_rows[0].keys() -%}
+    {%- set needed_columns = tested_expected_column_names -%}
   {%- else -%}
     {%- set tested_expected_column_names = get_columns_in_query(sql) -%}
+    {# No `expect` rows to narrow by (a raw expected_sql was given instead) -
+       every column of the tested model could end up in that expected_sql,
+       so every column still needs to be castable; pass none to keep
+       get_tested_model_columns resolving them all, same as before. #}
+    {%- set needed_columns = none -%}
   {%- endif -%}
 
   {# Parse CTEs and extract main query in Python #}
@@ -46,16 +52,18 @@
       CREATE TABLE {{ temp_relation }} LIKE {{ original_relation }} ( EXCLUDING OPTIONS )
     {%- endcall %}
 
-    {% call statement('insert_' ~ loop.index) -%}
-      INSERT INTO {{ temp_relation }} {{ cte['body'] }}
-    {%- endcall %}
+    {# insert_unit_test_fixture (not the generic statement() macro) so a
+       fixture value for an unsupported column type fails with a clear,
+       actionable error instead of a raw Flink SQL parse error - see its
+       docstring. #}
+    {%- do adapter.insert_unit_test_fixture(temp_relation, original_relation, cte['body']) -%}
   {%- endfor -%}
 
   {# Get column metadata for the TESTED MODEL (not 'this', which is the unit test node):
      its enforced contract if it has one, otherwise a dry run of main_sql above (fixture
      inputs are already real temp tables by this point) - see get_tested_model_columns. #}
   {%- set tested_columns = adapter.get_tested_model_columns(
-      model['tested_node_unique_id'], main_sql
+      model['tested_node_unique_id'], main_sql, needed_columns
   ) -%}
   {%- set column_name_to_data_types = {} -%}
   {%- set column_name_to_quoted = {} -%}

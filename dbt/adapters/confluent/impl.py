@@ -679,7 +679,7 @@ class ConfluentAdapter(SQLAdapter):
         return self._catalog_filter_table(table, used_schemas)
 
     @available
-    def get_tested_model_columns(self, tested_node_unique_id, main_sql):
+    def get_tested_model_columns(self, tested_node_unique_id, main_sql, needed_columns=None):
         """Resolve the tested model's columns (name, castable data_type) for a unit test.
 
         Prefers the model's enforced contract, cached off the full manifest in
@@ -692,6 +692,11 @@ class ConfluentAdapter(SQLAdapter):
         point) when no contract is enforced, so a model can be unit tested
         without needing `dbt run` first, and without the tested column types
         going stale relative to whatever was last deployed.
+
+        `needed_columns`, when given, is the (case-insensitive) set of column
+        names the unit test's `expect` block actually names - see
+        _dry_run_columns for why that's the only set that needs to survive
+        try_get_castable_type's stricter checks.
         """
         contract_columns = self._contract_columns_by_unique_id.get(tested_node_unique_id)
         if contract_columns is not None:
@@ -699,9 +704,9 @@ class ConfluentAdapter(SQLAdapter):
                 ConfluentColumn.create(name, data_type)
                 for name, data_type in contract_columns.items()
             ]
-        return self._dry_run_columns(main_sql)
+        return self._dry_run_columns(main_sql, needed_columns)
 
-    def _dry_run_columns(self, sql: str):
+    def _dry_run_columns(self, sql: str, needed_columns=None):
         """Resolve `sql`'s result columns via a Flink dry run, cast-able for a
         unit test's fixture values - see dry_run.try_get_castable_type.
 
@@ -710,11 +715,68 @@ class ConfluentAdapter(SQLAdapter):
         faithfully reproducing a dry run's schema), but a unit test fixture
         needs the stricter guarantee that a fixture value can actually be
         CAST into the resolved type, which try_get_castable_type enforces.
+
+        That stricter guarantee is only needed for a column the unit test's
+        `expect` block actually names - dbt-core's own fixture rendering
+        (format_row) only ever looks up the columns a fixture row names, so a
+        column outside `needed_columns` (e.g. an ARRAY the model happens to
+        select but this unit test never asserts on) gets a plain,
+        non-castable-checked DDL type instead of failing the whole unit test.
+        `needed_columns=None` (no `expect` rows to narrow by) preserves the
+        old all-columns-must-be-castable behavior.
         """
         connection = self.connections.get_thread_connection()
+        needed = {name.lower() for name in needed_columns} if needed_columns is not None else None
+        columns = []
+        for column in dry_run.get_raw_columns(connection, sql):
+            if needed is None or column.name.lower() in needed:
+                data_type = dry_run.try_get_castable_type(column.type)
+            else:
+                data_type = dry_run.get_ddl_type(column.type)
+            columns.append(ConfluentColumn.create(column.name, data_type))
+        return columns
+
+    @available
+    def insert_unit_test_fixture(self, temp_relation, original_relation, body: str) -> None:
+        """Insert a unit test's `given` fixture rows (`body`, already
+        rendered by dbt-core's own fixture SQL) into `temp_relation` - a
+        clone of `original_relation` created just for this unit test run.
+
+        Bypasses the generic `statement()` macro (unlike every other
+        statement in this materialization) purely to wrap this one INSERT:
+        dbt-core's fixture rendering (format_row/safe_cast) has no way to
+        emit a literal for an ARRAY/MAP/ROW/MULTISET/interval column - a
+        `given` row that supplies a concrete value for one fails this INSERT
+        with a raw Flink SQL parse error (e.g. `Encountered '[' ...`), not
+        something a user could act on. On failure, check whether
+        `original_relation` actually has such a column and, if so, re-raise
+        naming it explicitly - the original error is still included
+        (`from e`), just with the likely cause called out instead of left
+        for the user to guess from a parser error.
+        """
+        sql = f"insert into {temp_relation} {body}"
+        try:
+            self.execute(sql)
+        except DbtDatabaseError as e:
+            unsupported_columns = self._unsupported_column_names(original_relation)
+            if not unsupported_columns:
+                raise
+            raise DbtDatabaseError(
+                f"This unit test's input fixture failed to insert into "
+                f"{original_relation}, which has column(s) "
+                f"{', '.join(unsupported_columns)} of a type a YAML fixture "
+                "can't represent a literal value for (ARRAY/MAP/ROW/MULTISET/"
+                "interval). If the error below is about one of them, omit it "
+                "from the fixture's `given` row instead (it will default to "
+                f"NULL):\n{e}"
+            ) from e
+
+    def _unsupported_column_names(self, relation) -> list[str]:
+        connection = self.connections.get_thread_connection()
         return [
-            ConfluentColumn.create(column.name, dry_run.try_get_castable_type(column.type))
-            for column in dry_run.get_raw_columns(connection, sql)
+            column.name
+            for column in dry_run.get_raw_columns(connection, f"select * from {relation}")
+            if dry_run.is_not_castable(column.type)
         ]
 
     @available

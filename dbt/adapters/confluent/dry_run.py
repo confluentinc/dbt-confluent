@@ -149,6 +149,18 @@ def get_ddl_type(type_def: ColumnTypeDefinition) -> str:
     return base if type_def.nullable else f"{base} NOT NULL"
 
 
+def is_not_castable(type_def: ColumnTypeDefinition) -> bool:
+    """Whether `type_def`'s kind (after CAST_TYPE_ALIASES normalization) is
+    one try_get_castable_type would reject - see NOT_CASTABLE_TYPES.
+
+    Split out from try_get_castable_type so a caller that just needs to know
+    *whether* a column is a problem (e.g. to explain an unrelated failure
+    that's plausibly caused by one) doesn't have to catch-and-discard the
+    DbtDatabaseError try_get_castable_type raises for one.
+    """
+    return CAST_TYPE_ALIASES.get(type_def.type, type_def.type) in NOT_CASTABLE_TYPES
+
+
 def try_get_castable_type(type_def: ColumnTypeDefinition) -> str:
     """A Flink DDL type string, suitable for `CAST(<a unit test fixture
     value> AS ...)`, for a dry run's ColumnTypeDefinition.
@@ -167,9 +179,8 @@ def try_get_castable_type(type_def: ColumnTypeDefinition) -> str:
     entirely ordinary in a real model - must not turn into
     `CAST(x AS BIGINT NOT NULL)`, which Flink would reject.
     """
-    kind = CAST_TYPE_ALIASES.get(type_def.type, type_def.type)
-    if kind in NOT_CASTABLE_TYPES:
-        _raise_unsupported(kind)
+    if is_not_castable(type_def):
+        _raise_unsupported(CAST_TYPE_ALIASES.get(type_def.type, type_def.type))
     if type_def.nullable:
         return get_ddl_type(type_def)
     return get_ddl_type(replace(type_def, nullable=True))
