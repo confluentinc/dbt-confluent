@@ -32,6 +32,7 @@ dependencies = [
   "dbt-common~=1.12",
   "dbt-adapters~=1.16",
   "agate~=1.0",
+  "sqlparse>=0.5.5,<0.6.0",
   "httpx>=0.23.0,<0.29.0",
   "confluent-sql~=0.5.4",
 ]

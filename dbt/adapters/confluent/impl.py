@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 import agate
+import sqlparse
 from confluent_sql.exceptions import (
     OperationalError,
     StatementNotFoundError,
@@ -676,12 +677,15 @@ class ConfluentAdapter(SQLAdapter):
             "with <cte1>, <cte2> <main_sql>"
 
         This method extracts each CTE's name, fixture body, and original
-        model identifier, and strips the CTE prefix from the compiled SQL
-        to recover the main query.
+        model identifier, and strips just those fixture CTEs out of the
+        compiled SQL to recover the main query - any CTEs the tested
+        model's own SQL defined are left in place (dbt-core merges fixture
+        and model-authored CTEs into one `with` list, and only the fixture
+        ones are backed by real temp tables by the time main_sql runs).
 
         Returns a dict with:
             - ctes: list of {cte_name, body, original_identifier} dicts
-            - main_sql: the compiled SQL with the CTE prefix removed
+            - main_sql: the compiled SQL with the fixture CTEs removed
         """
         ctes = []
         for cte in extra_ctes:
@@ -699,14 +703,66 @@ class ConfluentAdapter(SQLAdapter):
                 }
             )
 
-        # Strip the CTE prefix to get the main query
+        # Strip the fixture CTEs out of the compiled SQL to get the main
+        # query, using sqlparse (the same library dbt-core's
+        # inject_ctes_into_sql uses to build this "with ..." clause in the
+        # first place) to find the CTE list structurally rather than
+        # reconstructing its expected length/whitespace as a string - that
+        # reconstruction doesn't necessarily match dbt-core's actual
+        # token-level output byte-for-byte (e.g. it undercounts the
+        # separator between multiple fixture CTEs). If the tested model's
+        # own SQL already had a `with` clause, dbt-core merges the fixture
+        # CTEs into that same list (fixtures first) rather than nesting a
+        # second `with` - so we can't just drop the whole list: only the
+        # fixture CTEs are backed by real temp tables at this point (see
+        # the caller), any of the model's own CTEs must stay in main_sql or
+        # the query is left with dangling references to them.
         main_sql = compiled_sql
         if ctes:
-            cte_sqls = [cte["sql"] for cte in extra_ctes]
-            cte_prefix = "with" + ", ".join(cte_sqls) + " "
-            main_sql = compiled_sql[len(cte_prefix) :]
+            fixture_cte_names = {cte["cte_name"] for cte in ctes}
+            main_sql = self._strip_with_clause(compiled_sql, fixture_cte_names)
 
         return {"ctes": ctes, "main_sql": main_sql}
+
+    @staticmethod
+    def _strip_with_clause(compiled_sql: str, fixture_cte_names: set) -> str:
+        """Remove just the named fixture CTEs from `compiled_sql`'s leading
+        `with <cte1>, <cte2>, ...` clause, keeping any others (e.g. ones the
+        tested model's own SQL defined) and returning the rest of the query.
+
+        Parses with sqlparse and walks top-level tokens for the `WITH`
+        keyword, then the single token that follows it - sqlparse groups an
+        entire comma-separated CTE list (however many CTEs, each with its
+        own balanced parens) into one token, whether that's a bare
+        Identifier (one CTE) or an IdentifierList (more than one).
+        """
+        tokens = list(sqlparse.parse(compiled_sql)[0].tokens)
+        with_idx = next(
+            (i for i, t in enumerate(tokens) if t.ttype is sqlparse.tokens.Keyword.CTE),
+            None,
+        )
+        if with_idx is None:
+            return compiled_sql
+
+        idx = with_idx + 1
+        while idx < len(tokens) and tokens[idx].is_whitespace:
+            idx += 1
+        cte_list_token = tokens[idx]
+        rest = "".join(str(t) for t in tokens[idx + 1 :]).lstrip(", \n")
+
+        if isinstance(cte_list_token, sqlparse.sql.IdentifierList):
+            cte_identifiers = list(cte_list_token.get_identifiers())
+        else:
+            cte_identifiers = [cte_list_token]
+
+        kept_ctes = [
+            str(ident)
+            for ident in cte_identifiers
+            if ident.get_real_name() not in fixture_cte_names
+        ]
+        if not kept_ctes:
+            return rest
+        return f"with {', '.join(kept_ctes)} {rest}"
 
     @available
     def generate_schema_check_temp_name(self, identifier: str) -> str:
