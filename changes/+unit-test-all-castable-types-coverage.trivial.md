@@ -1,0 +1,1 @@
+Added a functional test proving get_tested_model_columns' dry-run column resolution works end to end through a real `dbt test` run - every YAML-castable type in test_dry_run_type_translation.py's manifest at once, in a model that's never `dbt run` before being unit tested.
