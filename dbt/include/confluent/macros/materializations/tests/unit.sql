@@ -55,8 +55,15 @@
     {# insert_unit_test_fixture (not the generic statement() macro) so a
        fixture value for an unsupported column type fails with a clear,
        actionable error instead of a raw Flink SQL parse error - see its
-       docstring. #}
-    {%- do adapter.insert_unit_test_fixture(temp_relation, original_relation, cte['body']) -%}
+       docstring. Note: dbt-core's own fixture rendering (format_row) always
+       bakes the CAST target type for a `given` row's values from
+       original_relation's LIVE columns (get_fixture_sql.sql), before this
+       materialization ever runs - so `original_relation` must already be
+       deployed and current for ANY given input, on every adapter; there is
+       no way to regenerate this input's schema from its own current code
+       instead, since dbt-core's own fixture values are already cast against
+       the live relation by the time we see them. #}
+    {%- do adapter.insert_unit_test_fixture(temp_relation, cte['body']) -%}
   {%- endfor -%}
 
   {# Get column metadata for the TESTED MODEL (not 'this', which is the unit test node):

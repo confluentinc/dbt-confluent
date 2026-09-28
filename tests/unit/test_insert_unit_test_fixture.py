@@ -5,7 +5,7 @@ for an ARRAY/MAP/ROW/MULTISET/interval column - a `given` row that supplies a
 concrete value for one fails the INSERT with a raw Flink SQL parse error
 (confirmed live: `Encountered '[' ...`), not something a user could act on.
 insert_unit_test_fixture bypasses the generic `statement()` macro for just
-this one INSERT so it can catch that failure and, when `original_relation`
+this one INSERT so it can catch that failure and, when `temp_relation`
 actually has such a column, re-raise naming it - see dry_run.is_not_castable.
 """
 
@@ -31,7 +31,7 @@ class TestInsertUnitTestFixture:
         adapter.execute = MagicMock(return_value=(MagicMock(), MagicMock()))
 
         with patch("dbt.adapters.confluent.impl.dry_run.get_raw_columns") as get_raw_columns:
-            adapter.insert_unit_test_fixture("temp", "original", "select 1 as id")
+            adapter.insert_unit_test_fixture("temp", "select 1 as id")
 
         adapter.execute.assert_called_once_with("insert into temp select 1 as id")
         get_raw_columns.assert_not_called()
@@ -55,7 +55,7 @@ class TestInsertUnitTestFixture:
             ],
         ):
             with pytest.raises(DbtDatabaseError) as exc_info:
-                adapter.insert_unit_test_fixture("temp", "original", "select ...")
+                adapter.insert_unit_test_fixture("temp", "select ...")
 
         assert "column(s) tags" in str(exc_info.value)
         assert "Encountered '[' at line 1" in str(exc_info.value)
@@ -73,6 +73,6 @@ class TestInsertUnitTestFixture:
             ],
         ):
             with pytest.raises(DbtDatabaseError) as exc_info:
-                adapter.insert_unit_test_fixture("temp", "original", "select ...")
+                adapter.insert_unit_test_fixture("temp", "select ...")
 
         assert exc_info.value is original_error

@@ -737,10 +737,12 @@ class ConfluentAdapter(SQLAdapter):
         return columns
 
     @available
-    def insert_unit_test_fixture(self, temp_relation, original_relation, body: str) -> None:
+    def insert_unit_test_fixture(self, temp_relation, body: str) -> None:
         """Insert a unit test's `given` fixture rows (`body`, already
         rendered by dbt-core's own fixture SQL) into `temp_relation` - a
-        clone of `original_relation` created just for this unit test run.
+        table created just for this unit test run, with the input's
+        schema (either cloned from a live relation, or regenerated from
+        the input model's own current code - see unit.sql).
 
         Bypasses the generic `statement()` macro (unlike every other
         statement in this materialization) purely to wrap this one INSERT:
@@ -749,7 +751,7 @@ class ConfluentAdapter(SQLAdapter):
         `given` row that supplies a concrete value for one fails this INSERT
         with a raw Flink SQL parse error (e.g. `Encountered '[' ...`), not
         something a user could act on. On failure, check whether
-        `original_relation` actually has such a column and, if so, re-raise
+        `temp_relation` actually has such a column and, if so, re-raise
         naming it explicitly - the original error is still included
         (`from e`), just with the likely cause called out instead of left
         for the user to guess from a parser error.
@@ -758,12 +760,12 @@ class ConfluentAdapter(SQLAdapter):
         try:
             self.execute(sql)
         except DbtDatabaseError as e:
-            unsupported_columns = self._unsupported_column_names(original_relation)
+            unsupported_columns = self._unsupported_column_names(temp_relation)
             if not unsupported_columns:
                 raise
             raise DbtDatabaseError(
                 f"This unit test's input fixture failed to insert into "
-                f"{original_relation}, which has column(s) "
+                f"{temp_relation}, which has column(s) "
                 f"{', '.join(unsupported_columns)} of a type a YAML fixture "
                 "can't represent a literal value for (ARRAY/MAP/ROW/MULTISET/"
                 "interval). If the error below is about one of them, omit it "
