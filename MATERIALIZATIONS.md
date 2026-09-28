@@ -1,5 +1,29 @@
 # Materializations
 
+## Overview
+
+dbt-confluent supports a number of materializations and most are backed by an Apache Kafka topic
+(though that storage can be augmented with features like [Tableflow](#tableflow)). The notable
+exceptions are `view` and `ephemeral`, which create no topic at all. For everything else, a dbt
+model maps onto both a Kafka topic and a Flink statement, which has consequences that don't apply to
+a traditional relational warehouse: dropping a relation can permanently delete the topic and all of
+its data, "recreating" a table is really creating a new topic alongside deleting the old one, and a
+table's `WITH` options and continuous query are properties of a long-lived (or reconcilable) stream
+processing job rather than a one-time schema definition.
+
+That statefulness cuts both ways. A long-running job doesn't just own a topic — it also carries its
+own Flink processing state (aggregation accumulators, join buffers, window contents), and some
+changes force that state to be discarded and rebuilt even when the topic itself survives; see, for
+example, [`materialized_table` evolution](#materialized-table). Keeping both kinds of statefulness
+in mind — the Kafka topic underneath and the Flink job's own in-memory state — will help make sense
+of why several materializations below behave differently from their counterparts in other dbt
+adapters.
+
+If you're coming from a batch warehouse background, dbt-confluent's `table` materialization is the
+closest analog to what you're likely used to: a one-shot query that produces a result. Moving beyond
+that, dbt-confluent's `materialized_table` and `streaming_table` materializations are the more
+stream-native way to build models.
+
 ## Supported
 
 | Materialization | Description |
