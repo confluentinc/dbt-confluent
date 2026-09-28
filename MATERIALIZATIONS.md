@@ -3,8 +3,9 @@
 ## Overview
 
 dbt-confluent supports a number of materializations and most are backed by an Apache Kafka topic
-(though that storage can be augmented with features like [Tableflow](#tableflow)). The notable
-exceptions are `view` and `ephemeral`, which create no topic at all. For everything else, a dbt
+that stores data (that storage can be augmented with features like [Tableflow](#tableflow)). The
+notable exceptions are `view`, whose reserved topic never stores data, and `ephemeral`, which creates
+no topic at all. For everything else, a dbt
 model maps onto both a Kafka topic and a Flink statement, which has consequences that don't apply to
 a traditional relational warehouse: dropping a relation can permanently delete the topic and all of
 its data, "recreating" a table is really creating a new topic alongside deleting the old one, and a
@@ -198,9 +199,116 @@ The corollary: if a model's `tableflow` config is removed (rather than the table
 
 **Credentials**: Tableflow's control-plane routes require a Global API key (`global_api_key` / `global_api_secret`) — they resolve `database` to a Kafka cluster id via CMK, which only a Global key can do. A model that configures `tableflow` on a profile without one raises a clear error naming these fields, rather than the raw driver error.
 
-## Materialized Table
+## Supported Materializations
 
-`materialized_table` is declarative: every run issues `CREATE OR ALTER MATERIALIZED TABLE` and lets Flink reconcile the table, rather than using the drop/recreate + schema-drift flow that `table`/`streaming_table` use.
+### Table
+
+#### Overview
+
+`table` creates a table via a one-shot `CREATE TABLE ... AS SELECT` (CTAS).
+It's the closest analog to a traditional batch-warehouse table: the query runs once, produces a
+result, and completes.
+If you're new to dbt-confluent, this is the easiest materialization to start with before moving on
+to `streaming_table` or `materialized_table`.
+
+#### Config Options
+
+- `with` — table options baked into the `CREATE TABLE` DDL, e.g. `{'changelog.mode': 'upsert'}`.
+- `distributed_by` — see [Distributed By](#distributed-by).
+- `on_schema_drift` — see [Schema Drift Detection](#schema-drift-detection).
+- `statement_name` — see [Deterministic Statement Names](#deterministic-statement-names).
+- `compute_pool_id` — see [Compute Pool](#compute-pool).
+- `tableflow` — see [Tableflow](#tableflow).
+- `ignore_unsupported_config` — see [Validation](#validation).
+
+#### Schema Drift / Reconciliation Behavior
+
+If the table already exists and `--full-refresh` is not specified, `table` skips creation after
+running [schema drift detection](#schema-drift-detection) (columns, `WITH` options, and
+`distributed_by`).
+Use `--full-refresh` to drop and recreate the table — this permanently deletes the backing Kafka
+topic and all of its data.
+
+#### Statements Emitted
+
+`table` submits a single statement:
+
+```sql
+CREATE TABLE <relation> [DISTRIBUTED BY (...)] [WITH (...)] AS (<model SELECT>)
+```
+
+The statement runs in Confluent Cloud Flink's
+[snapshot execution mode](https://docs.confluent.io/cloud/current/flink/concepts/snapshot-queries.html):
+it reads a point-in-time view of its sources via Flink's batch execution mode, and "runs, returns
+results, and then exits," rather than running continuously.
+
+See the [`CREATE TABLE` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html)
+for the full DDL grammar.
+
+### View
+
+#### Overview
+
+A view is a named query definition: Flink inlines its SQL into whatever job(s) actually query it, at
+those jobs' own execution time, rather than running any compute of its own.
+Unlike every other Kafka-backed materialization on this page, `view` doesn't create a topic that stores data.
+Creating a view does reserve a special Kafka topic name, but that topic is metadata-only and never
+holds records — this differs from `ephemeral`, which creates no topic at all.
+
+#### Config Options
+
+Only three dbt-confluent config keys apply to `view`:
+
+- `statement_name` — see [Deterministic Statement Names](#deterministic-statement-names).
+- `compute_pool_id` — see [Compute Pool](#compute-pool).
+- `ignore_unsupported_config` — see [Validation](#validation).
+
+Most other cross-materialization config keys don't apply here — for example `with`, `distributed_by`,
+and `tableflow` all require a real Kafka-backed table, and this list isn't exhaustive.
+Setting any of dbt-confluent's other config keys on a `view` model fails at compile time; see
+[Validation](#validation).
+
+#### Statements Emitted
+
+`view` submits two statements, unconditionally, on every single `dbt run` — there is no diffing and
+no skip-if-unchanged path here, unlike every other materialization on this page:
+
+```sql
+DROP VIEW IF EXISTS <relation>
+CREATE VIEW <relation> AS (<model SELECT>)
+```
+
+Both are short-lived, completing statements, not long-running jobs.
+See the [`CREATE VIEW`](https://docs.confluent.io/cloud/current/flink/reference/statements/create-view.html)
+and [`DROP VIEW`](https://docs.confluent.io/cloud/current/flink/reference/statements/drop-view.html)
+references.
+`--full-refresh` behaves identically to a plain run, since a plain run already drops and recreates.
+
+### Materialized Table
+
+#### Overview
+
+`materialized_table` is declarative.
+Every run submits the same kind of statement, and Flink reconciles the table's actual state to match
+it, rather than dbt-confluent choosing between a drop/recreate and a schema-drift-based skip the way
+`table`/`streaming_table`/`streaming_source` do.
+
+#### Config Options
+
+- `distributed_by` — see [Distributed By](#distributed-by). Fixed at creation; changing it requires `--full-refresh`.
+- `with` — table options, e.g. `{'key.format': 'avro-registry'}`.
+- `start_mode` — where the query starts (or, on an in-place evolution, restarts) reading; see [Evolution / State Impact](#evolution--state-impact) below. All eight documented forms are accepted (default: `RESUME_OR_FROM_BEGINNING`): `FROM_BEGINNING`, `FROM_NOW`, `RESUME_OR_FROM_BEGINNING`, `RESUME_OR_FROM_NOW`, `FROM_TIMESTAMP('<timestamp>')`, `RESUME_OR_FROM_TIMESTAMP('<timestamp>')`, `FROM_NOW(INTERVAL '<n>' <unit>)`, `RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>)`. The adapter validates the keyword and its arity but passes the parenthesized argument through verbatim (after rejecting anything that could break out of the DDL — stray quotes, parens, operators); the server validates the argument itself. Note that `FROM_NOW`/`RESUME_OR_FROM_NOW` require a full interval literal — `FROM_NOW(INTERVAL '7' DAY)` — not a plain quoted string, despite what some Confluent docs examples currently show.
+- `statement_properties` — see [Statement Properties](#statement-properties).
+- `tableflow` — see [Tableflow](#tableflow). Checked on every run — create, in-place evolution, or no-op alike.
+- `freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error. Any other dbt-confluent config key this materialization doesn't read (e.g. `connector`, `on_schema_drift`) is also rejected — see [Validation](#validation).
+
+**Contracts and primary keys**:
+
+With `config(contract={'enforced': true})` and an explicit `columns:`/`constraints:` block in the model's schema.yml, `materialized_table` renders an explicit column-definition list — including a `PRIMARY KEY (...) NOT ENFORCED` clause from a model-level `primary_key` constraint — ahead of `DISTRIBUTED BY`/`WITH`/`START_MODE` in the submitted `CREATE OR ALTER MATERIALIZED TABLE (cols..., PRIMARY KEY(...) NOT ENFORCED) ... AS SELECT ...`, matching Confluent's materialized-table grammar. This is what makes the resulting table usable in **snapshot queries** against its key. As with `table` (see [Validation](#validation)), the contract's declared columns are checked against the model's compiled SQL and a mismatch fails the run before any DDL is submitted. Without an enforced contract, the materialization renders a plain `AS SELECT` with no explicit column list.
+
+#### Evolution / State Impact
+
+`materialized_table` behaves differently depending on what changes between runs:
 
 - **New table** — created.
 - **Unchanged** — a server-side no-op: Confluent diffs the submitted definition against the current one and leaves the table, its data, and its query state untouched. Re-asserting the definition on every run is safe and is the design.
@@ -214,21 +322,23 @@ The corollary: if a model's `tableflow` config is removed (rather than the table
 
 **Evolution limits**: not every change can evolve in place — dropping columns is rejected at submission, observed either as a per-column error ("dropping a non-nullable, persisted column is not supported") or as a query/sink schema mismatch ("Column types of query result and sink ... do not match. Cause: Different number of columns."). The fix is `--full-refresh`. (Materialized tables don't use [schema drift detection](#schema-drift-detection) — Flink reconciles the definition instead, and a rejected evolution is the analogous failure mode.)
 
-**Config**:
+#### Statements Emitted
 
-- `distributed_by` — a `{'columns': [...], 'buckets': N}` mapping, same shape and validation as the other materializations (see [Distributed By](#distributed-by)). Confluent's materialized-table grammar documents `DISTRIBUTED BY (...)` without `HASH`; the adapter emits `DISTRIBUTED BY HASH(...)`, which works in practice.
-- `with` — table options, e.g. `{'key.format': 'avro-registry'}`.
-- `start_mode` — where the query starts (or, on an in-place evolution, restarts) reading. It applies when the table is created **and is re-applied on every evolution** — e.g. `FROM_BEGINNING` reprocesses the full input history after each definition change. All eight documented forms are accepted (default: `RESUME_OR_FROM_BEGINNING`): `FROM_BEGINNING`, `FROM_NOW`, `RESUME_OR_FROM_BEGINNING`, `RESUME_OR_FROM_NOW`, `FROM_TIMESTAMP('<timestamp>')`, `RESUME_OR_FROM_TIMESTAMP('<timestamp>')`, `FROM_NOW(INTERVAL '<n>' <unit>)`, `RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>)`. The adapter validates the keyword and its arity but passes the parenthesized argument through verbatim (after rejecting anything that could break out of the DDL — stray quotes, parens, operators); the server validates the argument itself. Note that `FROM_NOW`/`RESUME_OR_FROM_NOW` require a full interval literal — `FROM_NOW(INTERVAL '7' DAY)` — not a plain quoted string, despite what some Confluent docs examples currently show.
-- `statement_properties` — Flink SET-style statement properties for the `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT` statement (e.g. tuning a temporal join's scan idle-timeout). See [Statement Properties](#statement-properties).
-- `tableflow` — materialize this table's backing Kafka topic via Tableflow. Checked on every run (create, in-place evolution, or no-op alike) — see [Tableflow](#tableflow).
+Every run — whether the table doesn't exist yet, exists unchanged, or exists with a different
+definition — submits the same statement:
 
-`freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error. Any other dbt-confluent config key this materialization doesn't read (e.g. `connector`, `on_schema_drift`) is also rejected — see [Validation](#validation).
+```sql
+CREATE OR ALTER MATERIALIZED TABLE <relation> [(<cols>, PRIMARY KEY (...) NOT ENFORCED)]
+  [DISTRIBUTED BY (...)] [WITH (...)] [START_MODE = ...] AS <model SELECT>
+```
 
-**Contracts and primary keys**:
+This is never a bare `ALTER MATERIALIZED TABLE` — even when only a `with` option changes and nothing
+about the query, columns, or distribution does.
+Each run submits under a unique per-run statement name (see
+[Deterministic Statement Names](#deterministic-statement-names)), so a re-assert can never collide
+with a statement left over from a previous run.
 
-With `config(contract={'enforced': true})` and an explicit `columns:`/`constraints:` block in the model's schema.yml, `materialized_table` renders an explicit column-definition list — including a `PRIMARY KEY (...) NOT ENFORCED` clause from a model-level `primary_key` constraint — ahead of `DISTRIBUTED BY`/`WITH`/`START_MODE` in the submitted `CREATE OR ALTER MATERIALIZED TABLE (cols..., PRIMARY KEY(...) NOT ENFORCED) ... AS SELECT ...`, matching Confluent's materialized-table grammar. This is what makes the resulting table usable in **snapshot queries** against its key. As with `table` (see [Validation](#validation)), the contract's declared columns are checked against the model's compiled SQL and a mismatch fails the run before any DDL is submitted. Without an enforced contract, the materialization renders a plain `AS SELECT` with no explicit column list.
-
-**Switching materializations**:
+#### Switching Materializations
 
 An existing regular table or view cannot be converted to a materialized table, and a materialized table cannot be adopted by the drop-and-recreate materializations. The adapter detects both switches before submitting anything, and both resolve the same way:
 
@@ -236,6 +346,153 @@ An existing regular table or view cannot be converted to a materialized table, a
 - *From* `materialized_table` (model changed to `table`/`streaming_table`/`streaming_source`): a plain run fails with guidance — this matters because a materialized table looks like a regular table to the catalog, and without the check an unchanged model would silently "succeed" while Flink kept maintaining the old defining query. `--full-refresh` drops the materialized table (via `DROP MATERIALIZED TABLE`), **but the recreate under the same name is then blocked server-side**: the drop does not remove the MT's Schema Registry subjects, and the keyed schema the MT registered doesn't match the schema the new relation would register (a `table` snapshot CTAS is keyless), so creation fails with "Schema Registry subject ... doesn't match the existing one" and the adapter's appended recovery guidance. To complete the switch, delete the lingering `<name>-key`/`<name>-value` subjects in Schema Registry and re-run (`dbt retry` works — the MT is already gone), or give the model a different relation name via `alias`. Note the drop permanently deletes the backing topic and its data, and `on_schema_drift='ignore'` skips this detection along with the rest of the drift check.
 
 Re-running while Flink is still establishing a freshly created or evolved table can be transiently rejected (`being modified`); the window is brief and the adapter retries automatically.
+
+### Streaming Table
+
+#### Overview
+
+`streaming_table` creates a table, then runs a separate, continuous `INSERT INTO ... SELECT`
+statement to populate it.
+This two-statement approach is currently the preferred way to build streaming pipelines.
+<!-- TODO: sync with Zander on revising the "until materialized tables reach GA" framing here -->
+It supports table options via `config(with={...})`.
+
+#### Config Options
+
+- `with` — table options baked into the DDL statement; this is the DDL-side equivalent of `statement_properties` below.
+- `distributed_by` — see [Distributed By](#distributed-by).
+- `on_schema_drift` — see [Schema Drift Detection](#schema-drift-detection).
+- `statement_name` — see [Deterministic Statement Names](#deterministic-statement-names). The DDL gets a `-ddl` suffix appended to this name.
+- `compute_pool_id` — see [Compute Pool](#compute-pool).
+- `statement_properties` — see [Statement Properties](#statement-properties). Applies only to the INSERT statement, not the CREATE TABLE DDL — for the DDL side, use `with` instead.
+- `tableflow` — see [Tableflow](#tableflow).
+
+#### Schema Drift / Reconciliation Behavior
+
+If the table already exists and `--full-refresh` is not specified, `streaming_table` runs [schema
+drift detection](#schema-drift-detection) (columns, `WITH` options, and `distributed_by`) before
+deciding whether to skip or restart.
+Separately, on every re-run, the adapter checks the long-running INSERT statement itself.
+If it's missing (e.g. the process crashed between DDL and DML, or the statement was deleted
+externally) or in a terminal phase (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), `dbt run` resubmits
+**only the INSERT** under the same deterministic name — the table and its topic state are preserved,
+no `--full-refresh` required.
+A `RUNNING` statement, an in-flight transition (`PENDING`, `STOPPING`, `DELETING`), or `DEGRADED` is
+treated as healthy: the adapter does not interrupt it.
+
+#### Statements Emitted
+
+`streaming_table` submits two statements:
+
+```sql
+CREATE TABLE <relation> [DISTRIBUTED BY (...)] [WITH (...)]     -- DDL, bounded, name suffixed "-ddl"
+INSERT INTO <relation> <model SELECT>                            -- DML, long-running
+```
+
+The DDL completes immediately; the INSERT is a genuinely long-running, continuous statement — this is
+the two-statement split that gives `streaming_table` its name.
+See the [`CREATE TABLE`](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html)
+and [`INSERT INTO ... FROM SELECT`](https://docs.confluent.io/cloud/current/flink/reference/queries/insert-into-from-select.html)
+references.
+
+#### Adopting Existing Resources
+
+If you already have a Flink pipeline running — deployed by hand, by a previous tool, or by another
+team — you can bring it under dbt management without recreating it, using `streaming_table`.
+A pipeline is two things: a **table** (the relation) and a **statement** (the long-running query
+that populates it). Map your model to each:
+
+- **Table** — set dbt's standard [`alias`](https://docs.getdbt.com/reference/resource-configs/alias) config to the existing table name (omit it if the table already matches the model name).
+- **Statement** — set `statement_name` to the existing statement name.
+
+```sql
+{{ config(
+    materialized='streaming_table',
+    alias='orders_enriched',          -- existing table
+    statement_name='orders-enriched-insert',  -- existing INSERT statement
+    with={'changelog.mode': 'append'},
+) }}
+select order_id, price from {{ ref('orders') }}
+```
+
+On the next `dbt run` (no `--full-refresh`), the adapter looks up both by name and takes over their lifecycle:
+
+- If the statement is **healthy** — `RUNNING`, an in-flight transition (`PENDING`, `STOPPING`, `DELETING`), or `DEGRADED` (any non-terminal phase) — it is adopted as-is: the run skips creation and leaves the statement untouched.
+- If the statement is **missing or terminal** (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), it is re-submitted under the same name.
+- The existing **table is never dropped** (only `--full-refresh` drops and recreates).
+
+Adoption is purely name-based — the adapter does not track which tool created a resource, only its name — so there is no separate "import" step.
+
+**Preconditions**:
+
+- **Schema should match.** Under the default `on_schema_drift='fail'`, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT before adopting; any mismatch fails the run. With `config(on_schema_drift='ignore')`, enforcement depends on the adoption path:
+    - **Healthy statement → skip:** the running statement is left untouched and nothing is re-submitted, so **no drift is enforced at all, including columns.** A mismatch is silently tolerated — you must align the model to the existing schema yourself.
+    - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs (a column mismatch would also be rejected by Flink); benign options/distribution drift is relaxed.
+- **Names are sanitized.** The `statement_name` you configure is normalized to Flink's constraints (see [Flink Naming Constraints](#flink-naming-constraints)) before lookup, so it must match the existing statement's actual name. Statements already named within those constraints (lowercase alphanumeric + hyphens) match verbatim.
+
+### Streaming Source
+
+#### Overview
+
+`streaming_source` creates a connector-backed source table.
+It requires `config(connector='...')`; the model SQL defines only the column definitions, with no
+`SELECT` query.
+`faker` is the only connector dbt-confluent actually tests and supports today — it generates mock
+data for development and testing, and this materialization is not a bridge to Confluent Cloud's full
+connector catalog.
+
+#### Config Options
+
+- `connector` (required) — the connector to attach; see the [faker sample-data how-to guide](https://docs.confluent.io/cloud/current/flink/how-to-guides/custom-sample-data.html).
+- `with` — additional connector options.
+- `distributed_by` — see [Distributed By](#distributed-by).
+- `on_schema_drift` — see [Schema Drift Detection](#schema-drift-detection).
+- `statement_name` — see [Deterministic Statement Names](#deterministic-statement-names).
+- `compute_pool_id` — see [Compute Pool](#compute-pool).
+- `tableflow` — see [Tableflow](#tableflow).
+
+#### Schema Drift / Reconciliation Behavior
+
+If the table already exists and `--full-refresh` is not specified, `streaming_source` runs [schema
+drift detection](#schema-drift-detection) against the model's column definitions (there's no SELECT
+query to infer a schema from).
+Recovery works differently from `streaming_table`: automatic recovery is **not** supported here,
+because the CREATE statement also attaches the connector, and Flink doesn't allow re-attaching a
+connector to an existing table.
+If the connector statement is dead, a plain run skips it with a logged warning rather than
+restarting it — you must run with `--full-refresh` (which drops and recreates the table, permanently
+deleting its data) to fix it.
+
+#### Statements Emitted
+
+`streaming_source` submits a single statement:
+
+```sql
+CREATE TABLE <relation> (<column definitions>) [DISTRIBUTED BY (...)] WITH (connector = '...', ...)
+```
+
+`connector` is merged directly into the `WITH` options — see the
+[`CREATE TABLE` connector clause reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html#connector)
+and the
+[faker sample-data how-to guide](https://docs.confluent.io/cloud/current/flink/how-to-guides/custom-sample-data.html).
+Unlike every other materialization, this statement doesn't just create a table — it *is* the
+connector's ongoing running process; there's no separate long-running statement behind it.
+
+### Ephemeral
+
+#### Overview
+
+`ephemeral` is a standard dbt CTE-based query fragment.
+dbt-confluent adds no adapter-specific code for it at all, so it behaves exactly like dbt-core's
+built-in `ephemeral` materialization on any other adapter.
+No Kafka topic is created and no Flink statement is submitted; the model's compiled SQL is inlined
+as a CTE into every downstream model that `ref()`s it.
+Because there's no dbt-confluent macro in the loop, none of dbt-confluent's config validation (see
+[Validation](#validation)) applies — setting `with`, `distributed_by`, `connector`, or any other
+dbt-confluent config key on an `ephemeral` model is silently ignored rather than rejected.
+If multiple downstream models `ref()` the same `ephemeral` model over a Kafka-backed source, each
+one inlines and re-plans that source independently — Flink scans the source once per consumer, not
+once shared across them.
 
 ## Schema Drift Detection
 
@@ -350,39 +607,6 @@ On `--full-refresh`, the adapter deletes existing statements before dropping and
 For `streaming_table`, the adapter additionally checks the long-running INSERT statement on every re-run. If the statement is missing (e.g. the process crashed between DDL and DML, or the statement was deleted externally) or in a terminal phase (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), `dbt run` resubmits **only the INSERT** under the same deterministic name — the table and its topic state are preserved. No `--full-refresh` required. A `RUNNING` statement, in-flight transitions (`PENDING`, `STOPPING`, `DELETING`), and `DEGRADED` are treated as healthy: the adapter does not interrupt them.
 
 For `streaming_source`, automatic recovery is **not** supported: the CREATE statement also attaches the connector, and Flink does not allow re-attaching a connector to an existing table. If the connector statement is dead, run with `--full-refresh` (which drops and recreates the table). Tracked as a follow-up.
-
-## Adopting Existing Tables and Statements
-
-If you already have a Flink pipeline running — deployed by hand, by a previous tool, or by another team — you can bring it under dbt management without recreating it. A pipeline is two things: a **table** (the relation) and a **statement** (the long-running query that populates it). Map your model to each:
-
-- **Table** — set dbt's standard [`alias`](https://docs.getdbt.com/reference/resource-configs/alias) config to the existing table name (omit it if the table already matches the model name).
-- **Statement** — set `statement_name` to the existing statement name.
-
-```sql
-{{ config(
-    materialized='streaming_table',
-    alias='orders_enriched',          -- existing table
-    statement_name='orders-enriched-insert',  -- existing INSERT statement
-    with={'changelog.mode': 'append'},
-) }}
-select order_id, price from {{ ref('orders') }}
-```
-
-On the next `dbt run` (no `--full-refresh`), the adapter looks up both by name and takes over their lifecycle:
-
-- If the statement is **healthy** — `RUNNING`, an in-flight transition (`PENDING`, `STOPPING`, `DELETING`), or `DEGRADED` (any non-terminal phase) — it is adopted as-is: the run skips creation and leaves the statement untouched.
-- If the statement is **missing or terminal** (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), it is re-submitted under the same name (see [Statement Lifecycle](#statement-lifecycle)).
-- The existing **table is never dropped** (only `--full-refresh` drops and recreates).
-
-Adoption is purely name-based — the adapter does not track which tool created a resource, only its name — so there is no separate "import" step.
-
-### Preconditions
-
-- **Schema should match.** Under the default `on_schema_drift='fail'`, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT before adopting; any mismatch fails the run. With `config(on_schema_drift='ignore')`, enforcement depends on the adoption path:
-    - **Healthy statement → skip:** the running statement is left untouched and nothing is re-submitted, so **no drift is enforced at all, including columns.** A mismatch is silently tolerated — you must align the model to the existing schema yourself.
-    - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs (a column mismatch would also be rejected by Flink); benign options/distribution drift is relaxed.
-- **Names are sanitized.** The `statement_name` you configure is normalized to Flink's constraints (see [Flink Naming Constraints](#flink-naming-constraints)) before lookup, so it must match the existing statement's actual name. Statements already named within those constraints (lowercase alphanumeric + hyphens) match verbatim.
-- **`streaming_source` cannot recover a dead connector statement** (see above); adoption of a source means pointing `alias` at the existing table, after which re-runs skip while the connector statement is healthy.
 
 ## Not Supported
 
