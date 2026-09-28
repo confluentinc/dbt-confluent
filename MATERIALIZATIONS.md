@@ -156,7 +156,7 @@ Changing `statement_properties` on an existing, healthy `streaming_table` takes 
 
 #### Tableflow
 
-[Tableflow](https://www.confluent.io/product/tableflow/) materializes the Kafka topic backing a Flink table as an Apache Iceberg and/or Delta Lake table in object storage, for consumption by external query engines. It's enabled through a dedicated Confluent Cloud control-plane API (`POST`/`GET`/`DELETE /tableflow/v1/tableflow-topics`) — not Flink SQL DDL — so the adapter drives it directly through the `confluent-sql` driver rather than through the model's own statements.
+[Tableflow](https://docs.confluent.io/cloud/current/topics/tableflow/overview.html) materializes the Kafka topic backing a Flink table as an Apache Iceberg and/or Delta Lake table in object storage. That table can be [queried by external engines](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/overview.html) like Snowflake and Trino, and — as of this writing, in Open Preview — by [Confluent Cloud Flink itself](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/query-with-flink.html) via a [snapshot query](#table) against the same `sql.snapshot.mode` mechanism `table` uses. Enabling Tableflow is done through a dedicated [Confluent Cloud control-plane API](https://docs.confluent.io/cloud/current/ccloud/list-tableflow-v-1-tableflow-topics/) (`POST`/`GET`/`DELETE /tableflow/v1/tableflow-topics`) — not Flink SQL DDL — so the adapter drives it directly through the `confluent-sql` driver rather than through the model's own statements.
 
 Available on every materialization that owns a real Kafka-backed table (`table`, `streaming_table`, `streaming_source`, `materialized_table`) via the `tableflow` config:
 
@@ -173,7 +173,7 @@ select order_id, customer_id, price from {{ ref('orders') }}
 
 **Fields**:
 - `table_formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both.
-- `storage` (required) — a mapping with a `kind` key, using Tableflow's own API names verbatim:
+- `storage` (required) — a mapping with a `kind` key, using Tableflow's own API names verbatim (see the [storage configuration guide](https://docs.confluent.io/cloud/current/topics/tableflow/concepts/tableflow-storage.html)):
     - `{'kind': 'Managed'}` — Confluent-managed storage, no further config.
     - `{'kind': 'ByobAws', 'bucket_name': '...', 'provider_integration_id': '...'}` — bring-your-own S3 bucket.
     - `{'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': '...', 'container_name': '...', 'provider_integration_id': '...'}` — customer-owned Azure Data Lake Storage Gen2.
@@ -189,7 +189,7 @@ The adapter validates this shape (`CompilationError` on a malformed `tableflow` 
 
     One specific storage transition — a custom bucket (`ByobAws`/`AzureDataLakeStorageGen2`) to Confluent-managed storage — can fail even after the automatic disable/re-enable above completes: Confluent Cloud enforces a grace period after disabling before it accepts the switch to managed storage, with no status to poll for when it's actually done. A run that hits this fails with a clear error rather than hanging — re-run the model after waiting, or use `--full-refresh` to succeed immediately (it builds a new Kafka topic with no prior-storage history to check against, but drops and recreates the topic, wiping its existing data).
 
-    A config that matches (nothing to PATCH) still checks the topic's phase: if it has **FAILED** — most commonly a poison-pill record suspending the materialization under `error_handling: {mode: 'SUSPEND'}` (the server default) — the run logs a warning naming the error detail, rather than reporting success while Tableflow is actually dead with no way to notice. `PENDING` is not flagged — it's a normal state to be caught in, not a problem. This is a warning, not a failure: resuming a suspended topic (via the read-only `suspended` field) isn't something dbt patches, or should attempt automatically — deciding whether a suspended record is safe to reprocess is a human call.
+    A config that matches (nothing to PATCH) still checks the topic's [phase](https://docs.confluent.io/cloud/current/topics/tableflow/operate/monitor-tableflow.html): if it has **FAILED** — most commonly a poison-pill record suspending the materialization under `error_handling: {mode: 'SUSPEND'}` (the server default) — the run logs a warning naming the error detail, rather than reporting success while Tableflow is actually dead with no way to notice. `PENDING` is not flagged — it's a normal state to be caught in, not a problem. This is a warning, not a failure: resuming a suspended topic (via the read-only `suspended` field) isn't something dbt patches, or should attempt automatically — deciding whether a suspended record is safe to reprocess is a human call.
 
 If `tableflow` is unset in the model, nothing is ever checked or touched, regardless of live state — this also means a table Tableflow was enabled on outside of dbt is never flagged just because the model doesn't mention it.
 
@@ -210,6 +210,9 @@ It's the closest analog to a traditional batch-warehouse table: the query runs o
 result, and completes.
 If you're new to dbt-confluent, this is the easiest materialization to start with before moving on
 to `streaming_table` or `materialized_table`.
+
+See Confluent's [snapshot queries](https://docs.confluent.io/cloud/current/flink/concepts/snapshot-queries.html)
+concept page for the underlying execution model.
 
 #### Config Options
 
@@ -255,6 +258,9 @@ Unlike every other Kafka-backed materialization on this page, `view` doesn't cre
 Creating a view does reserve a special Kafka topic name, but that topic is metadata-only and never
 holds records — this differs from `ephemeral`, which creates no topic at all.
 
+See Confluent's [`CREATE VIEW` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-view.html)
+for the underlying statement.
+
 #### Config Options
 
 Only three dbt-confluent config keys apply to `view`:
@@ -292,6 +298,9 @@ references.
 Every run submits the same kind of statement, and Flink reconciles the table's actual state to match
 it, rather than dbt-confluent choosing between a drop/recreate and a schema-drift-based skip the way
 `table`/`streaming_table`/`streaming_source` do.
+
+See Confluent's [materialized tables](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html)
+concept page for the underlying feature.
 
 #### Config Options
 
@@ -349,6 +358,8 @@ about the query, columns, or distribution does.
 Each run submits under a unique per-run statement name (see
 [Deterministic Statement Names](#deterministic-statement-names)), so a re-assert can never collide
 with a statement left over from a previous run.
+See the [`CREATE OR ALTER MATERIALIZED TABLE` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-or-alter-materialized-table.html)
+for the full DDL grammar.
 
 #### Switching Materializations
 
@@ -368,6 +379,9 @@ statement to populate it.
 This two-statement approach is currently the preferred way to build streaming pipelines.
 <!-- TODO: sync with Zander on revising the "until materialized tables reach GA" framing here -->
 It supports table options via `config(with={...})`.
+
+See Confluent's [dynamic tables and continuous queries](https://docs.confluent.io/cloud/current/flink/concepts/dynamic-tables.html)
+concept page for the underlying execution model.
 
 #### Config Options
 
@@ -398,7 +412,7 @@ treated as healthy: the adapter does not interrupt it.
 
 ```sql
 CREATE TABLE <relation> [DISTRIBUTED BY (...)] [WITH (...)]     -- DDL, bounded, name suffixed "-ddl"
-INSERT INTO <relation> <model SELECT>                            -- DML, long-running
+INSERT INTO <relation> <model SELECT>                           -- DML, long-running
 ```
 
 The DDL completes immediately; the INSERT is a genuinely long-running, continuous statement — this is
@@ -447,11 +461,13 @@ Adoption is purely name-based — the adapter does not track which tool created 
 #### Overview
 
 `streaming_source` creates a connector-backed source table.
-It requires `config(connector='...')`; the model SQL defines only the column definitions, with no
-`SELECT` query.
-`faker` is the only connector dbt-confluent actually tests and supports today — it generates mock
-data for development and testing, and this materialization is not a bridge to Confluent Cloud's full
-connector catalog.
+It requires `config(connector='...')`; the model SQL defines only the column definitions, with no `SELECT` query.
+
+With this materialization you can, for example, configure a `faker` connector to generate mock data for development
+and testing.
+
+See Confluent's [faker sample-data how-to guide](https://docs.confluent.io/cloud/current/flink/how-to-guides/custom-sample-data.html)
+for the underlying feature.
 
 #### Config Options
 
@@ -487,7 +503,7 @@ CREATE TABLE <relation> (<column definitions>) [DISTRIBUTED BY (...)] WITH (conn
 [`CREATE TABLE` connector clause reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html#connector)
 and the
 [faker sample-data how-to guide](https://docs.confluent.io/cloud/current/flink/how-to-guides/custom-sample-data.html).
-Unlike every other materialization, this statement doesn't just create a table — it *is* the
+Unlike `CREATE TABLE` statements used in other materializations, this statement doesn't just create a table — it *is* the
 connector's ongoing running process; there's no separate long-running statement behind it.
 
 ### Ephemeral
