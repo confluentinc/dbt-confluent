@@ -31,7 +31,7 @@ stream-native way to build models.
 |---|---|
 | [`table`](#table) | Creates a table via `CREATE TABLE ... AS SELECT` (CTAS). Runs in snapshot mode — the query executes once and completes. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
 | [`view`](#view) | Drop-and-recreate view. |
-| [`materialized_table`](#materialized-table) | Creates and maintains a Flink materialized table via `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. Each run re-asserts the definition and Flink reconciles it: a new table is created, any change (columns, data types, `WITH` options, or query logic) is evolved **in place**, and an unchanged definition is a server-side no-op. `--full-refresh` drops and recreates (permanently deleting the backing topic and its data). Supports `config(distributed_by={...}, with={...}, start_mode='...', statement_properties={...})`. |
+| [`materialized_table`](#materialized-table) | Creates and maintains a Flink materialized table via `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. Every run re-asserts the definition and evolves the table **in place** — this resets Flink's processing state even when nothing changed (see [Evolution / State Impact](#evolution--state-impact)). `--full-refresh` drops and recreates (permanently deleting the backing topic and its data). Supports `config(distributed_by={...}, with={...}, start_mode='...', statement_properties={...})`. |
 | [`streaming_table`](#streaming-table) | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
 | [`streaming_source`](#streaming-source) | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | [`ephemeral`](#ephemeral) | Standard dbt CTE-based query fragment, not materialized in Flink. |
@@ -299,7 +299,7 @@ it, rather than dbt-confluent choosing between a drop/recreate and a schema-drif
 - `with` — table options, e.g. `{'key.format': 'avro-registry'}`.
 - `start_mode` — where the query starts (or, on an in-place evolution, restarts) reading; see [Evolution / State Impact](#evolution--state-impact) below. All eight documented forms are accepted (default: `RESUME_OR_FROM_BEGINNING`): `FROM_BEGINNING`, `FROM_NOW`, `RESUME_OR_FROM_BEGINNING`, `RESUME_OR_FROM_NOW`, `FROM_TIMESTAMP('<timestamp>')`, `RESUME_OR_FROM_TIMESTAMP('<timestamp>')`, `FROM_NOW(INTERVAL '<n>' <unit>)`, `RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>)`. The adapter validates the keyword and its arity but passes the parenthesized argument through verbatim (after rejecting anything that could break out of the DDL — stray quotes, parens, operators); the server validates the argument itself. Note that `FROM_NOW`/`RESUME_OR_FROM_NOW` require a full interval literal — `FROM_NOW(INTERVAL '7' DAY)` — not a plain quoted string, despite what some Confluent docs examples currently show.
 - `statement_properties` — see [Statement Properties](#statement-properties).
-- `tableflow` — see [Tableflow](#tableflow). Checked on every run — create, in-place evolution, or no-op alike.
+- `tableflow` — see [Tableflow](#tableflow). Checked on every run — create or in-place evolution alike.
 - `freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error. Any other dbt-confluent config key this materialization doesn't read (e.g. `connector`, `on_schema_drift`) is also rejected — see [Validation](#validation).
 
 **Contracts and primary keys**:
@@ -311,14 +311,26 @@ With `config(contract={'enforced': true})` and an explicit `columns:`/`constrain
 `materialized_table` behaves differently depending on what changes between runs:
 
 - **New table** — created.
-- **Unchanged** — a server-side no-op: Confluent diffs the submitted definition against the current one and leaves the table, its data, and its query state untouched. Re-asserting the definition on every run is safe and is the design.
-- **Any change** (columns, data types, `WITH` options, or query logic) — evolved **in place**: the table and its topic are kept.
-  - The Flink job will clear its internal state - resetting any aggregations, window or join state, etc - and begin (re-)processing data according to the configured [start mode](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html#controlling-reprocessing-with-start-mode).
+- **Existing table** (changed or not) — evolved **in place**: the table and its topic are kept, but the running query is stopped and replaced.
+  - The Flink job clears its internal state — resetting any aggregations, window, or join state — and begins (re-)processing data according to the configured [start mode](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html#controlling-reprocessing-with-start-mode).
     - Under a `RESUME_*` start mode (the default, RESUME_OR_FROM_BEGINNING, is one of these), stateless queries (projections, filters) evolve seamlessly — no reprocessing, no duplicates.
     - For *stateful* queries, evolution recalculates results from a clean slate rather than adjusting the old ones — and depending on start mode, that recalculation may not cover the same source data as before, so joins, aggregations, and other stateful results can shift (e.g. an aggregation resuming from an offset instead of replaying history will look "undercounted"). See [Confluent's materialized tables concepts page](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html) for evolution semantics and caveats.
 - **`--full-refresh`** — `DROP MATERIALIZED TABLE IF EXISTS` then recreate.
   - Required to change `distributed_by` (fixed at creation), to apply changes an evolution rejects, and to rebuild correct results for a stateful model whose `start_mode` resumes from offsets.
   - **Warning — data loss**: dropping a materialized table (including via `--full-refresh`) permanently deletes the backing Kafka topic and all of its data.
+
+**Known limitation — every run evolves, even when nothing changed.** Confluent's own
+[`CREATE OR ALTER MATERIALIZED TABLE` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-or-alter-materialized-table.html)
+states plainly that the statement is **not idempotent**: "running the same `CREATE OR ALTER` command
+always triggers a new evolution, even if nothing has changed," and that evolution "always" discards
+all existing Flink processing state. Because dbt-confluent always submits the full `... AS SELECT`
+form of this statement on every run (see [Statements Emitted](#statements-emitted) below), a plain
+`dbt run` against an unchanged `materialized_table` model resets its Flink state just like a real
+definition change would — there is currently no true no-op path for this materialization. Confluent's
+grammar also exposes a lighter, property-only `ALTER MATERIALIZED TABLE` form (no `AS SELECT`) that
+does **not** trigger evolution, but dbt-confluent does not use it today. This is a dbt-confluent
+limitation, not a Confluent Cloud Flink one, and is worth planning around for stateful models that
+run frequently.
 
 **Evolution limits**: not every change can evolve in place — dropping columns is rejected at submission, observed either as a per-column error ("dropping a non-nullable, persisted column is not supported") or as a query/sink schema mismatch ("Column types of query result and sink ... do not match. Cause: Different number of columns."). The fix is `--full-refresh`. (Materialized tables don't use [schema drift detection](#schema-drift-detection) — Flink reconciles the definition instead, and a rejected evolution is the analogous failure mode.)
 
