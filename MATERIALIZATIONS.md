@@ -1,6 +1,6 @@
 # Materializations
 
-## Overview
+## Introduction
 
 dbt-confluent supports a number of materializations and most are backed by an Apache Kafka topic
 that stores data (that storage can be augmented with features like [Tableflow](#tableflow)). The
@@ -35,169 +35,6 @@ stream-native way to build models.
 | [`streaming_table`](#streaming-table) | Creates a table then runs a separate continuous `INSERT INTO ... SELECT` statement. This two-statement approach is currently the preferred way to build streaming pipelines (until Flink's materialized table feature reaches GA). Supports table options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). |
 | [`streaming_source`](#streaming-source) | Creates a connector-backed source table (e.g., Datagen). Requires `config(connector='...')`. The model SQL defines the column definitions. Supports additional connector options via `config(with={...})`. If the table already exists, checks for schema drift (column names, data types, WITH options, `distributed_by`) and skips creation (use `--full-refresh` to drop and recreate). See the [Confluent connector catalog](https://docs.confluent.io/cloud/current/connectors/index.html) and [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html) for available connectors and options. |
 | [`ephemeral`](#ephemeral) | Standard dbt CTE-based query fragment, not materialized in Flink. |
-
-## Model Configuration
-
-### Validation
-
-Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing — e.g. `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
-
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`) against the materialization you're using. Any other config key — including your own custom keys read by your own hooks or macros — is never inspected and never affected by this check.
-
-If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
-
-```sql
-{{ config(
-    materialized='table',
-    statement_properties={'my_custom_key': 'value'},  -- not really ours; used by a custom macro
-    ignore_unsupported_config=['statement_properties'],
-) }}
-```
-
-`ignore_unsupported_config` takes a list of specific key names, not a blanket on/off switch — opting out of one false positive doesn't also suppress a real mistake on a different key in the same model.
-
-### Cross-Materialization Config
-
-Documentation that pertains to configurations options that apply to more than one materialization lives here.
-Each per-materialization section links back to the specific subsections below that it supports.
-
-#### Distributed By
-
-Confluent Flink lets you control how a table's rows are distributed across Kafka partitions with a `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause in the `CREATE TABLE` DDL.
-The adapter exposes this through a `distributed_by` config on `table`, `streaming_table`, and `streaming_source` models:
-
-```sql
-{{ config(
-    materialized='streaming_table',
-    distributed_by={'columns': ['order_id'], 'buckets': 4}
-) }}
-select order_id, customer_id, price from {{ ref('orders') }}
-```
-
-This renders as:
-
-```sql
-CREATE TABLE `orders_by_id` (...)
-DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS
-WITH (...)
-```
-
-**Fields**:
-- `columns` (required) - non-empty list of column names used to compute the hash
-- `buckets` (optional) - positive integer; omit to let Confluent Cloud choose
-
-**Validation**: The adapter validates the config at the start of each materialization run and raises a clear compile error if any of the following hold:
-- `distributed_by` is not a mapping
-- `columns` is missing, empty, a string, or contains non-string / empty entries
-- A column name contains a backtick (Flink identifiers can't escape backticks)
-- `buckets` is set but isn't a positive integer (rejects `0`, negatives, floats, strings, booleans)
-- The mapping has any key other than `columns` or `buckets` (catches typos like `'strategy': 'range'`)
-
-**Important — column ordering**: Flink requires that the distribution columns appear at the **beginning** of the table's column schema, and in the **same order** as listed in `columns`. The adapter does not validate this (it would require parsing the model SQL) — Flink will reject the `CREATE TABLE` at submission with `Key columns must appear at the beginning of the table schema. Also, DISTRIBUTED BY key names must be in the same order as the key schema columns.`
-
-Practical implication for each materialization:
-- `table` and `streaming_table`: list the distribution columns first in the model's `SELECT`.
-- `streaming_source`: declare the distribution columns first in the column-definition list.
-
-```sql
--- ❌ Rejected by Flink — `customer_id` is the distribution key but appears second
-{{ config(distributed_by={'columns': ['customer_id']}) }}
-select order_id, customer_id, price from {{ ref('orders') }}
-
--- ✅ Accepted — `customer_id` is first
-{{ config(distributed_by={'columns': ['customer_id']}) }}
-select customer_id, order_id, price from {{ ref('orders') }}
-```
-
-Flink only supports the `HASH` distribution strategy today, so the adapter always emits `HASH(...)`. See the [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html#distributed-by-clause) for details.
-
-#### Compute Pool
-
-By default, every statement runs on the compute pool configured in your profile (`compute_pool_id`). You can override the pool per model — for example to isolate a heavy model or to manage resources — with the `compute_pool_id` config:
-
-```sql
-{{ config(materialized='streaming_table', compute_pool_id='lfcp-abc123') }}
-```
-
-The override applies to all statements a model submits (DDL, the long-running INSERT, and metadata/drift-check queries). The pool must exist in the same environment and region as the profile, and the API key used must have access to it; Confluent Cloud validates this at submission time. When `compute_pool_id` is omitted, the profile default is used. If the profile sets no default pool either, Confluent Cloud Flink runs the statement on the environment+region default pool.
-
-Statement recovery and cleanup (see [Statement Lifecycle](#statement-lifecycle)) operate by statement name and are pool-agnostic: a model's statement is found, inspected, and — when dead — resubmitted on the model's configured pool regardless of the profile default.
-
-Changing `compute_pool_id` on an existing, healthy model takes effect **only** on the next `--full-refresh` or statement restart — a running statement is not migrated to a new pool, since the pool is a property of the statement (not the table) and isn't part of drift detection.
-
-##### Per-environment pools in CI/CD
-
-The same model is often deployed to different compute pools across environments (dev / staging / prod) or regions. Rather than hard-coding a pool, inject it at deploy time with an environment variable:
-
-```sql
-{{ config(materialized='streaming_table', compute_pool_id=env_var('FLINK_COMPUTE_POOL')) }}
-```
-
-Your CI/CD pipeline sets `FLINK_COMPUTE_POOL` (and typically `statement_name`) per target, keeping a single Git source of truth.
-
-#### Statement Properties
-
-Set Flink SET-style statement properties, such as `sql.tables.scan.idle-timeout`, with the `statement_properties` config, available on the `streaming_table` and `materialized_table` materializations:
-
-```sql
-{{ config(
-    materialized='streaming_table',
-    statement_properties={'sql.tables.scan.idle-timeout': '30 s'},
-) }}
-```
-
-See the [SET Statement](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html) documentation for all [available options](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html#available-set-options).
-
-This is different from `with`: `with` sets table-level WITH-clause options baked into the `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that runs the model's query — `streaming_table`'s long-running `INSERT INTO ... SELECT`, or `materialized_table`'s `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. The value is a dict of `string -> string|int|bool`.
-
-Three keys are reserved for use by the driver - `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any reserved properties yourself fails the run with a "reserved system property" error. Confluent Cloud Flink performs the validation of all the provided values at statement planning time.
-
-Changing `statement_properties` on an existing, healthy `streaming_table` takes effect **only** on the next `--full-refresh` or statement restart — a running statement keeps its original properties, since (like `compute_pool_id`) they're a property of the statement, not the table, and aren't part of drift detection. `materialized_table` has no such lag: every run resubmits a fresh `CREATE OR ALTER` statement under a new per-run name (see [Deterministic Statement Names](#deterministic-statement-names)), so a changed value takes effect on the very next run.
-
-#### Tableflow
-
-[Tableflow](https://docs.confluent.io/cloud/current/topics/tableflow/overview.html) materializes the Kafka topic backing a Flink table as an Apache Iceberg and/or Delta Lake table in object storage. That table can be [queried by external engines](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/overview.html) like Snowflake and Trino, and — as of this writing, in Open Preview — by [Confluent Cloud Flink itself](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/query-with-flink.html) via a [snapshot query](#table) against the same `sql.snapshot.mode` mechanism `table` uses. Enabling Tableflow is done through a dedicated [Confluent Cloud control-plane API](https://docs.confluent.io/cloud/current/ccloud/list-tableflow-v-1-tableflow-topics/) (`POST`/`GET`/`DELETE /tableflow/v1/tableflow-topics`) — not Flink SQL DDL — so the adapter drives it directly through the `confluent-sql` driver rather than through the model's own statements.
-
-Available on every materialization that owns a real Kafka-backed table (`table`, `streaming_table`, `streaming_source`, `materialized_table`) via the `tableflow` config:
-
-```sql
-{{ config(
-    materialized='table',
-    tableflow={
-        'table_formats': ['ICEBERG'],
-        'storage': {'kind': 'Managed'},
-    }
-) }}
-select order_id, customer_id, price from {{ ref('orders') }}
-```
-
-**Fields**:
-- `table_formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both.
-- `storage` (required) — a mapping with a `kind` key, using Tableflow's own API names verbatim (see the [storage configuration guide](https://docs.confluent.io/cloud/current/topics/tableflow/concepts/tableflow-storage.html)):
-    - `{'kind': 'Managed'}` — Confluent-managed storage, no further config.
-    - `{'kind': 'ByobAws', 'bucket_name': '...', 'provider_integration_id': '...'}` — bring-your-own S3 bucket.
-    - `{'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': '...', 'container_name': '...', 'provider_integration_id': '...'}` — customer-owned Azure Data Lake Storage Gen2.
-- `config` (optional) — topic-level settings, mirroring Tableflow's own `spec.config` nesting verbatim rather than a flattened dbt-invented shape, so a `config` block copied straight from the API spec, the `confluent` CLI's own payload, or `confluent_sql` works unchanged:
-    - `retention_ms` / `data_retention_ms` (optional) — non-negative integers (or numeric strings) controlling snapshot/data retention.
-    - `error_handling` (optional) — how a bad record is handled: `{'mode': 'SUSPEND'}` (the server default — suspends materialization), `{'mode': 'SKIP'}` (skip and continue), or `{'mode': 'LOG', 'target': '...'}` (log to a dead-letter target, `target` defaults to `'error_log'`).
-
-The adapter validates this shape (`CompilationError` on a malformed `tableflow` config) when it's actually applied — unlike `distributed_by`/`start_mode`, `tableflow` is never baked into this DDL, so a bad value can't doom a `--full-refresh` recreate, and there's no need to validate it any earlier.
-
-**Ensured on every run.** Whenever a model configures `tableflow`, every run (whether the relation was just created, already existed, or is being restarted) checks Tableflow's live state and:
-- **Not enabled** — enables it with the current config.
-- **Already enabled** — diffs the live configuration against what's now configured and applies an in-place update only if `table_formats`/`config` actually changed, so an unchanged config is a true no-op rather than cycling the backing materialization job every run. `storage` can't be changed in place (Tableflow's API doesn't support it), but a change there is still detected and handled automatically: the adapter disables and re-enables Tableflow with the new storage config. This only ever touches the Tableflow sink, never the underlying Kafka topic or its data — unlike `--full-refresh`, which drops and recreates the topic itself — and re-enabling backfills the full topic history from the earliest offset, so this doesn't leave a coverage gap.
-
-    One specific storage transition — a custom bucket (`ByobAws`/`AzureDataLakeStorageGen2`) to Confluent-managed storage — can fail even after the automatic disable/re-enable above completes: Confluent Cloud enforces a grace period after disabling before it accepts the switch to managed storage, with no status to poll for when it's actually done. A run that hits this fails with a clear error rather than hanging — re-run the model after waiting, or use `--full-refresh` to succeed immediately (it builds a new Kafka topic with no prior-storage history to check against, but drops and recreates the topic, wiping its existing data).
-
-    A config that matches (nothing to PATCH) still checks the topic's [phase](https://docs.confluent.io/cloud/current/topics/tableflow/operate/monitor-tableflow.html): if it has **FAILED** — most commonly a poison-pill record suspending the materialization under `error_handling: {mode: 'SUSPEND'}` (the server default) — the run logs a warning naming the error detail, rather than reporting success while Tableflow is actually dead with no way to notice. `PENDING` is not flagged — it's a normal state to be caught in, not a problem. This is a warning, not a failure: resuming a suspended topic (via the read-only `suspended` field) isn't something dbt patches, or should attempt automatically — deciding whether a suspended record is safe to reprocess is a human call.
-
-If `tableflow` is unset in the model, nothing is ever checked or touched, regardless of live state — this also means a table Tableflow was enabled on outside of dbt is never flagged just because the model doesn't mention it.
-
-**Disabled automatically before `--full-refresh`, when the *new* config still sets `tableflow`.** Before dropping a relation for a full-refresh, the adapter checks live Tableflow state (via a live `GET`, not the config value) and disables it first if present, so the drop doesn't race an active materialization — confluent-sql's own recommendation. This is deliberately gated on the *current* model's config, not on live state alone: checking live state before every drop, including drops on models that have never used `tableflow`, would require every profile to supply a Global API key just to run `--full-refresh` at all.
-
-The corollary: if a model's `tableflow` config is removed (rather than the table being dropped outright), an old Tableflow configuration left enabled on that relation is not disabled and is not touched on subsequent runs. If that relation is later full-refreshed, the drop is **not** preceded by a disable, since the new config no longer mentions `tableflow` — this can race Tableflow the same way an unguarded drop would. Explicitly turning Tableflow off (without dropping the table) is not yet supported; it's tracked as follow-up work.
-
-**Credentials**: Tableflow's control-plane routes require a Global API key (`global_api_key` / `global_api_secret`) — they resolve `database` to a Kafka cluster id via CMK, which only a Global key can do. A model that configures `tableflow` on a profile without one raises a clear error naming these fields, rather than the raw driver error.
 
 ## Supported Materializations
 
@@ -309,6 +146,8 @@ concept page for the underlying feature.
 - `start_mode` — where the query starts (or, on an in-place evolution, restarts) reading; see [Evolution / State Impact](#evolution--state-impact) below. All eight documented forms are accepted (default: `RESUME_OR_FROM_BEGINNING`): `FROM_BEGINNING`, `FROM_NOW`, `RESUME_OR_FROM_BEGINNING`, `RESUME_OR_FROM_NOW`, `FROM_TIMESTAMP('<timestamp>')`, `RESUME_OR_FROM_TIMESTAMP('<timestamp>')`, `FROM_NOW(INTERVAL '<n>' <unit>)`, `RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>)`. The adapter validates the keyword and its arity but passes the parenthesized argument through verbatim (after rejecting anything that could break out of the DDL — stray quotes, parens, operators); the server validates the argument itself. Note that `FROM_NOW`/`RESUME_OR_FROM_NOW` require a full interval literal — `FROM_NOW(INTERVAL '7' DAY)` — not a plain quoted string, despite what some Confluent docs examples currently show.
 - `statement_properties` — see [Statement Properties](#statement-properties).
 - `tableflow` — see [Tableflow](#tableflow). Checked on every run — create or in-place evolution alike.
+- `statement_name` — see [Deterministic Statement Names](#deterministic-statement-names). Note each run already uses a unique per-run name regardless (see [Statements Emitted](#statements-emitted) below); a configured `statement_name` becomes the base that per-run suffix is derived from.
+- `compute_pool_id` — see [Compute Pool](#compute-pool).
 - `freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error. Any other dbt-confluent config key this materialization doesn't read (e.g. `connector`, `on_schema_drift`) is also rejected — see [Validation](#validation).
 
 **Contracts and primary keys**:
@@ -643,3 +482,166 @@ For `streaming_source`, automatic recovery is **not** supported: the CREATE stat
 | `materialized_view` | dbt's built-in `materialized_view` materialization is not implemented. For a Flink materialized table use the `materialized_table` materialization (declarative, `CREATE OR ALTER MATERIALIZED TABLE`); for a CTAS table that Flink keeps continuously updated use `table`. |
 | `incremental` | dbt's batch-incremental semantics does not map to Flink's continuous processing model. Use `streaming_table` instead. |
 | `snapshot` | Flink SQL lacks the batch operations (MERGE, UPDATE) required by dbt snapshots. |
+
+## Model Configuration
+
+### Validation
+
+Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing — e.g. `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
+
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`) against the materialization you're using. Any other config key — including your own custom keys read by your own hooks or macros — is never inspected and never affected by this check.
+
+If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
+
+```sql
+{{ config(
+    materialized='table',
+    statement_properties={'my_custom_key': 'value'},  -- not really ours; used by a custom macro
+    ignore_unsupported_config=['statement_properties'],
+) }}
+```
+
+`ignore_unsupported_config` takes a list of specific key names, not a blanket on/off switch — opting out of one false positive doesn't also suppress a real mistake on a different key in the same model.
+
+### Cross-Materialization Config
+
+Documentation that pertains to configurations options that apply to more than one materialization lives here.
+Each per-materialization section links back to the specific subsections below that it supports.
+
+#### Distributed By
+
+Confluent Flink lets you control how a table's rows are distributed across Kafka partitions with a `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause in the `CREATE TABLE` DDL.
+The adapter exposes this through a `distributed_by` config on [`table`](#table), [`streaming_table`](#streaming-table), [`streaming_source`](#streaming-source), and [`materialized_table`](#materialized-table) models:
+
+```sql
+{{ config(
+    materialized='streaming_table',
+    distributed_by={'columns': ['order_id'], 'buckets': 4}
+) }}
+select order_id, customer_id, price from {{ ref('orders') }}
+```
+
+This renders as:
+
+```sql
+CREATE TABLE `orders_by_id` (...)
+DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS
+WITH (...)
+```
+
+**Fields**:
+- `columns` (required) - non-empty list of column names used to compute the hash
+- `buckets` (optional) - positive integer; omit to let Confluent Cloud choose
+
+**Validation**: The adapter validates the config at the start of each materialization run and raises a clear compile error if any of the following hold:
+- `distributed_by` is not a mapping
+- `columns` is missing, empty, a string, or contains non-string / empty entries
+- A column name contains a backtick (Flink identifiers can't escape backticks)
+- `buckets` is set but isn't a positive integer (rejects `0`, negatives, floats, strings, booleans)
+- The mapping has any key other than `columns` or `buckets` (catches typos like `'strategy': 'range'`)
+
+**Important — column ordering**: Flink requires that the distribution columns appear at the **beginning** of the table's column schema, and in the **same order** as listed in `columns`. The adapter does not validate this (it would require parsing the model SQL) — Flink will reject the `CREATE TABLE` at submission with `Key columns must appear at the beginning of the table schema. Also, DISTRIBUTED BY key names must be in the same order as the key schema columns.`
+
+Practical implication for each materialization:
+- `table` and `streaming_table`: list the distribution columns first in the model's `SELECT`.
+- `streaming_source`: declare the distribution columns first in the column-definition list.
+
+```sql
+-- ❌ Rejected by Flink — `customer_id` is the distribution key but appears second
+{{ config(distributed_by={'columns': ['customer_id']}) }}
+select order_id, customer_id, price from {{ ref('orders') }}
+
+-- ✅ Accepted — `customer_id` is first
+{{ config(distributed_by={'columns': ['customer_id']}) }}
+select customer_id, order_id, price from {{ ref('orders') }}
+```
+
+Flink only supports the `HASH` distribution strategy today, so the adapter always emits `HASH(...)`. See the [Flink CREATE TABLE documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html#distributed-by-clause) for details.
+
+#### Compute Pool
+
+By default, every statement runs on the compute pool configured in your profile (`compute_pool_id`). You can override the pool per model — for example to isolate a heavy model or to manage resources — with the `compute_pool_id` config, available on every materialization that submits a statement: [`table`](#table), [`view`](#view), [`materialized_table`](#materialized-table), [`streaming_table`](#streaming-table), and [`streaming_source`](#streaming-source).
+
+```sql
+{{ config(materialized='streaming_table', compute_pool_id='lfcp-abc123') }}
+```
+
+The override applies to all statements a model submits (DDL, the long-running INSERT, and metadata/drift-check queries). The pool must exist in the same environment and region as the profile, and the API key used must have access to it; Confluent Cloud validates this at submission time. When `compute_pool_id` is omitted, the profile default is used. If the profile sets no default pool either, Confluent Cloud Flink runs the statement on the environment+region default pool.
+
+Statement recovery and cleanup (see [Statement Lifecycle](#statement-lifecycle)) operate by statement name and are pool-agnostic: a model's statement is found, inspected, and — when dead — resubmitted on the model's configured pool regardless of the profile default.
+
+Changing `compute_pool_id` on an existing, healthy model takes effect **only** on the next `--full-refresh` or statement restart — a running statement is not migrated to a new pool, since the pool is a property of the statement (not the table) and isn't part of drift detection.
+
+##### Per-environment pools in CI/CD
+
+The same model is often deployed to different compute pools across environments (dev / staging / prod) or regions. Rather than hard-coding a pool, inject it at deploy time with an environment variable:
+
+```sql
+{{ config(materialized='streaming_table', compute_pool_id=env_var('FLINK_COMPUTE_POOL')) }}
+```
+
+Your CI/CD pipeline sets `FLINK_COMPUTE_POOL` (and typically `statement_name`) per target, keeping a single Git source of truth.
+
+#### Statement Properties
+
+Set Flink SET-style statement properties, such as `sql.tables.scan.idle-timeout`, with the `statement_properties` config, available on the [`streaming_table`](#streaming-table) and [`materialized_table`](#materialized-table) materializations:
+
+```sql
+{{ config(
+    materialized='streaming_table',
+    statement_properties={'sql.tables.scan.idle-timeout': '30 s'},
+) }}
+```
+
+See the [SET Statement](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html) documentation for all [available options](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html#available-set-options).
+
+This is different from `with`: `with` sets table-level WITH-clause options baked into the `CREATE TABLE` DDL, while `statement_properties` sets properties on the statement that runs the model's query — `streaming_table`'s long-running `INSERT INTO ... SELECT`, or `materialized_table`'s `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT`. The value is a dict of `string -> string|int|bool`.
+
+Three keys are reserved for use by the driver - `sql.current-catalog`, `sql.current-database`, and `sql.snapshot.mode` (derived from the statement's execution mode). Setting any reserved properties yourself fails the run with a "reserved system property" error. Confluent Cloud Flink performs the validation of all the provided values at statement planning time.
+
+Changing `statement_properties` on an existing, healthy `streaming_table` takes effect **only** on the next `--full-refresh` or statement restart — a running statement keeps its original properties, since (like `compute_pool_id`) they're a property of the statement, not the table, and aren't part of drift detection. `materialized_table` has no such lag: every run resubmits a fresh `CREATE OR ALTER` statement under a new per-run name (see [Deterministic Statement Names](#deterministic-statement-names)), so a changed value takes effect on the very next run.
+
+#### Tableflow
+
+[Tableflow](https://docs.confluent.io/cloud/current/topics/tableflow/overview.html) materializes the Kafka topic backing a Flink table as an Apache Iceberg and/or Delta Lake table in object storage. That table can be [queried by external engines](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/overview.html) like Snowflake and Trino, and — as of this writing, in Open Preview — by [Confluent Cloud Flink itself](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/query-with-flink.html) via a [snapshot query](#table) against the same `sql.snapshot.mode` mechanism `table` uses. Enabling Tableflow is done through a dedicated [Confluent Cloud control-plane API](https://docs.confluent.io/cloud/current/ccloud/list-tableflow-v-1-tableflow-topics/) (`POST`/`GET`/`DELETE /tableflow/v1/tableflow-topics`) — not Flink SQL DDL — so the adapter drives it directly through the `confluent-sql` driver rather than through the model's own statements.
+
+Available on every materialization that owns a real Kafka-backed table ([`table`](#table), [`streaming_table`](#streaming-table), [`streaming_source`](#streaming-source), [`materialized_table`](#materialized-table)) via the `tableflow` config:
+
+```sql
+{{ config(
+    materialized='table',
+    tableflow={
+        'table_formats': ['ICEBERG'],
+        'storage': {'kind': 'Managed'},
+    }
+) }}
+select order_id, customer_id, price from {{ ref('orders') }}
+```
+
+**Fields**:
+- `table_formats` (required) — `'ICEBERG'`, `'DELTA'`, or a list containing either or both.
+- `storage` (required) — a mapping with a `kind` key, using Tableflow's own API names verbatim (see the [storage configuration guide](https://docs.confluent.io/cloud/current/topics/tableflow/concepts/tableflow-storage.html)):
+    - `{'kind': 'Managed'}` — Confluent-managed storage, no further config.
+    - `{'kind': 'ByobAws', 'bucket_name': '...', 'provider_integration_id': '...'}` — bring-your-own S3 bucket.
+    - `{'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': '...', 'container_name': '...', 'provider_integration_id': '...'}` — customer-owned Azure Data Lake Storage Gen2.
+- `config` (optional) — topic-level settings, mirroring Tableflow's own `spec.config` nesting verbatim rather than a flattened dbt-invented shape, so a `config` block copied straight from the API spec, the `confluent` CLI's own payload, or `confluent_sql` works unchanged:
+    - `retention_ms` / `data_retention_ms` (optional) — non-negative integers (or numeric strings) controlling snapshot/data retention.
+    - `error_handling` (optional) — how a bad record is handled: `{'mode': 'SUSPEND'}` (the server default — suspends materialization), `{'mode': 'SKIP'}` (skip and continue), or `{'mode': 'LOG', 'target': '...'}` (log to a dead-letter target, `target` defaults to `'error_log'`).
+
+The adapter validates this shape (`CompilationError` on a malformed `tableflow` config) when it's actually applied — unlike `distributed_by`/`start_mode`, `tableflow` is never baked into this DDL, so a bad value can't doom a `--full-refresh` recreate, and there's no need to validate it any earlier.
+
+**Ensured on every run.** Whenever a model configures `tableflow`, every run (whether the relation was just created, already existed, or is being restarted) checks Tableflow's live state and:
+- **Not enabled** — enables it with the current config.
+- **Already enabled** — diffs the live configuration against what's now configured and applies an in-place update only if `table_formats`/`config` actually changed, so an unchanged config is a true no-op rather than cycling the backing materialization job every run. `storage` can't be changed in place (Tableflow's API doesn't support it), but a change there is still detected and handled automatically: the adapter disables and re-enables Tableflow with the new storage config. This only ever touches the Tableflow sink, never the underlying Kafka topic or its data — unlike `--full-refresh`, which drops and recreates the topic itself — and re-enabling backfills the full topic history from the earliest offset, so this doesn't leave a coverage gap.
+
+    One specific storage transition — a custom bucket (`ByobAws`/`AzureDataLakeStorageGen2`) to Confluent-managed storage — can fail even after the automatic disable/re-enable above completes: Confluent Cloud enforces a grace period after disabling before it accepts the switch to managed storage, with no status to poll for when it's actually done. A run that hits this fails with a clear error rather than hanging — re-run the model after waiting, or use `--full-refresh` to succeed immediately (it builds a new Kafka topic with no prior-storage history to check against, but drops and recreates the topic, wiping its existing data).
+
+    A config that matches (nothing to PATCH) still checks the topic's [phase](https://docs.confluent.io/cloud/current/topics/tableflow/operate/monitor-tableflow.html): if it has **FAILED** — most commonly a poison-pill record suspending the materialization under `error_handling: {mode: 'SUSPEND'}` (the server default) — the run logs a warning naming the error detail, rather than reporting success while Tableflow is actually dead with no way to notice. `PENDING` is not flagged — it's a normal state to be caught in, not a problem. This is a warning, not a failure: resuming a suspended topic (via the read-only `suspended` field) isn't something dbt patches, or should attempt automatically — deciding whether a suspended record is safe to reprocess is a human call.
+
+If `tableflow` is unset in the model, nothing is ever checked or touched, regardless of live state — this also means a table Tableflow was enabled on outside of dbt is never flagged just because the model doesn't mention it.
+
+**Disabled automatically before `--full-refresh`, when the *new* config still sets `tableflow`.** Before dropping a relation for a full-refresh, the adapter checks live Tableflow state (via a live `GET`, not the config value) and disables it first if present, so the drop doesn't race an active materialization — confluent-sql's own recommendation. This is deliberately gated on the *current* model's config, not on live state alone: checking live state before every drop, including drops on models that have never used `tableflow`, would require every profile to supply a Global API key just to run `--full-refresh` at all.
+
+The corollary: if a model's `tableflow` config is removed (rather than the table being dropped outright), an old Tableflow configuration left enabled on that relation is not disabled and is not touched on subsequent runs. If that relation is later full-refreshed, the drop is **not** preceded by a disable, since the new config no longer mentions `tableflow` — this can race Tableflow the same way an unguarded drop would. Explicitly turning Tableflow off (without dropping the table) is not yet supported; it's tracked as follow-up work.
+
+**Credentials**: Tableflow's control-plane routes require a Global API key (`global_api_key` / `global_api_secret`) — they resolve `database` to a Kafka cluster id via CMK, which only a Global key can do. A model that configures `tableflow` on a profile without one raises a clear error naming these fields, rather than the raw driver error.
