@@ -10,7 +10,13 @@ only if something actually changed (see #101).
 from unittest.mock import MagicMock
 
 import pytest
-from confluent_sql import AzureAdlsStorage, ByobAwsStorage, ManagedStorage, TableFormat
+from confluent_sql import (
+    AzureAdlsStorage,
+    ByobAwsStorage,
+    GcsStorage,
+    ManagedStorage,
+    TableFormat,
+)
 from confluent_sql.exceptions import (
     OperationalError,
     ProgrammingError,
@@ -120,6 +126,24 @@ class TestEnsureTableflowConfig:
             provider_integration_id="cspi-123",
         )
 
+    def test_gcs_storage(self, handle, rel):
+        tableflow.reconcile_tableflow_config(
+            handle,
+            rel,
+            {
+                "table_formats": "ICEBERG",
+                "storage": {
+                    "kind": "GoogleCloudStorage",
+                    "bucket_name": "my-bucket",
+                    "provider_integration_id": "cspi-123",
+                },
+            },
+        )
+        call = handle.enable_tableflow.call_args
+        assert call.kwargs["storage"] == GcsStorage(
+            bucket_name="my-bucket", provider_integration_id="cspi-123"
+        )
+
     def test_retention_and_error_handling_build_topic_config(self, handle, rel):
         tableflow.reconcile_tableflow_config(
             handle,
@@ -197,33 +221,77 @@ class TestEnsureTableflowConfig:
 
     # --- already enabled, storage changed -> no in-place PATCH path, so recreate (#101) ---
 
-    def test_already_enabled_storage_changed_recreates_topic(self, handle, rel, logger):
-        """`storage` is immutable via PATCH, but not actually unchangeable: disabling and
-        re-enabling only ever touches the Tableflow sink, never the underlying Kafka topic
-        or its data, and re-enabling backfills the full topic history -- so this is the
-        right response to a storage change, not a `--full-refresh`."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",))
-        tableflow.reconcile_tableflow_config(
-            handle,
-            rel,
-            {
-                "table_formats": "ICEBERG",
-                "storage": {
+    @pytest.mark.parametrize(
+        ("existing_storage", "desired_storage_config", "expected_storage"),
+        [
+            (
+                ManagedStorage(),
+                {
                     "kind": "ByobAws",
                     "bucket_name": "my-bucket",
                     "provider_integration_id": "cspi-123",
                 },
-            },
+                ByobAwsStorage(bucket_name="my-bucket", provider_integration_id="cspi-123"),
+            ),
+            (
+                ManagedStorage(),
+                {
+                    "kind": "AzureDataLakeStorageGen2",
+                    "storage_account_name": "acct",
+                    "container_name": "container",
+                    "provider_integration_id": "cspi-123",
+                },
+                AzureAdlsStorage(
+                    storage_account_name="acct",
+                    container_name="container",
+                    provider_integration_id="cspi-123",
+                ),
+            ),
+            (
+                ManagedStorage(),
+                {
+                    "kind": "GoogleCloudStorage",
+                    "bucket_name": "my-bucket",
+                    "provider_integration_id": "cspi-123",
+                },
+                GcsStorage(bucket_name="my-bucket", provider_integration_id="cspi-123"),
+            ),
+            (
+                # Same check, in the other direction: confirms the generic dataclass-equality
+                # change detection isn't only exercised when a non-Managed kind is the *new*
+                # value -- it doesn't matter which side of the diff a kind is on.
+                GcsStorage(bucket_name="my-bucket", provider_integration_id="cspi-123"),
+                {"kind": "Managed"},
+                ManagedStorage(),
+            ),
+        ],
+        ids=["to_byob_aws", "to_azure_adls", "to_gcs", "from_gcs_to_managed"],
+    )
+    def test_already_enabled_storage_changed_recreates_topic(
+        self, handle, rel, logger, existing_storage, desired_storage_config, expected_storage
+    ):
+        """`storage` is immutable via PATCH, but not actually unchangeable: disabling and
+        re-enabling only ever touches the Tableflow sink, never the underlying Kafka topic
+        or its data, and re-enabling backfills the full topic history -- so this is the
+        right response to a storage change, not a `--full-refresh`. Applies uniformly to
+        every storage kind via the generic `desired.storage != existing.spec.storage`
+        dataclass-equality check (no per-kind dispatch), so one parametrized test covers
+        all of them rather than one hand-written test per kind."""
+        handle.get_tableflow.side_effect = None
+        handle.get_tableflow.return_value = make_topic(
+            table_formats=("ICEBERG",), storage=existing_storage
+        )
+        tableflow.reconcile_tableflow_config(
+            handle,
+            rel,
+            {"table_formats": "ICEBERG", "storage": desired_storage_config},
         )
         handle.disable_tableflow.assert_called_once_with("my_table")
         handle.update_tableflow.assert_not_called()
         handle.enable_tableflow.assert_called_once()
         call = handle.enable_tableflow.call_args
         assert call.args[0] == "my_table"
-        assert call.kwargs["storage"] == ByobAwsStorage(
-            bucket_name="my-bucket", provider_integration_id="cspi-123"
-        )
+        assert call.kwargs["storage"] == expected_storage
         # table_formats/config are re-applied fresh from the current dbt config, same as
         # any other create -- not just whatever happened to be already running.
         assert call.kwargs["table_formats"] == [TableFormat.ICEBERG]
@@ -650,6 +718,10 @@ class TestEnsureTableflowConfigMalformedConfig:
                 "'tableflow.storage' of kind 'ByobAws' is invalid",
             ),
             (
+                {"table_formats": "ICEBERG", "storage": {"kind": "GoogleCloudStorage"}},
+                "'tableflow.storage' of kind 'GoogleCloudStorage' is invalid",
+            ),
+            (
                 {
                     "table_formats": "ICEBERG",
                     "storage": {
@@ -787,6 +859,7 @@ class TestEnsureTableflowConfigMalformedConfig:
             "storage_not_dict",
             "unknown_storage_kind",
             "byob_aws_missing_required_keys",
+            "gcs_missing_required_keys",
             "managed_with_extra_key",
             "byob_aws_bucket_name_not_a_string",
             "azure_adls_container_name_not_a_string",
