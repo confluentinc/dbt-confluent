@@ -27,6 +27,9 @@ from tests.functional.adapter._helpers import (
     assert_distribution_drift_error,
     assert_drift_error,
     assert_tables_absent,
+    capture_submitted_statement_properties,
+    drift_temp_tables_created,
+    dry_run_models,
     get_result_by_name,
     relation,
 )
@@ -153,8 +156,10 @@ class TestSchemaDriftDetection(ConfluentFixtures):
     check is wired and reaches check_schema_drift through the live catalog query.
     """
 
-    # Every model in this project runs a drift check on a non-full-refresh run;
-    # each check's temp table must be gone afterward (dropped by post_model_hook).
+    # Every model in this project runs a drift check on a non-full-refresh run.
+    # Since GH-118 only the streaming_source models create a temp table (the
+    # SELECT models dry-run instead); any temp table must be gone afterward
+    # (dropped by post_model_hook).
     DRIFT_CHECKED_MODELS = ("source_for_drift", "my_table", "my_streaming_table", "my_source")
 
     def _drift_temp_tables(self, project):
@@ -189,27 +194,45 @@ class TestSchemaDriftDetection(ConfluentFixtures):
         project.run_sql("drop table if exists my_streaming_table")
         project.run_sql("drop table if exists my_source")
 
-    def test_second_run_skips(self, project):
+    def test_second_run_skips(self, project, monkeypatch):
         """A second run with no changes must skip every model, not drift.
 
-        This is the shared no-drift path for all three materializations.
+        This is the shared no-drift path for all three materializations. It
+        also pins GH-118's acceptance criterion: the SELECT models resolve
+        their expected columns by dry-run and create no temp table.
         """
+        submitted = capture_submitted_statement_properties(monkeypatch)
         results = run_dbt(["run"])
         assert len(results) == 4
         for r in results:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-        # Each skip ran a drift check; its temp table is dropped by
-        # post_model_hook, not inline — prove the happy-path cleanup wiring.
+        assert dry_run_models(submitted) == {"my_table", "my_streaming_table"}
+        assert drift_temp_tables_created(
+            submitted, project.adapter, *self.DRIFT_CHECKED_MODELS
+        ) == {"source_for_drift", "my_source"}
+        # The streaming_source temp tables are dropped by post_model_hook, not
+        # inline — prove the happy-path cleanup wiring.
         assert_tables_absent(project, *self._drift_temp_tables(project))
+
+    def test_empty_run_skips_existing_streaming_table(self, project, monkeypatch):
+        """`dbt run --empty` wraps each ref in a `where false limit 0` subquery
+        before the dry-run wraps the whole SELECT again; the columns, and so
+        the SKIP, must not change."""
+        submitted = capture_submitted_statement_properties(monkeypatch)
+        results = run_dbt(["run", "--empty", "--select", "my_streaming_table"])
+        assert [r.message for r in results] == ["SKIP"]
+        assert dry_run_models(submitted) == {"my_streaming_table"}
+        assert not drift_temp_tables_created(submitted, project.adapter, "my_streaming_table")
 
     def test_column_drift_detected(self, project):
         """Every materialization drifted at once, asserted in a single run.
 
         A `dbt run` drift-checks *every* model in the project (each pays a
-        temp-table create + catalog query), so the per-run cost is paid whether
-        one model drifts or all three. We therefore mutate all three and assert
-        each raises, rather than spending three separate runs for no extra
-        coverage — the per-kind detection logic is unit-tested.
+        dry-run or a temp-table create, plus a catalog query), so the per-run
+        cost is paid whether one model drifts or all three. We therefore
+        mutate all three and assert each raises, rather than spending three
+        separate runs for no extra coverage — the per-kind detection logic is
+        unit-tested.
         """
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
         set_model_file(
@@ -640,3 +663,115 @@ class TestDistributedByDefaultIsNotChecked(ConfluentFixtures):
                 f"{r.node.name} unexpectedly fired drift on auto-assigned distribution: "
                 f"{r.message}"
             )
+
+
+# ---------------------------------------------------------------------------
+# GH-118: dry-run renderer against real FULL_DATA_TYPE output
+# ---------------------------------------------------------------------------
+
+# Only shapes the renderer accepts AND whose CTAS-stored FULL_DATA_TYPE the
+# GH-118 probes observed (run 995e2382): an unchanged re-run must SKIP on the
+# dry-run path.
+DRY_RUN_TYPES_MODEL = """
+{{ config(materialized='table') }}
+select
+  cast(1 as bigint) as id,
+  cast(12.5 as decimal(10, 2)) * 2 as price_x2,
+  'abc' as char_literal,
+  cast(null as timestamp_ltz(3)) as ts_ltz,
+  array[1, 2] as int_array,
+  map[cast('a' as string), 1] as string_keyed_map,
+  cast(row(1, 'b') as row<`a` int, `b` string>) as named_row
+"""
+
+# MAP['a', 1] has a CHAR(1) key that a CTAS table stores as VARCHAR(2147483647)
+# (probe run 995e2382), so the renderer declines it and this model must take
+# the temp-table fallback.
+CHAR_KEYED_MAP_MODEL = """
+{{ config(materialized='table') }}
+select cast(1 as bigint) as id, map['a', 1] as char_keyed_map
+"""
+
+
+class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
+    """An unchanged re-run must SKIP on both the dry-run path (NOT NULL,
+    nested and precision-changing expressions) and the fallback path (a CHAR
+    map key the renderer declines)."""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {"models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "dry_run_types.sql": DRY_RUN_TYPES_MODEL,
+            "char_keyed_map.sql": CHAR_KEYED_MAP_MODEL,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists dry_run_types")
+        project.run_sql("drop table if exists char_keyed_map")
+
+    def test_unchanged_rerun_skips_on_both_paths(self, project, monkeypatch):
+        submitted = capture_submitted_statement_properties(monkeypatch)
+        results = run_dbt(["run"])
+        assert len(results) == 2
+        for r in results:
+            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
+        # Both models dry-ran; the renderer then declined char_keyed_map, so
+        # only it fell back to a temp table.
+        assert dry_run_models(submitted) == {"dry_run_types", "char_keyed_map"}
+        assert drift_temp_tables_created(
+            submitted, project.adapter, "dry_run_types", "char_keyed_map"
+        ) == {"char_keyed_map"}
+        assert_tables_absent(
+            project, project.adapter.generate_schema_check_temp_name("char_keyed_map")
+        )
+
+
+# ---------------------------------------------------------------------------
+# GH-118: the dry-run mode comes from the materialization, not the profile
+# ---------------------------------------------------------------------------
+
+
+class TestDryRunModeIgnoresDdlProfile(ConfluentFixtures):
+    """With the profile's execution_mode set to snapshot_ddl, the drift
+    check still dry-runs `table` in snapshot and `streaming_table` in
+    streaming_query, so an unchanged re-run must SKIP."""
+
+    @pytest.fixture(scope="class")
+    def dbt_profile_target(self, dbt_profile_target):
+        return {**dbt_profile_target, "execution_mode": "snapshot_ddl"}
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {"models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "my_table.sql": TABLE_MODEL,
+            "my_streaming_table.sql": STREAMING_TABLE_MODEL,
+            "models.yml": STREAMING_TABLE_MODELS_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists my_table")
+        project.run_sql("drop table if exists my_streaming_table")
+
+    def test_rerun_skips_under_ddl_mode_profile(self, project, monkeypatch):
+        submitted = capture_submitted_statement_properties(monkeypatch)
+        results = run_dbt(["run"])
+        assert len(results) == 3
+        for r in results:
+            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
+        assert dry_run_models(submitted) == {"my_table", "my_streaming_table"}
