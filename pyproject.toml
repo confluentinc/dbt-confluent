@@ -76,10 +76,10 @@ Repository = "https://github.com/confluentinc/dbt-confluent"
 confluent = "dbt.adapters.confluent"
 
 [tool.uv.sources]
-# Pinned to the tableflow-update-patch branch tip (see issue #101, confluent-sql#214) so CI can
-# resolve update_tableflow/table_formats without a local checkout -- remove once the needed
-# confluent-sql release ships.
-confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "06b14e4073389b01421d98a1239414a376e2358d" }
+# Pinned to a confluent-sql main commit (see issue #101, confluent-sql#214, and issue #167,
+# confluent-sql#239/#242) so CI can resolve update_tableflow/table_formats and GcsStorage
+# without a local checkout -- remove once a confluent-sql release containing both ships.
+confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "e7276405e5da99fdf7b37c66013ac5abafc2c5b7" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
