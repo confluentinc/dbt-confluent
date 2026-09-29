@@ -100,7 +100,7 @@ group by customer_id
 `materialized_table` is declarative.
 Every run submits the same kind of statement, and Flink reconciles the table's actual state to match
 it, rather than dbt-confluent choosing between a drop/recreate and a schema-drift-based skip the way
-`table`/`streaming_table`/`streaming_source` do.
+`table`, `streaming_table`, and `streaming_source` do.
 
 See Confluent's [materialized tables](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html)
 concept page for the underlying feature.
@@ -155,37 +155,21 @@ Without an enforced contract, the materialization renders a plain `AS SELECT` wi
 
 #### `materialized_table`: Evolution / State Impact
 
-`materialized_table` behaves differently depending on what changes between runs:
+During an evolution the Flink job clears its internal state, resetting any aggregations, window, or join state.
 
-| Scenario | What happens |
-|---|---|
-| New table | Created. |
-| Existing table (changed or not) | Evolved **in place**: the table and its topic are kept, but the running query is stopped and replaced. |
-| `--full-refresh` | `DROP MATERIALIZED TABLE IF EXISTS`, then recreate. |
-
-**In-place evolution**, in more detail: the Flink job clears its internal state, resetting any aggregations, window, or join state. It then begins (re-)processing data according to the configured [`start_mode`](#materialized_table-start_mode):
+It then begins (re-)processing data according to the configured [`start_mode`](#materialized_table-start_mode):
 
 - Under a `RESUME_*` start mode (the default, `RESUME_OR_FROM_BEGINNING`, is one of these), stateless queries (projections, filters) evolve seamlessly: no reprocessing, no duplicates.
-- For *stateful* queries, evolution recalculates results from a clean slate rather than adjusting the old ones. Depending on `start_mode`, that recalculation may not cover the same source data as before, so joins, aggregations, and other stateful results can shift (e.g. an aggregation resuming from an offset instead of replaying history will look "undercounted"). See [Confluent's materialized tables concepts page](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html#controlling-reprocessing-with-start-mode) for evolution semantics and caveats.
+- For *stateful* queries, evolution recalculates results from a clean slate rather than adjusting the old ones. Depending on `start_mode`, that recalculation may not cover the same source data as before, so joins, aggregations, and other stateful results can shift (e.g. an aggregation resuming from an offset instead of replaying history will look "undercounted").
 
-**`--full-refresh`** is required to change `distributed_by` (fixed at creation), to apply changes an evolution rejects, and to rebuild correct results for a stateful model whose `start_mode` resumes from offsets.
+See [Confluent's materialized tables concepts page](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html#controlling-reprocessing-with-start-mode).
 
-**Warning:** dropping a materialized table (including via `--full-refresh`) permanently deletes the backing Kafka topic and all of its data.
+**Known limitations:** 
 
-**Known limitation: every run evolves, even when nothing changed.** Confluent's own
-[`CREATE OR ALTER MATERIALIZED TABLE` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-or-alter-materialized-table.html)
-states plainly that the statement is **not idempotent**: "running the same `CREATE OR ALTER` command
-always triggers a new evolution, even if nothing has changed," and that evolution "always" discards
-all existing Flink processing state. Because dbt-confluent always submits the full `... AS SELECT`
-form of this statement on every run (see [Statements Emitted](#materialized_table-statements-emitted) below), a plain
-`dbt run` against an unchanged `materialized_table` model resets its Flink state just like a real
-definition change would. There is currently no true no-op path for this materialization. Confluent's
-grammar also exposes a lighter, property-only `ALTER MATERIALIZED TABLE` form (no `AS SELECT`) that
-does **not** trigger evolution, but dbt-confluent does not use it today. This is a dbt-confluent
-limitation, not a Confluent Cloud Flink one, and is worth planning around for stateful models that
-run frequently.
-
-**Evolution limits**: not every change can evolve in place. Dropping columns is rejected at submission, observed either as a per-column error ("dropping a non-nullable, persisted column is not supported") or as a query/sink schema mismatch ("Column types of query result and sink ... do not match. Cause: Different number of columns."). The fix is `--full-refresh`. (Materialized tables don't use [schema drift detection](#schema-drift-detection); Flink reconciles the definition instead, and a rejected evolution is the analogous failure mode.)
+- Every dbt run of a materialized_table evolves the table, even when the query has not changed.
+  + In a future release, this materialization will allow changing some options without requiring a full evolution.
+- Not every change can evolve in place.
+  + Dropping columns is rejected at submission. The fix is `--full-refresh`.
 
 #### `materialized_table`: Statements Emitted
 
@@ -197,22 +181,11 @@ CREATE OR ALTER MATERIALIZED TABLE <relation> [(<cols>, PRIMARY KEY (...) NOT EN
   [DISTRIBUTED BY (...)] [WITH (...)] [START_MODE = ...] AS <model SELECT>
 ```
 
-This is never a bare `ALTER MATERIALIZED TABLE`, even when only a `with` option changes and nothing
-about the query, columns, or distribution does.
-Each run submits under a unique per-run statement name (see
-[Deterministic Statement Names](#deterministic-statement-names)), so a re-assert can never collide
-with a statement left over from a previous run.
-See the [`CREATE OR ALTER MATERIALIZED TABLE` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-or-alter-materialized-table.html)
-for the full DDL grammar.
+See the [`CREATE OR ALTER MATERIALIZED TABLE` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-or-alter-materialized-table.html).
 
 #### `materialized_table`: Switching Materializations
 
-An existing regular table or view cannot be converted to a materialized table, and a materialized table cannot be adopted by the drop-and-recreate materializations. The adapter detects both switches before submitting anything, and both resolve the same way:
-
-- *To* `materialized_table`: a plain run fails with guidance; `--full-refresh` drops the existing relation (and its Flink statements) through the regular drop path, then creates the materialized table.
-- *From* `materialized_table` (model changed to `table`/`streaming_table`/`streaming_source`): a plain run fails with guidance. This matters because a materialized table looks like a regular table to the catalog, and without the check an unchanged model would silently "succeed" while Flink kept maintaining the old defining query. `--full-refresh` drops the materialized table (via `DROP MATERIALIZED TABLE`), **but the recreate under the same name is then blocked server-side**: the drop does not remove the MT's Schema Registry subjects, and the keyed schema the MT registered doesn't match the schema the new relation would register (a `table` snapshot CTAS is keyless), so creation fails with "Schema Registry subject ... doesn't match the existing one" and the adapter's appended recovery guidance. To complete the switch, delete the lingering `<name>-key`/`<name>-value` subjects in Schema Registry and re-run (`dbt retry` works, since the MT is already gone), or give the model a different relation name via `alias`. Note the drop permanently deletes the backing topic and its data, and `on_schema_drift='ignore'` skips this detection along with the rest of the drift check.
-
-Re-running while Flink is still establishing a freshly created or evolved table can be transiently rejected (`being modified`); the window is brief and the adapter retries automatically.
+An existing regular table or view cannot be converted to a materialized table, and a materialized table cannot be adopted by the other materializations.
 
 ---
 
