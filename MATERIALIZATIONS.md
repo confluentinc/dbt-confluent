@@ -549,7 +549,7 @@ select order_id, customer_id, price from {{ ref('orders') }}
 
 [Tableflow](https://docs.confluent.io/cloud/current/topics/tableflow/overview.html) materializes the Kafka topic backing a Flink table as an Apache Iceberg and/or Delta Lake table in object storage.
 
-That table can be [queried by external engines](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/overview.html) like Snowflake and Trino, and by [Confluent Cloud Flink itself](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/query-with-flink.html) via a [snapshot query](#materialization-table) (the same mechanism `table` uses).
+That table can be [queried by external engines](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/overview.html) like Snowflake and Trino, and by [Confluent Cloud Flink itself](https://docs.confluent.io/cloud/current/topics/tableflow/how-to-guides/query-engines/query-with-flink.html) via a [snapshot query](https://docs.confluent.io/cloud/current/flink/concepts/snapshot-queries.html) (the same mechanism [`table`](#materialization-table) uses).
 
 A Tableflow configuration can be added to any materialization that owns a real Kafka-backed table ([`table`](#materialization-table), [`streaming_table`](#materialization-streaming_table), [`streaming_source`](#materialization-streaming_source), [`materialized_table`](#materialization-materialized_table)) and supports the following fields:
 
@@ -635,11 +635,17 @@ DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS
 WITH (...)
 ```
 
-**Fields**:
-- `columns` (required) - non-empty list of column names used to compute the hash
-- `buckets` (optional) - positive integer; omit to let Confluent Cloud choose
+#### Fields
 
-**Validation**: The adapter validates the config at the start of each materialization run and raises a clear compile error if any of the following hold:
+|Field|Description|
+|---|---|
+|`columns`| (required) - non-empty list of column names used to compute the hash|
+|`buckets`| (optional) - positive integer; omit to let Confluent Cloud choose|
+
+#### Validation
+
+The adapter validates the config at the start of each materialization run and raises a clear compile error if any of the following hold:
+
 - `distributed_by` is not a mapping
 - `columns` is missing, empty, a string, or contains non-string / empty entries
 - A column name contains a backtick (Flink identifiers can't escape backticks)
