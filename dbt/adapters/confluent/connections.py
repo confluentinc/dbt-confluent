@@ -78,6 +78,12 @@ class ConfluentCredentials(Credentials):
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
     statement_name_prefix: str = "dbt-"
     statement_label: str = "dbt-confluent"
+    # Per-developer/CI namespace prepended to every model's relation name and
+    # Flink statement name, so several people can run the same project against
+    # one cluster without clobbering each other. Empty (the default) leaves all
+    # names unchanged -- keep it empty for existing deployments, since changing
+    # it renames every statement and relation the project owns.
+    isolation_prefix: str = ""
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}
 
@@ -101,7 +107,9 @@ class ConfluentCredentials(Credentials):
         """
         List of keys to display in the `dbt debug` output.
         """
-        keys = ("organization_id", "database", "schema", "compute_pool_id", "auth")
+        # isolation_prefix is listed so it is also exposed to Jinja as
+        # `target.isolation_prefix` (read by confluent__generate_alias_name).
+        keys = ("organization_id", "database", "schema", "compute_pool_id", "isolation_prefix", "auth")
         if self.endpoint:
             return (*keys, "endpoint")
         else:

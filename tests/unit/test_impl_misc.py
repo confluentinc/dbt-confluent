@@ -177,14 +177,40 @@ class TestGenerateSchemaCheckTempName:
 
 
 class TestGetStatementName:
-    def _adapter_with_credentials(self, mocker, prefix="dbt-"):
+    def _adapter_with_credentials(self, mocker, prefix="dbt-", isolation_prefix=""):
         adapter = _adapter()
         credentials = mocker.MagicMock()
         credentials.statement_name_prefix = prefix
+        credentials.isolation_prefix = isolation_prefix
         config = mocker.MagicMock()
         config.credentials = credentials
         adapter.config = config
         return adapter
+
+    def test_empty_isolation_prefix_leaves_name_unchanged(self, mocker):
+        adapter = self._adapter_with_credentials(mocker, "dbt-")
+        assert adapter.get_statement_name("model", "proj", suffix="-ddl") == "dbt-proj-model-ddl"
+
+    @pytest.mark.parametrize(
+        ("override", "expected"),
+        [
+            (None, "dbt-piotr-proj-model-ddl"),
+            ("custom", "piotr-custom-ddl"),
+        ],
+    )
+    def test_isolation_prefix_applied(self, mocker, override, expected):
+        adapter = self._adapter_with_credentials(mocker, "dbt-", isolation_prefix="piotr-")
+        name = adapter.get_statement_name(
+            "model", "proj", suffix="-ddl", statement_name_override=override
+        )
+        assert name == expected
+
+    def test_isolation_prefix_with_underscore_is_sanitized(self, mocker):
+        adapter = self._adapter_with_credentials(mocker, "dbt-", isolation_prefix="piotr_")
+        name = adapter.get_statement_name("model", "proj")
+        # '_' is illegal in statement names: replaced with '-' plus a hash suffix
+        assert name.startswith("dbt-piotr-proj-model-")
+        assert len(name) == len("dbt-piotr-proj-model-") + 6
 
     def test_builds_name_from_project_and_model(self, mocker):
         adapter = self._adapter_with_credentials(mocker, "dbt-")
@@ -212,6 +238,40 @@ class TestGetStatementName:
             "model", "proj", suffix="-check", statement_name_override="base"
         )
         assert "base-check" in name
+
+
+# ---------------------------------------------------------------------------
+# get_tested_model_relation
+# ---------------------------------------------------------------------------
+
+
+class TestGetTestedModelRelation:
+    def _adapter(self, mocker, isolation_prefix=""):
+        adapter = _adapter()
+        adapter.config = mocker.MagicMock()
+        adapter.config.credentials.isolation_prefix = isolation_prefix
+        adapter.get_relation = mocker.MagicMock(return_value=relation("found"))
+        return adapter
+
+    @pytest.mark.parametrize(
+        ("unique_id", "isolation_prefix", "expected_identifier"),
+        [
+            ("model.proj.orders", "", "orders"),
+            ("model.proj.orders.v2", "", "orders_v2"),
+            ("model.proj.orders", "piotr_", "piotr_orders"),
+            ("model.proj.orders.v2", "piotr_", "piotr_orders_v2"),
+        ],
+    )
+    def test_identifier_lookup(self, mocker, unique_id, isolation_prefix, expected_identifier):
+        adapter = self._adapter(mocker, isolation_prefix)
+        adapter.get_tested_model_relation(unique_id, "env", "cluster")
+        adapter.get_relation.assert_called_once_with("env", "cluster", expected_identifier)
+
+    def test_missing_relation_raises(self, mocker):
+        adapter = self._adapter(mocker, "piotr_")
+        adapter.get_relation.return_value = None
+        with pytest.raises(DbtDatabaseError, match="'piotr_orders'"):
+            adapter.get_tested_model_relation("model.proj.orders", "env", "cluster")
 
 
 # ---------------------------------------------------------------------------
