@@ -38,10 +38,10 @@ The **streaming materializations** use potentially long-running Flink statements
 - [`streaming_table`](#streaming-table)
 - [`streaming_source`](#streaming-source)
 
-Materializations that store data use [Tables](https://docs.confluent.io/cloud/current/flink/concepts/dynamic-tables.html)
-to store their rows in Apache Kafka topics. This storage can be augmented with features like [Tableflow](#tableflow).
+Materializations that store data do so as [tables](https://docs.confluent.io/cloud/current/flink/concepts/dynamic-tables.html),
+which are themselves backed by Apache Kafka topics. This storage can be augmented with features like [Tableflow](#tableflow).
 
-The most important difference between streaming materializations and other materializations you may be used to is about **statefulness**.
+An important difference between streaming materializations and other materializations you may be used to is that they can be stateful and unbounded.
 Because the streaming materializations can produce continuous results or have online consumers, you will need to consider:
 
 - **Job state.** Many materializations are backed by a Flink job with its own in-memory
@@ -54,25 +54,30 @@ Because the streaming materializations can produce continuous results or have on
   Because these changes can be destructive, the adapter provides explicit control through e.g.
   [Schema Drift Detection](#schema-drift-detection).
 
-- **Topic identity.** "Recreating" a table doesn't just replace a schema, it creates a topic under a
-  new identity, so anything still reading the old topic's offsets doesn't automatically follow.
+- **Topic identity.** "Recreating" a table doesn't just replace a schema, it is a multi-step operation
+  that includes several side-effects that can affect active consumers. E.g. the previous topic is deleted
+  and created againt with a new identity (even if the name is unchanged), and the schema is soft-deleted and
+  recreated in the schema registry. If there are consumers that are still actively depending on these
+  resources when the recreation is performed they may break.
 
 ## Supported Materializations
 
-_The table below summarizes all materializations supported by the dbt-confluent adapter._
+The table below summarizes all materializations supported by the dbt-confluent adapter:
 
-| Materialization | Description |
-|---|---|
-| [`materialized_table`](#materialized-table) | Declarative `CREATE OR ALTER MATERIALIZED TABLE`. The standard materialization for continuous stream processing |
-| [`streaming_table`](#streaming-table) | DDL plus a long-running `INSERT INTO ... SELECT`. The precursor to [`materialized_table`](#materialized-table). |
-| [`streaming_source`](#streaming-source) | A connector-backed source table, e.g. `faker`. |
-| [`table`](#table) | One-shot `CREATE TABLE ... AS SELECT` (CTAS). |
-| [`view`](#view) | A named query inlined into consumers, not a persisted result. |
-| [`ephemeral`](#ephemeral) | Standard dbt CTE fragment. |
+| Materialization | Description | Execution Mode |
+|---|---|---|
+| [`materialized_table`](#materialized-table) | Declarative `CREATE OR ALTER MATERIALIZED TABLE`. The standard materialization for continuous stream processing | Streaming |
+| [`streaming_table`](#streaming-table) | DDL plus a long-running `INSERT INTO ... SELECT`. The precursor to [`materialized_table`](#materialized-table). | Streaming |
+| [`streaming_source`](#streaming-source) | A connector-backed source table, e.g. `faker`. | Streaming |
+| [`table`](#table) | One-shot `CREATE TABLE ... AS SELECT` (CTAS). | Snapshot |
+| [`view`](#view) | A named query inlined into consumers, not a persisted result. | Inherited |
+| [`ephemeral`](#ephemeral) | Standard dbt CTE fragment. | Inherited |
+
+_Note: [`view`](#view) & [`ephemeral`](#ephemeral) inherit their execution mode from any job that queries them, since they run inline in those jobs and not as independent Flink statements._
 
 ## Unsupported Materializations
 
-_Some standard dbt materializations are not supported by this adapter._
+Some standard dbt materializations are not supported by this adapter:
 
 | Materialization | Reason |
 |---|---|
@@ -114,7 +119,7 @@ concept page for the underlying feature.
 
 | Config | Description |
 |---|---|
-| `distributed_by` | See [Distributed By](#distributed-by). Fixed at creation; changing it requires `--full-refresh`. |
+| `distributed_by` | See [Distributed By](#distributed-by). |
 | `with` | Table options, e.g. `{'key.format': 'avro-registry'}`. |
 | `start_mode` | Where the query starts (or, on an in-place evolution, restarts) reading; see [`start_mode`](#materialized-table-start-mode) below. |
 | `statement_properties` | See [Statement Properties](#statement-properties). |
@@ -640,6 +645,13 @@ CREATE TABLE `orders_by_id` (...)
 DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS
 WITH (...)
 ```
+
+**Known Limitations:**
+
+- The `distributed_by` configuration cannot be altered without recreating the topic.
+  - The underlying [ALTER TABLE](https://docs.confluent.io/cloud/current/flink/reference/statements/alter-table.html) statement itself does not allow updating this setting.
+  - This is important because changing the distribution settings can invalidate all data already written to the topic. 
+
 
 #### Fields
 
