@@ -1,6 +1,7 @@
 import re
 import threading
 import time
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
@@ -23,6 +24,7 @@ from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
 from . import tableflow
+from .flink_types import UnverifiedTypeError, render_full_data_type
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
@@ -1064,6 +1066,69 @@ class ConfluentAdapter(SQLAdapter):
                 f"{bullets}\n"
                 f"Use --full-refresh to recreate the table."
             )
+
+    @available
+    def get_expected_columns_from_dry_run(
+        self,
+        relation: ConfluentRelation,
+        sql: str,
+        execution_mode: str | None = None,
+        compute_pool_id: str | None = None,
+    ) -> dict[str, str] | None:
+        """Resolve the columns a SELECT model would produce, as FULL_DATA_TYPE strings.
+
+        Dry-runs the model's SELECT and renders the reported result schema the way
+        INFORMATION_SCHEMA.COLUMNS spells FULL_DATA_TYPE, keyed by column name in query order.
+        `check_for_schema_drift` passes the result to `check_schema_drift` as
+        `expected_columns`, in place of creating and introspecting a temp table.
+
+        Returns None, and logs why at debug level, when the dry-run can't stand in for the
+        temp table: no result schema, a column type the renderer hasn't verified, or duplicate
+        output column names. The caller then falls back to the temp-table check.
+
+        relation is the model's existing relation. It only names the model in the debug
+        lines, since text logs carry no node info when threads > 1.
+
+        Plain `@available` like the other drift helpers: only materializations call it, and
+        they render at run time, never at parse time.
+
+        Raises:
+            DbtDatabaseError: if the dry-run fails, for example on invalid SQL. The temp-table
+                CTAS it replaces failed the same way.
+        """
+        # Keep in sync with the CTAS wrapper in `_create_schema_check_temp_table`
+        # (macros/materializations/models/helpers.sql): both check the same SELECT.
+        wrapped_sql = f"SELECT * FROM (\n{sql}\n) WHERE FALSE"
+        schema = self.connections.dry_run_schema(
+            wrapped_sql, execution_mode=execution_mode, compute_pool_id=compute_pool_id
+        )
+        if schema is None or not schema.columns:
+            logger.debug(
+                f"Schema drift check for {relation}: the dry-run reported no result "
+                f"schema; falling back to a temp table."
+            )
+            return None
+
+        counts = Counter(column.name for column in schema.columns)
+        duplicates = sorted(name for name, count in counts.items() if count > 1)
+        if duplicates:
+            logger.debug(
+                f"Schema drift check for {relation}: duplicate output column names "
+                f"{duplicates}; falling back to a temp table."
+            )
+            return None
+
+        expected_columns: dict[str, str] = {}
+        for column in schema.columns:
+            try:
+                expected_columns[column.name] = render_full_data_type(column.type)
+            except UnverifiedTypeError as e:
+                logger.debug(
+                    f"Schema drift check for {relation}: column {column.name!r} has a type "
+                    f"with no verified rendering ({e}); falling back to a temp table."
+                )
+                return None
+        return expected_columns
 
     @staticmethod
     def _partition_drift_catalog(
