@@ -205,11 +205,8 @@ from {{ ref('orders') }}
 where price > 0
 ```
 
-`streaming_table` creates a table, then runs a separate, continuous `INSERT INTO ... SELECT`
-statement to populate it.
-This two-statement approach is currently the preferred way to build streaming pipelines.
-<!-- TODO: sync with Zander on revising the "until materialized tables reach GA" framing here -->
-It supports table options via `config(with={...})`.
+`streaming_table` creates a table, then runs a separate, continuous `INSERT INTO ... SELECT` statement to populate it.
+This two-statement approach was the preferred way to build streaming pipelines befor the introduction of [`materialized_table`](#materialization-materialized_table).
 
 See Confluent's [dynamic tables and continuous queries](https://docs.confluent.io/cloud/current/flink/concepts/dynamic-tables.html)
 concept page for the underlying execution model.
@@ -229,13 +226,14 @@ concept page for the underlying execution model.
 #### `streaming_table`: Schema Drift / Reconciliation Behavior
 
 If the table already exists and `--full-refresh` is not specified, `streaming_table` runs [schema
-drift detection](#schema-drift-detection) (columns, `WITH` options, and `distributed_by`) before
-deciding whether to skip or restart.
+drift detection](#schema-drift-detection).
+
 Separately, on every re-run, the adapter checks the long-running INSERT statement itself.
 If it's missing (e.g. the process crashed between DDL and DML, or the statement was deleted
 externally) or in a terminal phase (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), `dbt run` resubmits
-**only the INSERT** under the same deterministic name. The table and its topic state are preserved,
+**only the INSERT** statement under the same deterministic name. The table and its topic state are preserved,
 and no `--full-refresh` is required.
+
 A `RUNNING` statement, an in-flight transition (`PENDING`, `STOPPING`, `DELETING`), or `DEGRADED` is
 treated as healthy: the adapter does not interrupt it.
 
@@ -248,8 +246,7 @@ CREATE TABLE <relation> [DISTRIBUTED BY (...)] [WITH (...)]     -- DDL, bounded,
 INSERT INTO <relation> <model SELECT>                           -- DML, long-running
 ```
 
-The DDL completes immediately; the INSERT is a genuinely long-running, continuous statement. This is
-the two-statement split that gives `streaming_table` its name.
+The DDL completes immediately; the INSERT is a genuinely long-running, continuous statement.
 See the [`CREATE TABLE`](https://docs.confluent.io/cloud/current/flink/reference/statements/create-table.html)
 and [`INSERT INTO ... FROM SELECT`](https://docs.confluent.io/cloud/current/flink/reference/queries/insert-into-from-select.html)
 references.
@@ -677,7 +674,11 @@ doesn't use this at all; Flink reconciles the table definition natively instead 
 State Impact](#materialized_table-evolution--state-impact)), which is the direction this adapter is
 moving toward. `view` and `ephemeral` have no persistent schema to check.
 
-When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation. The check compares **columns**, **WITH options**, and **`distributed_by`** in a single pass and raises one error listing every violation, so you don't have to fix them one at a time. It also detects when the existing relation is a **materialized table** (a reverse materialization switch) and fails with dedicated guidance instead of a drift list; see [Switching materializations](#materialization-materialized_table). (`materialized_table` models themselves do not use drift detection; Flink reconciles the re-asserted definition instead. See [Materialized Table](#materialization-materialized_table).)
+When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation.
+The check compares **columns**, **WITH options**, and **`distributed_by`** in a single pass and raises one error listing every violation, so you don't have to fix them one at a time.
+To rebuild the model to reflect the local configuration, use `--full-refresh` to recreate the model from scratch.
+
+Drift detection also detects when the existing relation is a **materialized table** (a reverse materialization switch) and fails with dedicated guidance instead of a drift list; see [Switching materializations](#materialization-materialized_table). (`materialized_table` models themselves do not use drift detection; Flink reconciles the re-asserted definition instead. See [Materialized Table](#materialization-materialized_table).)
 
 To determine the expected schema, the adapter creates a short-lived temporary table (named `__dbt_tmp_schema_check_<model>`) and issues a single `UNION ALL` query against `INFORMATION_SCHEMA.COLUMNS`, `TABLES`, and `TABLE_OPTIONS` to fetch every piece of metadata at once. For `table` and `streaming_table`, the temp table is created from the model's SELECT query; for `streaming_source`, from the model's column definitions (without the connector). The temp table is dropped in the adapter's post-model hook, which dbt invokes even when the materialization fails (e.g. when drift is detected), so a run that raises after creating the temp table doesn't leak it. As a backstop for runs that die hard (killed process, lost connectivity) before the hook runs, the temp table name is deterministic per model and the check drops any leftover before creating a new one, so the next drift check reclaims a leak.
 
