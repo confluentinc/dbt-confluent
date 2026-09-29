@@ -80,17 +80,9 @@ _Some standard dbt materializations are not supported by this adapter._
 
 ### Materialization: `materialized_table`
 
-`materialized_table` is declarative.
-Every run submits the same kind of statement, and Flink reconciles the table's actual state to match
-it, rather than dbt-confluent choosing between a drop/recreate and a schema-drift-based skip the way
-`table`/`streaming_table`/`streaming_source` do.
-
-See Confluent's [materialized tables](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html)
-concept page for the underlying feature.
-
-#### `materialized_table`: Example
-
 ```sql
+-- materialized_table_example.sql
+
 {{ config(
     materialized='materialized_table',
     distributed_by={'columns': ['customer_id'], 'buckets': 4},
@@ -104,6 +96,14 @@ select
 from {{ ref('orders') }}
 group by customer_id
 ```
+
+`materialized_table` is declarative.
+Every run submits the same kind of statement, and Flink reconciles the table's actual state to match
+it, rather than dbt-confluent choosing between a drop/recreate and a schema-drift-based skip the way
+`table`/`streaming_table`/`streaming_source` do.
+
+See Confluent's [materialized tables](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html)
+concept page for the underlying feature.
 
 #### `materialized_table`: Config Options
 
@@ -218,18 +218,9 @@ Re-running while Flink is still establishing a freshly created or evolved table 
 
 ### Materialization: `streaming_table`
 
-`streaming_table` creates a table, then runs a separate, continuous `INSERT INTO ... SELECT`
-statement to populate it.
-This two-statement approach is currently the preferred way to build streaming pipelines.
-<!-- TODO: sync with Zander on revising the "until materialized tables reach GA" framing here -->
-It supports table options via `config(with={...})`.
-
-See Confluent's [dynamic tables and continuous queries](https://docs.confluent.io/cloud/current/flink/concepts/dynamic-tables.html)
-concept page for the underlying execution model.
-
-#### `streaming_table`: Example
-
 ```sql
+-- streaming_table_example.sql
+
 {{ config(
     materialized='streaming_table',
     distributed_by={'columns': ['customer_id'], 'buckets': 4},
@@ -240,6 +231,15 @@ select customer_id, order_id, price
 from {{ ref('orders') }}
 where price > 0
 ```
+
+`streaming_table` creates a table, then runs a separate, continuous `INSERT INTO ... SELECT`
+statement to populate it.
+This two-statement approach is currently the preferred way to build streaming pipelines.
+<!-- TODO: sync with Zander on revising the "until materialized tables reach GA" framing here -->
+It supports table options via `config(with={...})`.
+
+See Confluent's [dynamic tables and continuous queries](https://docs.confluent.io/cloud/current/flink/concepts/dynamic-tables.html)
+concept page for the underlying execution model.
 
 #### `streaming_table`: Config Options
 
@@ -320,18 +320,9 @@ Adoption is purely name-based: the adapter does not track which tool created a r
 
 ### Materialization: `streaming_source`
 
-`streaming_source` creates a connector-backed source table.
-It requires `config(connector='...')`; the model SQL defines only the column definitions, with no `SELECT` query.
-
-With this materialization you can, for example, configure a `faker` connector to generate mock data for development
-and testing.
-
-See Confluent's [faker sample-data how-to guide](https://docs.confluent.io/cloud/current/flink/how-to-guides/custom-sample-data.html)
-for the underlying feature.
-
-#### `streaming_source`: Example
-
 ```sql
+-- streaming_source_example.sql
+
 {{ config(
     materialized='streaming_source',
     connector='faker',
@@ -344,6 +335,15 @@ order_ts TIMESTAMP(3)
 ```
 
 Note the model's body is a column-definition list, not a `SELECT` — `streaming_source` has no query to compile.
+
+`streaming_source` creates a connector-backed source table.
+It requires `config(connector='...')`; the model SQL defines only the column definitions, with no `SELECT` query.
+
+With this materialization you can, for example, configure a `faker` connector to generate mock data for development
+and testing.
+
+See Confluent's [faker sample-data how-to guide](https://docs.confluent.io/cloud/current/flink/how-to-guides/custom-sample-data.html)
+for the underlying feature.
 
 #### `streaming_source`: Config Options
 
@@ -388,18 +388,9 @@ connector's ongoing running process, and there's no separate long-running statem
 
 ### Materialization: `table`
 
-`table` creates a table via a one-shot `CREATE TABLE ... AS SELECT` (CTAS).
-It's the closest analog to a traditional batch-warehouse table: the query runs once, produces a
-result, and completes.
-If you're new to dbt-confluent, this is the easiest materialization to start with before moving on
-to `streaming_table` or `materialized_table`.
-
-See Confluent's [snapshot queries](https://docs.confluent.io/cloud/current/flink/concepts/snapshot-queries.html)
-concept page for the underlying execution model.
-
-#### `table`: Example
-
 ```sql
+-- table_example.sql
+
 {{ config(
     materialized='table',
     with={'changelog.mode': 'upsert'},
@@ -409,6 +400,15 @@ select customer_id, count(*) as order_count, sum(price) as lifetime_value
 from {{ ref('orders') }}
 group by customer_id
 ```
+
+`table` creates a table via a one-shot `CREATE TABLE ... AS SELECT` (CTAS).
+It's the closest analog to a traditional batch-warehouse table: the query runs once, produces a
+result, and completes.
+If you're new to dbt-confluent, this is the easiest materialization to start with before moving on
+to `streaming_table` or `materialized_table`.
+
+See Confluent's [snapshot queries](https://docs.confluent.io/cloud/current/flink/concepts/snapshot-queries.html)
+concept page for the underlying execution model.
 
 #### `table`: Config Options
 
@@ -450,6 +450,16 @@ for the full DDL grammar.
 
 ### Materialization: `view`
 
+```sql
+-- view_example.sql
+
+{{ config(materialized='view') }}
+
+select customer_id, order_id, price
+from {{ ref('orders') }}
+where price > 0
+```
+
 A view is a named query definition: Flink inlines its SQL into whatever job(s) actually query it, at
 those jobs' own execution time, rather than running any compute of its own.
 Unlike every other Kafka-backed materialization on this page, `view` doesn't create a topic that stores data.
@@ -458,16 +468,6 @@ holds records. This differs from `ephemeral`, which creates no topic at all.
 
 See Confluent's [`CREATE VIEW` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-view.html)
 for the underlying statement.
-
-#### `view`: Example
-
-```sql
-{{ config(materialized='view') }}
-
-select customer_id, order_id, price
-from {{ ref('orders') }}
-where price > 0
-```
 
 #### `view`: Config Options
 
@@ -504,18 +504,20 @@ references.
 
 ### Materialization: `ephemeral`
 
-`ephemeral` is a standard dbt CTE-based query fragment.  No adapter-specific code exists for it at
-all, so it behaves exactly like dbt-core's built-in `ephemeral` materialization on any other
-adapter.  No Kafka topic is created and no Flink statement is submitted; the model's compiled SQL is
-inlined as a CTE into every downstream model that `ref()`s it.
-
 ```sql
+-- ephemeral_example.sql
+
 {{ config(materialized='ephemeral') }}
 
 select customer_id, order_id, price
 from {{ ref('orders') }}
 where price > 0
 ```
+
+`ephemeral` is a standard dbt CTE-based query fragment.  No adapter-specific code exists for it at
+all, so it behaves exactly like dbt-core's built-in `ephemeral` materialization on any other
+adapter.  No Kafka topic is created and no Flink statement is submitted; the model's compiled SQL is
+inlined as a CTE into every downstream model that `ref()`s it.
 
 Because there's no dbt-confluent
 macro in the loop, none of dbt-confluent's config validation (see [Validation](#validation))
