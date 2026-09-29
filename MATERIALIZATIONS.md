@@ -154,7 +154,6 @@ CREATE OR ALTER MATERIALIZED TABLE <relation> (<cols>, PRIMARY KEY (...) NOT ENF
 
 - The `PRIMARY KEY (...) NOT ENFORCED` clause comes from a model-level `primary_key` constraint, matching Confluent's materialized-table grammar.
 - This is what makes the resulting table usable in **snapshot queries** against its key.
-- As with `table` (see [Validation](#validation)), the contract's declared columns are checked against the model's compiled SQL, and a mismatch fails the run before any DDL is submitted.
 
 Without an enforced contract, the materialization renders a plain `AS SELECT` with no explicit column list.
 
@@ -709,9 +708,10 @@ The override applies to all statements a model submits (DDL, the long-running IN
 Pool changes take effect per materialization: `view` and `materialized_table` submit fresh
 statements on every run and use a changed pool immediately; `table` uses the new pool on its next
 CTAS, which requires `--full-refresh`; running `streaming_table` and `streaming_source` statements
-are not migrated and require a restart or `--full-refresh`.
+are not migrated. A `streaming_table` requires a restart or `--full-refresh`; a `streaming_source`
+requires `--full-refresh` because its connector statement cannot be reattached to the existing table.
 
-Statement recovery and cleanup (see [Statement Lifecycle](#statement-lifecycle)) operate by statement name and are pool-agnostic: a model's statement is found, inspected, and, when dead, resubmitted on the model's configured pool regardless of the profile default.
+For recoverable `streaming_table` models, statement recovery and cleanup (see [Statement Lifecycle](#statement-lifecycle)) operate by statement name and are pool-agnostic: the statement is found, inspected, and, when dead, resubmitted on the model's configured pool regardless of the profile default.
 
 Changing `compute_pool_id` on an existing, healthy running statement does not migrate that statement,
 since the pool is a property of the statement (not the table) and isn't part of drift detection.
