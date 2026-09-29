@@ -12,7 +12,7 @@ from confluent_sql.exceptions import (
 )
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
-from dbt_common.exceptions import CompilationError, DbtDatabaseError
+from dbt_common.exceptions import CompilationError, DbtDatabaseError, DbtRuntimeError
 
 from dbt.adapters.base import BaseRelation, available
 from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_table
@@ -923,20 +923,30 @@ class ConfluentAdapter(SQLAdapter):
     def check_schema_drift(
         self,
         existing_relation: ConfluentRelation,
-        temp_relation: ConfluentRelation,
+        temp_relation: ConfluentRelation | None,
         drift_catalog: "agate.Table",
         expected_with: dict[str, str],
         expected_distribution: dict | None = None,
         enforce: Literal["all", "columns"] = "all",
         expected_connector: str | None = None,
+        expected_columns: dict[str, str] | None = None,
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
         drift_catalog is the agate.Table returned by `get_drift_catalog`: a
         sparse UNION ALL with a `section` discriminator (COLUMNS, TABLES,
-        TABLE_OPTIONS) and a `table_name` discriminator that distinguishes the
-        existing relation from the temp relation in the COLUMNS section.
+        TABLE_OPTIONS) and a `table_name` discriminator for the COLUMNS section.
         Splitting it client-side trades one round-trip for a bit of Python.
+
+        The expected columns come from exactly one of:
+            expected_columns — already resolved by
+                               `get_expected_columns_from_dry_run` (SELECT
+                               models); must be non-empty. drift_catalog then
+                               holds only the existing relation; pass
+                               temp_relation=None.
+            temp_relation    — the temp-table fallback (streaming_source, or a
+                               SELECT the dry-run can't resolve). Its columns
+                               are read from drift_catalog.
 
         Each helper returns a list of one-line violation strings; we collect
         them all and raise a single error so the user sees every drift in one
@@ -957,16 +967,34 @@ class ConfluentAdapter(SQLAdapter):
         other option. None for materializations without a connector.
         """
         assert existing_relation.identifier is not None
-        assert temp_relation.identifier is not None
+        if (temp_relation is None) == (expected_columns is None):
+            raise DbtRuntimeError(
+                "dbt-confluent bug: check_schema_drift needs exactly one of "
+                "temp_relation or expected_columns. Please report it at "
+                "https://github.com/confluentinc/dbt-confluent/issues."
+            )
+        if expected_columns is not None and not expected_columns:
+            raise DbtRuntimeError(
+                "dbt-confluent bug: check_schema_drift got an empty expected_columns; "
+                "the dry-run resolver returns None, not {}, when it can't resolve the "
+                "columns. Please report it at "
+                "https://github.com/confluentinc/dbt-confluent/issues."
+            )
+        temp_identifier: str | None = None
+        if temp_relation is not None:
+            assert temp_relation.identifier is not None
+            temp_identifier = temp_relation.identifier
         (
             existing_columns,
-            expected_columns,
+            catalog_expected_columns,
             existing_options,
             existing_distribution,
             existing_is_materialized,
         ) = self._partition_drift_catalog(
-            drift_catalog, existing_relation.identifier, temp_relation.identifier
+            drift_catalog, existing_relation.identifier, temp_identifier
         )
+        if expected_columns is None:
+            expected_columns = catalog_expected_columns
 
         # A materialized table can't be managed by the drop-and-recreate
         # materializations at all — a skip would silently leave Flink
@@ -984,8 +1012,10 @@ class ConfluentAdapter(SQLAdapter):
                 f"'Switching materializations' in MATERIALIZATIONS.md)."
             )
 
-        # An empty expected_columns means the drift-check temp table came back
-        # with zero columns from INFORMATION_SCHEMA. The temp table was just
+        # Only reachable on the temp-table path (a non-empty expected_columns is
+        # enforced above for the dry-run path): an empty expected_columns means
+        # the drift-check temp table came back with zero columns from
+        # INFORMATION_SCHEMA. The temp table was just
         # created from the model's column definitions / select query, so it has
         # columns; an empty result almost always means Confluent Cloud's
         # INFORMATION_SCHEMA hasn't yet propagated the freshly-created table.
@@ -1039,22 +1069,23 @@ class ConfluentAdapter(SQLAdapter):
     def _partition_drift_catalog(
         drift_catalog,
         existing_identifier: str,
-        temp_identifier: str,
+        temp_identifier: str | None,
     ) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict | None, bool]:
         """Split the unified UNION ALL result into per-concern structures.
 
         Returns:
             existing_columns: {column_name: data_type} for the existing table
-            expected_columns: {column_name: data_type} for the temp table
+            expected_columns: {column_name: data_type} for the temp table;
+                empty when temp_identifier is None (the dry-run path, whose
+                catalog has no temp rows)
             existing_options: {option_key: option_value}
             existing_distribution: {buckets, columns} or None
             existing_is_materialized: True if the existing relation is a
                 Flink materialized table (IS_MATERIALIZED='YES')
         """
-        columns_by_table: dict[str, dict[str, str]] = {
-            existing_identifier: {},
-            temp_identifier: {},
-        }
+        columns_by_table: dict[str, dict[str, str]] = {existing_identifier: {}}
+        if temp_identifier is not None:
+            columns_by_table[temp_identifier] = {}
         existing_options: dict[str, str] = {}
         is_distributed = False
         is_materialized = False
@@ -1094,7 +1125,7 @@ class ConfluentAdapter(SQLAdapter):
             }
         return (
             columns_by_table[existing_identifier],
-            columns_by_table[temp_identifier],
+            columns_by_table[temp_identifier] if temp_identifier is not None else {},
             existing_options,
             existing_distribution,
             is_materialized,
@@ -1107,9 +1138,14 @@ class ConfluentAdapter(SQLAdapter):
     ) -> list[str]:
         """Return one violation string per added/removed/type-changed column.
 
-        Both maps come from INFORMATION_SCHEMA.COLUMNS so types are already
-        in Flink's canonical form — no normalization needed. Sorted output
-        keeps error messages stable across runs.
+        Both maps hold FULL_DATA_TYPE strings, so they compare as plain
+        strings with no normalization here. existing_map always comes from
+        INFORMATION_SCHEMA.COLUMNS. expected_map comes either from the temp
+        table's INFORMATION_SCHEMA.COLUMNS rows (already canonical) or from
+        `get_expected_columns_from_dry_run`, whose renderer
+        (flink_types.render_full_data_type) produces the same spelling and
+        declines any type it can't render exactly. Sorted output keeps error
+        messages stable across runs.
         """
         violations: list[str] = []
         existing_names = set(existing_map)
