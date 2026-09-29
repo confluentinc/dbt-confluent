@@ -35,6 +35,8 @@ Because the streaming materializations can produce continuous results or have on
 
 ## Supported Materializations
 
+The table below summarizes all materializations supported by the dbt-confluent adapater:
+
 | Materialization | Description |
 |---|---|
 | [`materialized_table`](#materialization-materialized_table) | Declarative `CREATE OR ALTER MATERIALIZED TABLE`. The standard materialization for continuous stream processing |
@@ -65,40 +67,89 @@ it, rather than dbt-confluent choosing between a drop/recreate and a schema-drif
 See Confluent's [materialized tables](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html)
 concept page for the underlying feature.
 
+#### `materialized_table`: Example
+
+```sql
+{{ config(
+    materialized='materialized_table',
+    distributed_by={'columns': ['customer_id'], 'buckets': 4},
+    start_mode='RESUME_OR_FROM_BEGINNING',
+) }}
+
+select
+    customer_id,
+    count(*) as order_count,
+    sum(price) as lifetime_value
+from {{ ref('orders') }}
+group by customer_id
+```
+
 #### `materialized_table`: Config Options
 
 | Config | Description |
 |---|---|
 | `distributed_by` | See [Distributed By](#distributed-by). Fixed at creation; changing it requires `--full-refresh`. |
 | `with` | Table options, e.g. `{'key.format': 'avro-registry'}`. |
-| `start_mode` | Where the query starts (or, on an in-place evolution, restarts) reading; see [Evolution / State Impact](#materialized_table-evolution--state-impact) below. Details below. |
+| `start_mode` | Where the query starts (or, on an in-place evolution, restarts) reading; see [`start_mode`](#materialized_table-start_mode) below. |
 | `statement_properties` | See [Statement Properties](#statement-properties). |
 | `tableflow` | See [Tableflow](#tableflow). Checked on every run: create or in-place evolution alike. |
 | `statement_name` | See [Deterministic Statement Names](#deterministic-statement-names). Details below. |
 | `compute_pool_id` | See [Compute Pool](#compute-pool). |
 
-All eight documented `start_mode` forms are accepted (default: `RESUME_OR_FROM_BEGINNING`): `FROM_BEGINNING`, `FROM_NOW`, `RESUME_OR_FROM_BEGINNING`, `RESUME_OR_FROM_NOW`, `FROM_TIMESTAMP('<timestamp>')`, `RESUME_OR_FROM_TIMESTAMP('<timestamp>')`, `FROM_NOW(INTERVAL '<n>' <unit>)`, `RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>)`. The adapter validates the keyword and its arity but passes the parenthesized argument through verbatim (after rejecting anything that could break out of the DDL: stray quotes, parens, operators); the server validates the argument itself. Note that `FROM_NOW`/`RESUME_OR_FROM_NOW` require a full interval literal, such as `FROM_NOW(INTERVAL '7' DAY)`, not a plain quoted string, despite what some Confluent docs examples currently show.
-
 Each run already uses a unique per-run statement name regardless of `statement_name` (see [Statements Emitted](#materialized_table-statements-emitted) below); a configured `statement_name` becomes the base that per-run suffix is derived from.
 
 `freshness_interval`, `refresh_mode`, and `partition_by` exist in open-source Flink but not in Confluent's dialect; they raise a compile error. Any other dbt-confluent config key this materialization doesn't read (e.g. `connector`, `on_schema_drift`) is also rejected; see [Validation](#validation).
 
-**Contracts and primary keys**:
+#### `materialized_table`: `start_mode`
 
-With `config(contract={'enforced': true})` and an explicit `columns:`/`constraints:` block in the model's schema.yml, `materialized_table` renders an explicit column-definition list, including a `PRIMARY KEY (...) NOT ENFORCED` clause from a model-level `primary_key` constraint, ahead of `DISTRIBUTED BY`/`WITH`/`START_MODE` in the submitted `CREATE OR ALTER MATERIALIZED TABLE (cols..., PRIMARY KEY(...) NOT ENFORCED) ... AS SELECT ...`, matching Confluent's materialized-table grammar. This is what makes the resulting table usable in **snapshot queries** against its key. As with `table` (see [Validation](#validation)), the contract's declared columns are checked against the model's compiled SQL and a mismatch fails the run before any DDL is submitted. Without an enforced contract, the materialization renders a plain `AS SELECT` with no explicit column list.
+Controls where the query starts (or, on an in-place evolution, restarts) reading. Default: `RESUME_OR_FROM_BEGINNING`. Accepted values are::
+
+| Value | Starts from |
+|---|---|
+| `FROM_BEGINNING` | Beginning of the topic |
+| `FROM_NOW` | Current offset |
+| `FROM_TIMESTAMP('<timestamp>')` | The given timestamp |
+| `FROM_NOW(INTERVAL '<n>' <unit>)` | `<n> <unit>` before now |
+| `RESUME_OR_FROM_BEGINNING` | Saved offsets, if present; else the beginning of the topic |
+| `RESUME_OR_FROM_NOW` | Saved offsets, if present; else the current offset |
+| `RESUME_OR_FROM_TIMESTAMP('<timestamp>')` | Saved offsets, if present; else the given timestamp |
+| `RESUME_OR_FROM_NOW(INTERVAL '<n>' <unit>)` | Saved offsets, if present; else `<n> <unit>` before now |
+
+`start_mode` also governs what happens to a *stateful* query's results when the table [evolves](#materialized_table-evolution--state-impact) in place.
+
+#### `materialized_table`: Contracts and Primary Keys
+
+With `config(contract={'enforced': true})` and an explicit `columns:`/`constraints:` block in the model's schema.yml, `materialized_table` renders an explicit column-definition list ahead of `DISTRIBUTED BY`/`WITH`/`START_MODE`:
+
+```sql
+CREATE OR ALTER MATERIALIZED TABLE <relation> (<cols>, PRIMARY KEY (...) NOT ENFORCED)
+  ... AS SELECT ...
+```
+
+- The `PRIMARY KEY (...) NOT ENFORCED` clause comes from a model-level `primary_key` constraint, matching Confluent's materialized-table grammar.
+- This is what makes the resulting table usable in **snapshot queries** against its key.
+- As with `table` (see [Validation](#validation)), the contract's declared columns are checked against the model's compiled SQL, and a mismatch fails the run before any DDL is submitted.
+
+Without an enforced contract, the materialization renders a plain `AS SELECT` with no explicit column list.
 
 #### `materialized_table`: Evolution / State Impact
 
 `materialized_table` behaves differently depending on what changes between runs:
 
-- **New table** — created.
-- **Existing table** (changed or not) — evolved **in place**: the table and its topic are kept, but the running query is stopped and replaced.
-  - The Flink job clears its internal state, resetting any aggregations, window, or join state. It then begins (re-)processing data according to the configured [start mode](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html#controlling-reprocessing-with-start-mode).
-    - Under a `RESUME_*` start mode (the default, RESUME_OR_FROM_BEGINNING, is one of these), stateless queries (projections, filters) evolve seamlessly: no reprocessing, no duplicates.
-    - For *stateful* queries, evolution recalculates results from a clean slate rather than adjusting the old ones. Depending on start mode, that recalculation may not cover the same source data as before, so joins, aggregations, and other stateful results can shift (e.g. an aggregation resuming from an offset instead of replaying history will look "undercounted"). See [Confluent's materialized tables concepts page](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html) for evolution semantics and caveats.
-- **`--full-refresh`** — `DROP MATERIALIZED TABLE IF EXISTS` then recreate.
-  - Required to change `distributed_by` (fixed at creation), to apply changes an evolution rejects, and to rebuild correct results for a stateful model whose `start_mode` resumes from offsets.
-  - **Warning:** dropping a materialized table (including via `--full-refresh`) permanently deletes the backing Kafka topic and all of its data.
+| Scenario | What happens |
+|---|---|
+| New table | Created. |
+| Existing table (changed or not) | Evolved **in place**: the table and its topic are kept, but the running query is stopped and replaced. |
+| `--full-refresh` | `DROP MATERIALIZED TABLE IF EXISTS`, then recreate. |
+
+**In-place evolution**, in more detail: the Flink job clears its internal state, resetting any aggregations, window, or join state. It then begins (re-)processing data according to the configured [`start_mode`](#materialized_table-start_mode):
+
+- Under a `RESUME_*` start mode (the default, `RESUME_OR_FROM_BEGINNING`, is one of these), stateless queries (projections, filters) evolve seamlessly: no reprocessing, no duplicates.
+- For *stateful* queries, evolution recalculates results from a clean slate rather than adjusting the old ones. Depending on `start_mode`, that recalculation may not cover the same source data as before, so joins, aggregations, and other stateful results can shift (e.g. an aggregation resuming from an offset instead of replaying history will look "undercounted"). See [Confluent's materialized tables concepts page](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html#controlling-reprocessing-with-start-mode) for evolution semantics and caveats.
+
+**`--full-refresh`** is required to change `distributed_by` (fixed at creation), to apply changes an evolution rejects, and to rebuild correct results for a stateful model whose `start_mode` resumes from offsets.
+
+**Warning:** dropping a materialized table (including via `--full-refresh`) permanently deletes the backing Kafka topic and all of its data.
 
 **Known limitation: every run evolves, even when nothing changed.** Confluent's own
 [`CREATE OR ALTER MATERIALIZED TABLE` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-or-alter-materialized-table.html)
@@ -154,6 +205,20 @@ It supports table options via `config(with={...})`.
 
 See Confluent's [dynamic tables and continuous queries](https://docs.confluent.io/cloud/current/flink/concepts/dynamic-tables.html)
 concept page for the underlying execution model.
+
+#### `streaming_table`: Example
+
+```sql
+{{ config(
+    materialized='streaming_table',
+    distributed_by={'columns': ['customer_id'], 'buckets': 4},
+    with={'changelog.mode': 'append'},
+) }}
+
+select customer_id, order_id, price
+from {{ ref('orders') }}
+where price > 0
+```
 
 #### `streaming_table`: Config Options
 
@@ -243,6 +308,22 @@ and testing.
 See Confluent's [faker sample-data how-to guide](https://docs.confluent.io/cloud/current/flink/how-to-guides/custom-sample-data.html)
 for the underlying feature.
 
+#### `streaming_source`: Example
+
+```sql
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={'faker.rows.per.second': 1},
+) }}
+
+customer_id STRING,
+order_total DOUBLE,
+order_ts TIMESTAMP(3)
+```
+
+Note the model's body is a column-definition list, not a `SELECT` — `streaming_source` has no query to compile.
+
 #### `streaming_source`: Config Options
 
 | Config | Description |
@@ -295,6 +376,19 @@ to `streaming_table` or `materialized_table`.
 See Confluent's [snapshot queries](https://docs.confluent.io/cloud/current/flink/concepts/snapshot-queries.html)
 concept page for the underlying execution model.
 
+#### `table`: Example
+
+```sql
+{{ config(
+    materialized='table',
+    with={'changelog.mode': 'upsert'},
+) }}
+
+select customer_id, count(*) as order_count, sum(price) as lifetime_value
+from {{ ref('orders') }}
+group by customer_id
+```
+
 #### `table`: Config Options
 
 | Config | Description |
@@ -344,6 +438,16 @@ holds records. This differs from `ephemeral`, which creates no topic at all.
 See Confluent's [`CREATE VIEW` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-view.html)
 for the underlying statement.
 
+#### `view`: Example
+
+```sql
+{{ config(materialized='view') }}
+
+select customer_id, order_id, price
+from {{ ref('orders') }}
+where price > 0
+```
+
 #### `view`: Config Options
 
 Only three dbt-confluent config keys apply to `view`:
@@ -382,7 +486,17 @@ references.
 `ephemeral` is a standard dbt CTE-based query fragment.  No adapter-specific code exists for it at
 all, so it behaves exactly like dbt-core's built-in `ephemeral` materialization on any other
 adapter.  No Kafka topic is created and no Flink statement is submitted; the model's compiled SQL is
-inlined as a CTE into every downstream model that `ref()`s it.  Because there's no dbt-confluent
+inlined as a CTE into every downstream model that `ref()`s it.
+
+```sql
+{{ config(materialized='ephemeral') }}
+
+select customer_id, order_id, price
+from {{ ref('orders') }}
+where price > 0
+```
+
+Because there's no dbt-confluent
 macro in the loop, none of dbt-confluent's config validation (see [Validation](#validation))
 applies: setting `with`, `distributed_by`, `connector`, or any other dbt-confluent config key on an
 `ephemeral` model is silently ignored rather than rejected.  If multiple downstream models `ref()`
