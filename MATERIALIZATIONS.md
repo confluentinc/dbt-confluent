@@ -1,5 +1,26 @@
 # Materializations
 
+## Table of Contents
+
+- [Introduction](#introduction)
+- [Supported Materializations](#supported-materializations)
+- [Unsupported Materializations](#unsupported-materializations)
+- [Materializations Reference](#materializations-reference)
+  - [`materialized_table`](#materialization-materialized_table)
+  - [`streaming_table`](#materialization-streaming_table)
+  - [`streaming_source`](#materialization-streaming_source)
+  - [`table`](#materialization-table)
+  - [`view`](#materialization-view)
+  - [`ephemeral`](#materialization-ephemeral)
+- [Model Configuration](#model-configuration)
+  - [Validation](#validation)
+  - [Common Config Options](#common-config-options)
+- [Common Mechanics](#common-mechanics)
+  - [Schema Drift Detection](#schema-drift-detection)
+  - [Deterministic Statement Names](#deterministic-statement-names)
+
+## Introduction
+
 The materializations in dbt-confluent cover both batch and streaming use cases.
 
 Some materializations behave like their counterparts from dbt adapters for traditional data warehouses, e.g.:
@@ -35,7 +56,7 @@ Because the streaming materializations can produce continuous results or have on
 
 ## Supported Materializations
 
-The table below summarizes all materializations supported by the dbt-confluent adapater:
+_The table below summarizes all materializations supported by the dbt-confluent adapater._
 
 | Materialization | Description |
 |---|---|
@@ -48,7 +69,7 @@ The table below summarizes all materializations supported by the dbt-confluent a
 
 ## Unsupported Materializations
 
-Some standard dbt materializations are not supported by this adapter:
+_Some standard dbt materializations are not supported by this adapter._
 
 | Materialization | Reason |
 |---|---|
@@ -507,6 +528,9 @@ independently. Flink scans the source once per consumer, not once shared across 
 
 ## Model Configuration
 
+This sections containts documentation for configurations options that apply to multiple materialization.
+Each per-materialization section links back to the specific subsections below that it supports.
+
 ### Validation
 
 Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing. For example, `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
@@ -526,10 +550,6 @@ If a key name genuinely collides with one of dbt-confluent's own (an unlikely bu
 `ignore_unsupported_config` takes a list of specific key names, not a blanket on/off switch. Opting out of one false positive doesn't also suppress a real mistake on a different key in the same model.
 
 ### Common Config Options
-
-Documentation that pertains to configurations options that apply to more than one materialization lives here.
-Each per-materialization section links back to the specific subsections below that it supports.
-
 #### Distributed By
 
 Confluent Flink lets you control how a table's rows are distributed across Kafka partitions with a `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause in the `CREATE TABLE` DDL.
