@@ -107,7 +107,13 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
         conn = project.adapter.connections.get_thread_connection()
         cursor = conn.handle.cursor(mode=ExecutionMode.SNAPSHOT)
         try:
-            cursor.execute(sql)
+            # Unlike the adapter's normal execute path (connections.py), a
+            # raw cursor.execute doesn't attach the test profile's
+            # statement_label on its own -- without it, delete_statements_by_label
+            # and the stale-statement sweep can't find these polling
+            # statements at teardown, and they'd leak until Confluent purges
+            # them (~30 days).
+            cursor.execute(sql, statement_labels=[conn.credentials.statement_label])
             if fetch == "one":
                 return fetch_from_cursor(cursor, limit=1)
             elif fetch == "all":

@@ -11,13 +11,7 @@ Notes:
 - ConfluentFixtures forces models +full_refresh=True, which would make every run a
   recreate. Classes that exercise the in-place evolution / no-op paths override
   project_config_update to drop that flag.
-- Each class uses unique relation names, suffixed with a per-session tag: the
-  schema (Kafka cluster) is shared, a dropped relation's Kafka topic outlives
-  the catalog drop asynchronously (minutes to a day-plus), and its Schema
-  Registry subjects are not deleted at all. Reusing a name across runs races
-  that teardown: a recreate can bind to the lingering topic's old schema
-  ("Column types of query result and sink ... do not match"), and an
-  in-flight deletion can make an existence check pass and then evaporate.
+- Each class uses unique relation names, suffixed with a per-session tag.
 - Because names are never reused, leftovers from failed teardowns or
   hard-killed runs would accumulate forever. Every name therefore lives in a
   reserved namespace (`dbttest_` prefix + fixed stem + hex epoch-seconds tag)
@@ -414,22 +408,20 @@ class TestMaterializedTableContractColumnReorder(_MTFixtures):
 # A bounded literal query (no FROM/source at all) runs to completion and
 # stops -- so if an unchanged resubmit truly leaves the completed job alone,
 # no further rows can ever land. If the resubmit instead re-executes the
-# query, it appends a full duplicate of both rows, in the same order it
-# emitted them the first time, because distributed_by buckets=1 forces both
-# rows onto a single partition (a Kafka partition preserves write order).
+# query, more copies of its rows get appended -- but UNION ALL doesn't
+# guarantee which branch a restarted query reaches first (or that it reaches
+# both at all before stalling), even bucketed onto one Kafka partition: that
+# only orders whatever actually gets written, not which row a reprocessing
+# run produces first. So the signal to watch for is any extra row on top of
+# the known-good baseline count, not a duplicate of one specific id.
 #
-# changelog.mode=append is set explicitly: distributed_by only controls the
-# Kafka partition key, but a keyed sink defaults to upsert semantics, which
-# would collapse a reprocessed, identically-keyed row into an update on the
-# existing one instead of a second, visible row -- masking the exact
-# reprocessing this test looks for. `with` accepts arbitrary WITH options, so
-# append can be forced independently of the key.
-#
-# marker is along for the ride, unused otherwise: distributing on id alone
-# makes it the MT's key, and a table with only that one (key) column and
-# nothing else gets rejected outright ("must at least contain one physical
-# column that is not used as a key").
+# changelog.mode=append is set explicitly so a duplicate is never collapsed
+# via upsert/changelog semantics into an update on the existing row instead
+# of a second, visible one -- which would mask the exact reprocessing this
+# test looks for.
+FIRST_ROW_ID = 1
 LAST_ROW_ID = 2
+INITIAL_ROW_COUNT = 2
 
 # A third id, added via a genuinely changed definition later in the test, to
 # prove the no-op check actually has teeth: it's not enough for it to pass on
@@ -440,12 +432,11 @@ THIRD_ROW_ID = 3
 MT_UNCHANGED_RERUN_STATE = f"""
 {{{{ config(
     materialized='materialized_table',
-    distributed_by={{'columns': ['id'], 'buckets': 1}},
     with={{'changelog.mode': 'append'}},
 ) }}}}
-select 1 as id, 'a' as marker
+select {FIRST_ROW_ID} as id
 union all
-select {LAST_ROW_ID} as id, 'b' as marker
+select {LAST_ROW_ID} as id
 """
 
 
@@ -455,8 +446,8 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
     table, its data, and its query state are left untouched -- the query
     itself must not be silently restarted. A bounded literal (sourceless)
     query makes that observable: it completes and produces its rows exactly
-    once, so any further identical rows landing after an unchanged resubmit
-    can only mean the resubmit re-ran the query from scratch."""
+    once, so any further rows landing after an unchanged resubmit can only
+    mean the resubmit re-ran the query from scratch."""
 
     NAME = "matnoop"
     # No streaming source -- the MT's own literal AS SELECT is bounded and
@@ -486,23 +477,15 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
             # reprocessing happened yet" rather than a settled final count.
             return snapshot_query(project, f"select count(*) from {rel}", fetch="one")[0][0]
 
-        def last_row_id_count():
-            return snapshot_query(
-                project, f"select count(*) from {rel} where id = {LAST_ROW_ID}", fetch="one"
-            )[0][0]
-
-        def wait_for_last_row_id_duplicate(timeout=30):
-            # Poll for a duplicate LAST_ROW_ID row, exiting as soon as one
-            # shows up rather than always waiting out the full timeout.
-            # Because both rows are bucketed onto a single partition, write
-            # order within it matches the SELECT's UNION ALL order -- a
-            # duplicate LAST_ROW_ID row therefore proves id=1's duplicate
-            # already landed too, without checking it directly.
-            count = 1
+        def wait_for_min_row_count_or_timeout(threshold, timeout=30):
+            # Poll for the total row count exceeding `threshold`, exiting as
+            # soon as it does rather than always waiting out the full
+            # timeout.
+            count = threshold
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                count = last_row_id_count()
-                if count > 1:
+                count = row_count()
+                if count > threshold:
                     break
                 time.sleep(2)
             return count
@@ -510,38 +493,51 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
         # Wait for both literal rows to land before re-running -- otherwise a
         # slow-to-land first run could be mistaken for reprocessing later.
         deadline = time.monotonic() + 30
-        while row_count() < 2 and time.monotonic() < deadline:
+        while row_count() < INITIAL_ROW_COUNT and time.monotonic() < deadline:
             time.sleep(2)
-        assert row_count() == 2, "the initial literal rows did not land before the re-run"
+        assert row_count() == INITIAL_ROW_COUNT, (
+            "the initial literal rows did not land before the re-run"
+        )
 
         # Re-issue the exact same, unmodified definition: must be a true no-op.
         results = run_dbt(["run", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
-        assert wait_for_last_row_id_duplicate() == 1, (
-            f"Expected exactly one row with id={LAST_ROW_ID} after an unchanged "
-            "resubmit, but found more -- the unchanged CREATE OR ALTER re-executed "
-            "the bounded query instead of leaving the already-completed job alone."
+        assert wait_for_min_row_count_or_timeout(INITIAL_ROW_COUNT) == INITIAL_ROW_COUNT, (
+            f"Expected exactly {INITIAL_ROW_COUNT} rows after an unchanged resubmit, but "
+            "found more -- the unchanged CREATE OR ALTER re-executed the bounded query "
+            "instead of leaving the already-completed job alone."
         )
 
         # Prove the no-op check above actually has teeth: swap in a genuinely
-        # different definition (still containing id=LAST_ROW_ID, plus a new
-        # THIRD_ROW_ID row) and confirm the query DOES re-execute this time.
-        # Without this, a check that's merely incapable of ever detecting
-        # reprocessing -- rather than one that correctly found none -- would
-        # pass the assertion above just as easily.
+        # different definition (still containing the original two rows, plus
+        # a new THIRD_ROW_ID row) and confirm the query DOES re-execute this
+        # time. Without this, a check that's merely incapable of ever
+        # detecting reprocessing -- rather than one that correctly found none
+        # -- would pass the assertion above just as easily.
         set_model_file(
             project,
             relation(project, self.MT),
-            MT_UNCHANGED_RERUN_STATE
-            + f"\nunion all\nselect {THIRD_ROW_ID} as id, 'c' as marker\n",
+            MT_UNCHANGED_RERUN_STATE + f"\nunion all\nselect {THIRD_ROW_ID} as id\n",
         )
         results = run_dbt(["run", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
-        assert wait_for_last_row_id_duplicate() > 1, (
-            f"A genuinely changed definition (still containing id={LAST_ROW_ID}, plus "
-            f"a new id={THIRD_ROW_ID} row) did not produce a duplicate id={LAST_ROW_ID} "
-            "row -- either the evolution didn't take effect, or the no-op check above "
-            "can never catch real reprocessing, making it a false assurance."
+
+        # The evolution must both reprocess the original two rows from
+        # scratch (more copies of them land) and apply the change itself
+        # (THIRD_ROW_ID appears) -- checked independently of each other.
+        final_count = wait_for_min_row_count_or_timeout(INITIAL_ROW_COUNT)
+        assert final_count > INITIAL_ROW_COUNT, (
+            f"A genuinely changed definition (still containing the original "
+            f"{INITIAL_ROW_COUNT} rows, plus a new id={THIRD_ROW_ID} row) did not produce "
+            "any extra rows -- either the evolution didn't take effect, or the no-op "
+            "check above can never catch real reprocessing, making it a false assurance."
+        )
+        third_row_count = snapshot_query(
+            project, f"select count(*) from {rel} where id = {THIRD_ROW_ID}", fetch="one"
+        )[0][0]
+        assert third_row_count >= 1, (
+            f"Expected the new id={THIRD_ROW_ID} row to appear after the changed "
+            "definition was applied, but found none."
         )
 
 
