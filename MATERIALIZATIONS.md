@@ -593,6 +593,12 @@ A variant distinguished by the `kind` key (see the [storage configuration guide]
     'container_name': '...',
     'provider_integration_id': '...' }
   ```
+- Bring-your-own Google Cloud Storage bucket:
+  ```python
+  { 'kind': 'GoogleCloudStorage',
+    'bucket_name': '...',
+    'provider_integration_id': '...' }
+  ```
 
     </td>
 </tr>

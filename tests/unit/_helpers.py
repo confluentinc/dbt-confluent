@@ -24,6 +24,7 @@ def make_topic(
     phase="RUNNING",
     error_message=None,
     failing_table_formats=None,
+    storage=None,
 ) -> TableflowTopic:
     """A real `TableflowTopic`, parsed from realistic response JSON -- a bare `MagicMock`
     won't do anywhere `spec.config`/`spec.table_formats`/`spec.raw` need to be genuinely
@@ -39,7 +40,9 @@ def make_topic(
         {
             "spec": {
                 "display_name": "my_table",
-                "storage": {"kind": "Managed", "table_path": "s3://bucket/my_table"},
+                "storage": storage.to_spec()
+                if storage is not None
+                else {"kind": "Managed", "table_path": "s3://bucket/my_table"},
                 "table_formats": list(table_formats),
                 "environment": {"id": "env-1"},
                 "kafka_cluster": {"id": "lkc-1"},
