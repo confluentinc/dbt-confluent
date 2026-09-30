@@ -4,9 +4,15 @@ Underscore-prefixed so pytest does not treat it as a test module.
 """
 
 import time
+import uuid
 from datetime import datetime, timezone
+from typing import Literal
 
+import agate
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
+from confluent_sql.execution_mode import ExecutionMode
+
+from dbt.adapters.confluent.utils import fetch_from_cursor
 
 # Leftovers younger than this may belong to a session still running on the
 # shared cluster (a full suite run takes minutes; two hours is a generous
@@ -86,6 +92,54 @@ def wait_for_running(adapter, name, timeout=60):
 def relation(project, name):
     """Build a Relation for a model that lives in the test project's schema."""
     return project.adapter.Relation.create(identifier=name)
+
+
+def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Table:
+    """Run `sql` in Confluent's SNAPSHOT execution mode and return its result.
+
+    project.run_sql defaults to STREAMING_QUERY (see
+    ConfluentAdapter.run_sql_for_tests), which can hand back a preliminary
+    changelog result before the underlying query has actually finished
+    processing -- a real risk for assertions on an exact row count or exact
+    row set, which would then see a false negative. SNAPSHOT mode instead
+    runs the query to completion and returns its final, bounded result.
+    """
+    with project.adapter.connection_named("snapshot_query"):
+        conn = project.adapter.connections.get_thread_connection()
+        # closing_cursor auto-closes on exit (mode kept explicit even though
+        # SNAPSHOT is its default) -- unlike a bare cursor.execute, it doesn't
+        # attach the test profile's statement_label or statement_name_prefix
+        # on its own:
+        # - Without the label, delete_statements_by_label can't find these
+        #   polling statements at normal teardown.
+        # - Without the prefix, the driver defaults to its own
+        #   "dbapi-{uuid}" name (see confluent_sql.connection), which
+        #   sweep_stale_test_statements' name-prefix filter doesn't match --
+        #   so a crashed run (no normal teardown) would leave these unswept
+        #   until Confluent's ~30-day purge.
+        with conn.handle.closing_cursor(mode=ExecutionMode.SNAPSHOT) as cursor:
+            cursor.execute(
+                sql,
+                statement_name=f"{conn.credentials.statement_name_prefix}{uuid.uuid4()}",
+                statement_labels=[conn.credentials.statement_label],
+            )
+            if fetch == "one":
+                return fetch_from_cursor(cursor, limit=1)
+            elif fetch == "all":
+                return fetch_from_cursor(cursor)
+            raise ValueError(f"fetch must be 'one' or 'all', got: {fetch!r}")
+
+
+def wait_for_snapshot_rows(
+    project, sql: str, min_rows: int = 1, timeout: int = 30, interval: int = 2
+) -> agate.Table:
+    """Poll `sql` via snapshot_query until it returns at least `min_rows` rows."""
+    deadline = time.monotonic() + timeout
+    rows = snapshot_query(project, sql, fetch="all")
+    while len(rows) < min_rows and time.monotonic() < deadline:
+        time.sleep(interval)
+        rows = snapshot_query(project, sql, fetch="all")
+    return rows
 
 
 def get_result_by_name(results, name):
