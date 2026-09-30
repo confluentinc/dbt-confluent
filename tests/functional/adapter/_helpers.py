@@ -4,6 +4,7 @@ Underscore-prefixed so pytest does not treat it as a test module.
 """
 
 import time
+import uuid
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -109,11 +110,19 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
         try:
             # Unlike the adapter's normal execute path (connections.py), a
             # raw cursor.execute doesn't attach the test profile's
-            # statement_label on its own -- without it, delete_statements_by_label
-            # and the stale-statement sweep can't find these polling
-            # statements at teardown, and they'd leak until Confluent purges
-            # them (~30 days).
-            cursor.execute(sql, statement_labels=[conn.credentials.statement_label])
+            # statement_label or statement_name_prefix on its own:
+            # - Without the label, delete_statements_by_label can't find
+            #   these polling statements at normal teardown.
+            # - Without the prefix, the driver defaults to its own
+            #   "dbapi-{uuid}" name (see confluent_sql.connection), which
+            #   sweep_stale_test_statements' name-prefix filter doesn't
+            #   match -- so a crashed run (no normal teardown) would leave
+            #   these unswept until Confluent's ~30-day purge.
+            cursor.execute(
+                sql,
+                statement_name=f"{conn.credentials.statement_name_prefix}{uuid.uuid4()}",
+                statement_labels=[conn.credentials.statement_label],
+            )
             if fetch == "one":
                 return fetch_from_cursor(cursor, limit=1)
             elif fetch == "all":
