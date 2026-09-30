@@ -477,7 +477,7 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
             # reprocessing happened yet" rather than a settled final count.
             return snapshot_query(project, f"select count(*) from {rel}", fetch="one")[0][0]
 
-        def wait_for_min_row_count_or_timeout(threshold, timeout=30):
+        def wait_to_exceed_row_count_or_timeout(threshold, timeout=30):
             # Poll for the total row count exceeding `threshold`, exiting as
             # soon as it does rather than always waiting out the full
             # timeout.
@@ -502,7 +502,7 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
         # Re-issue the exact same, unmodified definition: must be a true no-op.
         results = run_dbt(["run", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
-        assert wait_for_min_row_count_or_timeout(INITIAL_ROW_COUNT) == INITIAL_ROW_COUNT, (
+        assert wait_to_exceed_row_count_or_timeout(INITIAL_ROW_COUNT) == INITIAL_ROW_COUNT, (
             f"Expected exactly {INITIAL_ROW_COUNT} rows after an unchanged resubmit, but "
             "found more -- the unchanged CREATE OR ALTER re-executed the bounded query "
             "instead of leaving the already-completed job alone."
@@ -522,22 +522,34 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
         results = run_dbt(["run", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
 
-        # The evolution must both reprocess the original two rows from
-        # scratch (more copies of them land) and apply the change itself
-        # (THIRD_ROW_ID appears) -- checked independently of each other.
-        final_count = wait_for_min_row_count_or_timeout(INITIAL_ROW_COUNT)
-        assert final_count > INITIAL_ROW_COUNT, (
-            f"A genuinely changed definition (still containing the original "
-            f"{INITIAL_ROW_COUNT} rows, plus a new id={THIRD_ROW_ID} row) did not produce "
-            "any extra rows -- either the evolution didn't take effect, or the no-op "
-            "check above can never catch real reprocessing, making it a false assurance."
+        # Give the evolution time to land before checking exact counts below.
+        wait_to_exceed_row_count_or_timeout(INITIAL_ROW_COUNT * 2)
+
+        # One grouped query for all three counts, not three separate ones.
+        counts = {
+            row[0]: row[1]
+            for row in snapshot_query(
+                project, f"select id, count(*) as cnt from {rel} group by id", fetch="all"
+            )
+        }
+
+        # Exact per-id counts, not just an overall total: this evolution must
+        # have reprocessed the original two rows exactly once each (one
+        # original copy plus one from this evolution) and produced exactly
+        # one THIRD_ROW_ID row.
+        assert counts.get(FIRST_ROW_ID) == 2, (
+            f"Expected exactly 2 rows with id={FIRST_ROW_ID} (one original, one from this "
+            f"evolution) -- more means the earlier unchanged resubmit silently reprocessed "
+            f"too, just later than its own check waited for. Got: {counts}"
         )
-        third_row_count = len(
-            wait_for_snapshot_rows(project, f"select id from {rel} where id = {THIRD_ROW_ID}")
+        assert counts.get(LAST_ROW_ID) == 2, (
+            f"Expected exactly 2 rows with id={LAST_ROW_ID}, for the same reason as "
+            f"id={FIRST_ROW_ID} above. Got: {counts}"
         )
-        assert third_row_count >= 1, (
-            f"Expected the new id={THIRD_ROW_ID} row to appear after the changed "
-            "definition was applied, but found none."
+        assert counts.get(THIRD_ROW_ID) == 1, (
+            f"Expected exactly 1 row with id={THIRD_ROW_ID} -- zero means the changed "
+            f"definition never took effect; more means its evolution re-ran more than "
+            f"once. Got: {counts}"
         )
 
 
