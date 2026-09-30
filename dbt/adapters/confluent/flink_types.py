@@ -7,23 +7,24 @@ those as structured `ColumnTypeDefinition`s, which spell some types differently 
 FULL_DATA_TYPE leaves out. `render_full_data_type` bridges the two.
 
 The renderer is an allow-list of what the GH-118 probes (issue #118) observed, down to
-parameters and nesting:
+parameters and nesting. Unless noted, each shape was seen in a table created with
+`CREATE TABLE ... AS SELECT` from the same query, the path the drift check replaces (runs
+995e2382, 0484bde2, 6b109689 and 11017c00):
 
-- CTAS evidence (run 995e2382): a table created with `CREATE TABLE ... AS SELECT` from the same
-  query reported the rendered string. This is the path the drift check replaces. Observed:
-  INT, BIGINT, BOOLEAN, DOUBLE, DATE, VARCHAR(n), top-level CHAR(n), DECIMAL(p, s),
-  TIMESTAMP(3), TIMESTAMP(6), TIMESTAMP(3) WITH LOCAL TIME ZONE, ARRAY<INT NOT NULL>, and a
-  ROW of nullable fields.
-- Declared evidence (run 09dcd5b0): a `CAST(NULL AS <type>)` dry-run reported the input shape,
-  and a table declared with that type reported the rendered string. No CTAS was observed, and
-  a CTAS can coerce types on the way into the table (it stored a CHAR(1) MAP key as
-  VARCHAR(2147483647)). Observed: FLOAT, TIME(0), VARBINARY(2147483647), CHAR(5), ARRAY<INT>,
-  ARRAY<VARCHAR(2147483647) NOT NULL>, and MAP<VARCHAR(2147483647) NOT NULL, INT>.
+- INT, BIGINT, TINYINT, SMALLINT, BOOLEAN, DOUBLE, DATE, and FLOAT (declared table only).
+- CHAR(n), VARCHAR(n), BINARY(n) and VARBINARY(n) with n >= 1, top-level and nested: the table
+  keeps the length. CHAR(0), the type of the literal '', can't be stored.
+- DECIMAL(p, s); TIME(p) for p in 0-3 (Flink caps TIME at 3); TIMESTAMP(p) and
+  TIMESTAMP(p) WITH LOCAL TIME ZONE for p in 0-6 (Avro can't store 7-9).
+- ARRAY and MULTISET, with the element's NOT NULL kept.
+- MAP. A CHAR or VARCHAR key is always stored as VARCHAR(2147483647) NOT NULL, whatever its
+  length or nullability. Any other key keeps its type and its own nullability (INT, BIGINT,
+  DATE, DECIMAL and VARBINARY keys observed).
+- ROW with named fields, at any depth.
 
-Anything else raises `UnverifiedTypeError`: other type names (TINYINT, SMALLINT, BINARY,
-MULTISET, INTERVAL, VARIANT, ...), other parameters (TIME(3), TIMESTAMP(9), VARBINARY(16), a
-missing length or precision), CHAR/BINARY/VARBINARY(n) inside a composite type, MAP keys other
-than VARCHAR(2147483647), and ROWs with no fields, backticks in field names, or field
+Anything else raises `UnverifiedTypeError`: other type names (INTERVAL and VARIANT, which a
+table can't store, and anything unknown), other parameters (TIMESTAMP(9), CHAR(0), a missing
+length or precision), and ROWs with no fields, backticks in field names, or field
 descriptions. The caller then falls back to the temp-table drift check rather than risk
 reporting false drift. To widen the allow-list, verify the shape against a real CTAS table
 first.
@@ -35,13 +36,19 @@ from confluent_sql.types import ColumnTypeDefinition
 _MAX_LENGTH = 2147483647
 
 # Spelled identically in the dry-run schema and in FULL_DATA_TYPE.
-_SAME_NAME = frozenset({"BIGINT", "BOOLEAN", "DATE", "DOUBLE", "FLOAT"})
+_SAME_NAME = frozenset({"BIGINT", "BOOLEAN", "DATE", "DOUBLE", "FLOAT", "SMALLINT", "TINYINT"})
+
+# Rendered as NAME(length), at any depth.
+_LENGTH_TYPES = frozenset({"BINARY", "CHAR", "VARBINARY", "VARCHAR"})
+
+# MAP key types a table stores as VARCHAR(2147483647) NOT NULL.
+_STRING_KEY_TYPES = frozenset({"CHAR", "VARCHAR"})
 
 # Dry-run name -> (FULL_DATA_TYPE name, suffix after the precision, verified precisions).
 _TEMPORAL_TYPES: dict[str, tuple[str, str, frozenset[int]]] = {
-    "TIME_WITHOUT_TIME_ZONE": ("TIME", "", frozenset({0})),
-    "TIMESTAMP_WITHOUT_TIME_ZONE": ("TIMESTAMP", "", frozenset({3, 6})),
-    "TIMESTAMP_WITH_LOCAL_TIME_ZONE": ("TIMESTAMP", " WITH LOCAL TIME ZONE", frozenset({3})),
+    "TIME_WITHOUT_TIME_ZONE": ("TIME", "", frozenset(range(4))),
+    "TIMESTAMP_WITHOUT_TIME_ZONE": ("TIMESTAMP", "", frozenset(range(7))),
+    "TIMESTAMP_WITH_LOCAL_TIME_ZONE": ("TIMESTAMP", " WITH LOCAL TIME ZONE", frozenset(range(7))),
 }
 
 
@@ -64,14 +71,11 @@ def _render(column_type: ColumnTypeDefinition, *, nested: bool) -> str:
         text = "INT"
     elif name in _SAME_NAME:
         text = name
-    elif name == "VARCHAR":
-        text = f"VARCHAR({_required(column_type.length, 'VARCHAR length')})"
-    elif name == "CHAR":
-        text = _render_char(column_type, nested=nested)
-    elif name == "VARBINARY":
-        if column_type.length != _MAX_LENGTH:
-            raise UnverifiedTypeError(f"VARBINARY({column_type.length})")
-        text = f"VARBINARY({_MAX_LENGTH})"
+    elif name in _LENGTH_TYPES:
+        length = _required(column_type.length, f"{name} length")
+        if length < 1:
+            raise UnverifiedTypeError(f"{name}({length})")
+        text = f"{name}({length})"
     elif name == "DECIMAL":
         precision = _required(column_type.precision, "DECIMAL precision")
         scale = _required(column_type.scale, "DECIMAL scale")
@@ -81,9 +85,9 @@ def _render(column_type: ColumnTypeDefinition, *, nested: bool) -> str:
         if column_type.precision not in verified_precisions:
             raise UnverifiedTypeError(f"{name} with precision {column_type.precision}")
         text = f"{base}({column_type.precision}){suffix}"
-    elif name == "ARRAY":
-        element = _render(_child(column_type.element_type, "ARRAY element"), nested=True)
-        text = f"ARRAY<{element}>"
+    elif name in ("ARRAY", "MULTISET"):
+        element = _render(_child(column_type.element_type, f"{name} element"), nested=True)
+        text = f"{name}<{element}>"
     elif name == "MAP":
         text = _render_map(column_type)
     elif name == "ROW":
@@ -97,27 +101,16 @@ def _render(column_type: ColumnTypeDefinition, *, nested: bool) -> str:
     return text
 
 
-def _render_char(column_type: ColumnTypeDefinition, *, nested: bool) -> str:
-    # Only top-level CHAR was observed in a table, and a CTAS widened a CHAR MAP key to
-    # VARCHAR, so a nested CHAR falls back. CHAR(0) is the type of the literal ''.
-    if nested:
-        raise UnverifiedTypeError("CHAR inside a composite type")
-    length = _required(column_type.length, "CHAR length")
-    if length < 1:
-        raise UnverifiedTypeError(f"CHAR({length})")
-    return f"CHAR({length})"
-
-
 def _render_map(column_type: ColumnTypeDefinition) -> str:
     key_type = _child(column_type.key_type, "MAP key")
-    # Only STRING keys were observed in a table, and tables always store MAP keys as NOT NULL,
-    # whatever the query says.
-    if key_type.type != "VARCHAR" or key_type.length != _MAX_LENGTH:
-        raise UnverifiedTypeError(
-            f"MAP key {key_type.type} (only VARCHAR({_MAX_LENGTH}) keys are verified)"
-        )
+    if key_type.type in _STRING_KEY_TYPES:
+        # The table widens a CHAR or VARCHAR key to STRING and makes it NOT NULL, whatever the
+        # query says (Avro map keys are non-null strings).
+        key = f"VARCHAR({_MAX_LENGTH}) NOT NULL"
+    else:
+        key = _render(key_type, nested=True)
     value = _render(_child(column_type.value_type, "MAP value"), nested=True)
-    return f"MAP<VARCHAR({_MAX_LENGTH}) NOT NULL, {value}>"
+    return f"MAP<{key}, {value}>"
 
 
 def _render_row(column_type: ColumnTypeDefinition) -> str:

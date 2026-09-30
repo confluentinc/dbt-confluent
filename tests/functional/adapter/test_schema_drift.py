@@ -22,6 +22,7 @@ live run — the kind-by-kind discrimination is the unit tests' job.
 
 import pytest
 
+from dbt.adapters.confluent.flink_types import UnverifiedTypeError, render_full_data_type
 from dbt.tests.util import run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
     assert_distribution_drift_error,
@@ -670,33 +671,50 @@ class TestDistributedByDefaultIsNotChecked(ConfluentFixtures):
 # ---------------------------------------------------------------------------
 
 # Only shapes the renderer accepts AND whose CTAS-stored FULL_DATA_TYPE the
-# GH-118 probes observed (run 995e2382): an unchanged re-run must SKIP on the
-# dry-run path.
+# GH-118 probes observed (runs 995e2382, 0484bde2, 6b109689): an unchanged
+# re-run must SKIP on the dry-run path. The CHAR(1) key of map['a', 1] is
+# stored as VARCHAR(2147483647) NOT NULL, and the INT key keeps its type.
 DRY_RUN_TYPES_MODEL = """
 {{ config(materialized='table') }}
 select
   cast(1 as bigint) as id,
   cast(12.5 as decimal(10, 2)) * 2 as price_x2,
   'abc' as char_literal,
+  cast(1 as tinyint) as tiny,
+  x'0102' as bin,
+  cast(time '12:00:00.123' as time(3)) as t3,
+  cast(timestamp '2024-01-01 00:00:00' as timestamp(0)) as ts0,
   cast(null as timestamp_ltz(3)) as ts_ltz,
   array[1, 2] as int_array,
+  array['a', 'b'] as char_array,
   map[cast('a' as string), 1] as string_keyed_map,
+  map['a', 1] as char_keyed_map,
+  map[1, cast('v' as string)] as int_keyed_map,
   cast(row(1, 'b') as row<`a` int, `b` string>) as named_row
 """
 
-# MAP['a', 1] has a CHAR(1) key that a CTAS table stores as VARCHAR(2147483647)
-# (probe run 995e2382), so the renderer declines it and this model must take
-# the temp-table fallback.
-CHAR_KEYED_MAP_MODEL = """
+# The GH-118 probes (runs 0484bde2, 6b109689, 11017c00) found no type a table
+# can store that the renderer declines, so the test forces the fallback:
+# SMALLINT appears only in this model, and the test makes the renderer decline
+# it (see _decline_smallint).
+FORCED_FALLBACK_MODEL = """
 {{ config(materialized='table') }}
-select cast(1 as bigint) as id, map['a', 1] as char_keyed_map
+select cast(1 as bigint) as id, cast(1 as smallint) as small
 """
+
+
+def _decline_smallint(column_type):
+    """Stand in for a type the renderer doesn't know, such as one added to
+    Flink after this adapter release."""
+    if column_type.type == "SMALLINT":
+        raise UnverifiedTypeError("SMALLINT (declined by the test)")
+    return render_full_data_type(column_type)
 
 
 class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
     """An unchanged re-run must SKIP on both the dry-run path (NOT NULL,
-    nested and precision-changing expressions) and the fallback path (a CHAR
-    map key the renderer declines)."""
+    nested and precision-changing expressions) and the fallback path (a column
+    type the renderer is forced to decline)."""
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -706,7 +724,7 @@ class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
     def models(self):
         return {
             "dry_run_types.sql": DRY_RUN_TYPES_MODEL,
-            "char_keyed_map.sql": CHAR_KEYED_MAP_MODEL,
+            "forced_fallback.sql": FORCED_FALLBACK_MODEL,
         }
 
     @pytest.fixture(scope="class", autouse=True)
@@ -714,20 +732,21 @@ class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
         run_dbt(["run", "--full-refresh"])
         yield
         project.run_sql("drop table if exists dry_run_types")
-        project.run_sql("drop table if exists char_keyed_map")
+        project.run_sql("drop table if exists forced_fallback")
 
     def test_unchanged_rerun_skips_on_both_paths(self, project, monkeypatch):
+        monkeypatch.setattr("dbt.adapters.confluent.impl.render_full_data_type", _decline_smallint)
         submitted = capture_submitted_statement_properties(monkeypatch)
         results = run_dbt(["run"])
         assert len(results) == 2
         for r in results:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-        # Both models dry-ran; the renderer then declined char_keyed_map, so
+        # Both models dry-ran; the renderer then declined forced_fallback, so
         # only it fell back to a temp table.
-        assert dry_run_models(submitted) == {"dry_run_types", "char_keyed_map"}
+        assert dry_run_models(submitted) == {"dry_run_types", "forced_fallback"}
         assert drift_temp_tables_created(
-            submitted, project.adapter, "dry_run_types", "char_keyed_map"
-        ) == {"char_keyed_map"}
+            submitted, project.adapter, "dry_run_types", "forced_fallback"
+        ) == {"forced_fallback"}
         assert_tables_absent(
-            project, project.adapter.generate_schema_check_temp_name("char_keyed_map")
+            project, project.adapter.generate_schema_check_temp_name("forced_fallback")
         )

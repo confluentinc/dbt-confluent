@@ -19,14 +19,7 @@ PRICE = {
     "name": "price",
     "type": {"type": "DECIMAL", "precision": 10, "scale": 2, "nullable": True},
 }
-BAG = {
-    "name": "bag",
-    "type": {
-        "type": "MULTISET",
-        "nullable": True,
-        "element_type": {"type": "INTEGER", "nullable": False},
-    },
-}
+VARIANT = {"name": "v", "type": {"type": "VARIANT", "nullable": True}}
 MODEL = relation("my_model")
 
 
@@ -82,14 +75,14 @@ def test_renders_columns_in_query_order(adapter):
 def test_unverified_type_returns_none(adapter, debug_log):
     """None tells check_for_schema_drift to use the temp-table fallback. The debug line names
     the model and the column, since text logs carry no node info with threads > 1."""
-    _wire(adapter, [ID, BAG])
+    _wire(adapter, [ID, VARIANT])
 
-    assert adapter.get_expected_columns_from_dry_run(MODEL, "select id, bag from src") is None
+    assert adapter.get_expected_columns_from_dry_run(MODEL, "select id, v from src") is None
 
     (message,), _ = debug_log.call_args
     assert str(MODEL) in message
-    assert "'bag'" in message
-    assert "MULTISET" in message
+    assert "'v'" in message
+    assert "VARIANT" in message
 
 
 @pytest.mark.parametrize("columns", [None, []], ids=["no-schema", "no-columns"])
