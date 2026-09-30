@@ -1,6 +1,5 @@
 [executor]
 type = "uv"
-python = "3.11"
 
 # Static code checks
 [tasks.ruff-check]
