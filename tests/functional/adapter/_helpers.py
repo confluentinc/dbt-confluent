@@ -106,12 +106,15 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
     with project.adapter.connection_named("snapshot_query"):
         conn = project.adapter.connections.get_thread_connection()
         cursor = conn.handle.cursor(mode=ExecutionMode.SNAPSHOT)
-        cursor.execute(sql)
-        if fetch == "one":
-            return fetch_from_cursor(cursor, limit=1)
-        elif fetch == "all":
-            return fetch_from_cursor(cursor)
-        raise ValueError(f"fetch must be 'one' or 'all', got: {fetch!r}")
+        try:
+            cursor.execute(sql)
+            if fetch == "one":
+                return fetch_from_cursor(cursor, limit=1)
+            elif fetch == "all":
+                return fetch_from_cursor(cursor)
+            raise ValueError(f"fetch must be 'one' or 'all', got: {fetch!r}")
+        finally:
+            cursor.close()
 
 
 def wait_for_snapshot_rows(

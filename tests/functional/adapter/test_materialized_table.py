@@ -669,12 +669,13 @@ class TestMaterializedTableFullRefreshWipesOldData(_MTFixtures):
         )
 
 
-# price is along for the ride, unchanged across both versions: without
-# distributed_by, Confluent infers order_id as the MT's key from the source's
-# own PRIMARY KEY, and a table with only that one (key) column and nothing
-# else gets rejected outright ("must at least contain one physical column
-# that is not used as a key") -- an unrelated quirk that would otherwise mask
-# the type-change behavior this test targets.
+# NO_KEY_SOURCE (defined above), not SOURCE: SOURCE declares a PRIMARY KEY on
+# order_id, which Confluent auto-infers as the MT's key even with no
+# distributed_by set. Casting a key column to a nullable type fails with a
+# key-specific error ("Invalid primary key ... is nullable") that has nothing
+# to do with the type change itself -- an unrelated quirk that would
+# otherwise mask the type-incompatibility error this test targets. price is
+# along for the ride, unused otherwise.
 MT_ORDER_ID_INT = """
 {{ config(
     materialized='materialized_table',
@@ -711,7 +712,7 @@ class TestMaterializedTableBreakingTypeChangeRequiresFullRefresh(_MTFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {
-            f"{self.SRC}.sql": SOURCE,
+            f"{self.SRC}.sql": NO_KEY_SOURCE,
             f"{self.MT}.sql": MT_ORDER_ID_INT.replace("__SOURCE__", self.SRC),
         }
 
@@ -731,6 +732,10 @@ class TestMaterializedTableBreakingTypeChangeRequiresFullRefresh(_MTFixtures):
         r = get_result_by_name(results, self.MT)
         assert r is not None
         assert r.status.name == "Error"
+        assert "Modifying type of a persisted column is not supported" in r.message, (
+            f"expected the plain rerun to fail with a column-type-change error, got: {r.message}"
+        )
+        assert "order_id" in r.message
 
         # --full-refresh: drop and recreate succeeds with the new column type.
         results = run_dbt(["run", "--full-refresh", "-s", self.MT])
@@ -743,7 +748,7 @@ class TestMaterializedTableBreakingTypeChangeRequiresFullRefresh(_MTFixtures):
         assert len(rows) == 1, "no row landed after the full-refresh recreate"
         row = rows[0]
         assert isinstance(row[0], str), (
-            f"order_id should now be a STRING after the full-refresh recreate, got {row[0][0]!r}"
+            f"order_id should now be a STRING after the full-refresh recreate, got {row[0]!r}"
         )
 
 
