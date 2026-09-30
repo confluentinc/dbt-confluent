@@ -1,5 +1,7 @@
 [executor]
 type = "uv"
+python = "3.11"
+frozen = true
 
 # Static code checks
 [tasks.ruff-check]
