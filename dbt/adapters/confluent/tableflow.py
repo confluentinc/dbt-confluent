@@ -21,6 +21,7 @@ from confluent_sql import (
     AzureAdlsStorage,
     ByobAwsStorage,
     Connection,
+    GcsStorage,
     InterfaceError,
     ManagedStorage,
     TableflowErrorHandling,
@@ -61,6 +62,7 @@ _TABLEFLOW_STORAGE_CLASSES: dict[str, type] = {
     ManagedStorage.kind: ManagedStorage,
     ByobAwsStorage.kind: ByobAwsStorage,
     AzureAdlsStorage.kind: AzureAdlsStorage,
+    GcsStorage.kind: GcsStorage,
 }
 _TABLEFLOW_ERROR_HANDLING_CLASSES: dict[str, type] = {
     TableflowErrorHandlingSuspend.mode: TableflowErrorHandlingSuspend,
@@ -93,7 +95,7 @@ class TableflowDesiredState:
     """
 
     table_formats: list[TableFormat]
-    storage: ManagedStorage | ByobAwsStorage | AzureAdlsStorage
+    storage: ManagedStorage | ByobAwsStorage | AzureAdlsStorage | GcsStorage
     config: TableflowTopicConfig | None
 
     @classmethod
@@ -173,7 +175,9 @@ def reconcile_tableflow_config(
             'storage': {'kind': 'Managed'}
                      | {'kind': 'ByobAws', 'bucket_name': ..., 'provider_integration_id': ...}
                      | {'kind': 'AzureDataLakeStorageGen2', 'storage_account_name': ...,
-                        'container_name': ..., 'provider_integration_id': ...},  # required
+                        'container_name': ..., 'provider_integration_id': ...}
+                     | {'kind': 'GoogleCloudStorage', 'bucket_name': ...,
+                        'provider_integration_id': ...},  # required
             'config': {                      # optional
                 'retention_ms': 604800000,       # optional
                 'data_retention_ms': 604800000,  # optional
@@ -195,7 +199,8 @@ def reconcile_tableflow_config(
       the underlying Kafka topic or its data -- unlike `--full-refresh`, which drops and
       recreates the topic itself -- and re-enabling backfills the full topic history from
       the earliest offset, so nothing here leaves a coverage gap (#101).
-      One transition -- a custom bucket to Confluent-managed storage -- can still fail even
+      One transition -- a custom bucket (ByobAws/AzureDataLakeStorageGen2/GoogleCloudStorage)
+      to Confluent-managed storage -- can still fail even
       after the disable/re-enable completes: Confluent enforces an unpollable grace period
       (up to 1 hour) on that specific switch. `create_tableflow_topic` translates that 400
       into an actionable error (wait and re-run, or `--full-refresh` to succeed immediately
@@ -469,7 +474,7 @@ def translate_table_formats(formats: object) -> list[str]:
 
 def translate_tableflow_storage(
     storage: object,
-) -> ManagedStorage | ByobAwsStorage | AzureAdlsStorage:
+) -> ManagedStorage | ByobAwsStorage | AzureAdlsStorage | GcsStorage:
     """Validate and translate `tableflow.storage` into its driver type.
 
     Only the kind-to-class dispatch is ours; each storage kind's
