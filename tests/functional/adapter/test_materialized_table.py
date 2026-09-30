@@ -11,13 +11,7 @@ Notes:
 - ConfluentFixtures forces models +full_refresh=True, which would make every run a
   recreate. Classes that exercise the in-place evolution / no-op paths override
   project_config_update to drop that flag.
-- Each class uses unique relation names, suffixed with a per-session tag: the
-  schema (Kafka cluster) is shared, a dropped relation's Kafka topic outlives
-  the catalog drop asynchronously (minutes to a day-plus), and its Schema
-  Registry subjects are not deleted at all. Reusing a name across runs races
-  that teardown: a recreate can bind to the lingering topic's old schema
-  ("Column types of query result and sink ... do not match"), and an
-  in-flight deletion can make an existence check pass and then evaporate.
+- Each class uses unique relation names, suffixed with a per-session tag.
 - Because names are never reused, leftovers from failed teardowns or
   hard-killed runs would accumulate forever. Every name therefore lives in a
   reserved namespace (`dbttest_` prefix + fixed stem + hex epoch-seconds tag)
@@ -41,8 +35,10 @@ from tests.functional.adapter._helpers import (
     drop_any_relation,
     get_result_by_name,
     relation,
+    snapshot_query,
     sweep_stale_test_relations,
     sweep_stale_test_statements,
+    wait_for_snapshot_rows,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
@@ -59,7 +55,8 @@ _RUN_TAG = format(int(time.time()), "08x")
 # one of the fixed stems, and the hex session tag.
 _TEST_RELATION_RE = re.compile(
     r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch|contract"
-    r"|contractorder|contractnokey|stmtprops|stmtpropstuned|stmtpropsplain)_(?P<tag>[0-9a-f]{8})$"
+    r"|contractorder|contractnokey|stmtprops|stmtpropstuned|stmtpropsplain"
+    r"|typechange|frwipe)_(?P<tag>[0-9a-f]{8})$"
 )
 
 # A bounded faker source (number-of-rows) so the MT refresh settles quickly.
@@ -408,12 +405,53 @@ class TestMaterializedTableContractColumnReorder(_MTFixtures):
         )
 
 
+# A bounded literal query (no FROM/source at all) runs to completion and
+# stops -- so if an unchanged resubmit truly leaves the completed job alone,
+# no further rows can ever land. If the resubmit instead re-executes the
+# query, more copies of its rows get appended -- but UNION ALL doesn't
+# guarantee which branch a restarted query reaches first (or that it reaches
+# both at all before stalling), even bucketed onto one Kafka partition: that
+# only orders whatever actually gets written, not which row a reprocessing
+# run produces first. So the signal to watch for is any extra row on top of
+# the known-good baseline count, not a duplicate of one specific id.
+#
+# changelog.mode=append is set explicitly so a duplicate is never collapsed
+# via upsert/changelog semantics into an update on the existing row instead
+# of a second, visible one -- which would mask the exact reprocessing this
+# test looks for.
+FIRST_ROW_ID = 1
+LAST_ROW_ID = 2
+INITIAL_ROW_COUNT = 2
+
+# A third id, added via a genuinely changed definition later in the test, to
+# prove the no-op check actually has teeth: it's not enough for it to pass on
+# an unchanged resubmit if it would just as easily never catch reprocessing
+# at all, whether or not it happens.
+THIRD_ROW_ID = 3
+
+MT_UNCHANGED_RERUN_STATE = f"""
+{{{{ config(
+    materialized='materialized_table',
+    with={{'changelog.mode': 'append'}},
+) }}}}
+select {FIRST_ROW_ID} as id
+union all
+select {LAST_ROW_ID} as id
+"""
+
+
 class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
-    """Re-running an unchanged MT is a server-side no-op: dbt re-asserts the
-    same CREATE OR ALTER and the server diffs the spec, leaving the table,
-    its data, and its query state untouched."""
+    """Re-running an unchanged MT must be a true server-side no-op: dbt
+    re-asserts the same CREATE OR ALTER, the server diffs the spec, and the
+    table, its data, and its query state are left untouched -- the query
+    itself must not be silently restarted. A bounded literal (sourceless)
+    query makes that observable: it completes and produces its rows exactly
+    once, so any further rows landing after an unchanged resubmit can only
+    mean the resubmit re-ran the query from scratch."""
 
     NAME = "matnoop"
+    # No streaming source -- the MT's own literal AS SELECT is bounded and
+    # self-contained.
     SRC = f"dbttest_src_noop_{_RUN_TAG}"
     MT = f"dbttest_mt_noop_{_RUN_TAG}"
 
@@ -424,15 +462,95 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
-        yield _models(self.SRC, self.MT)
+        yield {f"{self.MT}.sql": MT_UNCHANGED_RERUN_STATE}
 
     def test_unchanged_rerun_is_noop(self, project):
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results)
 
-        # Second, unchanged run: re-assert the same definition; succeeds as a no-op.
+        rel = relation_from_name(project.adapter, self.MT)
+
+        def row_count():
+            # SNAPSHOT, not project.run_sql's default STREAMING_QUERY: a
+            # streaming read can hand back a preliminary/partial changelog
+            # result mid-flight, which would falsely look like "no
+            # reprocessing happened yet" rather than a settled final count.
+            return snapshot_query(project, f"select count(*) from {rel}", fetch="one")[0][0]
+
+        def wait_to_exceed_row_count_or_timeout(threshold, timeout=30):
+            # Poll for the total row count exceeding `threshold`, exiting as
+            # soon as it does rather than always waiting out the full
+            # timeout.
+            count = threshold
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                count = row_count()
+                if count > threshold:
+                    break
+                time.sleep(2)
+            return count
+
+        # Wait for both literal rows to land before re-running -- otherwise a
+        # slow-to-land first run could be mistaken for reprocessing later.
+        deadline = time.monotonic() + 30
+        while row_count() < INITIAL_ROW_COUNT and time.monotonic() < deadline:
+            time.sleep(2)
+        assert row_count() == INITIAL_ROW_COUNT, (
+            "the initial literal rows did not land before the re-run"
+        )
+
+        # Re-issue the exact same, unmodified definition: must be a true no-op.
         results = run_dbt(["run", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
+        assert wait_to_exceed_row_count_or_timeout(INITIAL_ROW_COUNT) == INITIAL_ROW_COUNT, (
+            f"Expected exactly {INITIAL_ROW_COUNT} rows after an unchanged resubmit, but "
+            "found more -- the unchanged CREATE OR ALTER re-executed the bounded query "
+            "instead of leaving the already-completed job alone."
+        )
+
+        # Prove the no-op check above actually has teeth: swap in a genuinely
+        # different definition (still containing the original two rows, plus
+        # a new THIRD_ROW_ID row) and confirm the query DOES re-execute this
+        # time. Without this, a check that's merely incapable of ever
+        # detecting reprocessing -- rather than one that correctly found none
+        # -- would pass the assertion above just as easily.
+        set_model_file(
+            project,
+            relation(project, self.MT),
+            MT_UNCHANGED_RERUN_STATE + f"\nunion all\nselect {THIRD_ROW_ID} as id\n",
+        )
+        results = run_dbt(["run", "-s", self.MT])
+        assert all(r.status.name == "Success" for r in results)
+
+        # Give the evolution time to land before checking exact counts below.
+        wait_to_exceed_row_count_or_timeout(INITIAL_ROW_COUNT * 2)
+
+        # One grouped query for all three counts, not three separate ones.
+        counts = {
+            row[0]: row[1]
+            for row in snapshot_query(
+                project, f"select id, count(*) as cnt from {rel} group by id", fetch="all"
+            )
+        }
+
+        # Exact per-id counts, not just an overall total: this evolution must
+        # have reprocessed the original two rows exactly once each (one
+        # original copy plus one from this evolution) and produced exactly
+        # one THIRD_ROW_ID row.
+        assert counts.get(FIRST_ROW_ID) == 2, (
+            f"Expected exactly 2 rows with id={FIRST_ROW_ID} (one original, one from this "
+            f"evolution) -- more means the earlier unchanged resubmit silently reprocessed "
+            f"too, just later than its own check waited for. Got: {counts}"
+        )
+        assert counts.get(LAST_ROW_ID) == 2, (
+            f"Expected exactly 2 rows with id={LAST_ROW_ID}, for the same reason as "
+            f"id={FIRST_ROW_ID} above. Got: {counts}"
+        )
+        assert counts.get(THIRD_ROW_ID) == 1, (
+            f"Expected exactly 1 row with id={THIRD_ROW_ID} -- zero means the changed "
+            f"definition never took effect; more means its evolution re-ran more than "
+            f"once. Got: {counts}"
+        )
 
 
 class TestMaterializedTableEvolvesInPlace(_MTFixtures):
@@ -489,6 +607,165 @@ class TestMaterializedTableFullRefreshRecreates(_MTFixtures):
         # --full-refresh must drop and recreate without error.
         results = run_dbt(["run", "--full-refresh", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
+
+
+# Two clearly distinguishable, literal (sourceless) datasets: --full-refresh
+# must recreate the MT's backing Kafka topic from scratch, not append to it,
+# so no BATCH_1 row may survive alongside BATCH_2's after the recreate. Used
+# both to populate each version's AS SELECT and to assert on the surviving
+# data below, so the two can't silently drift apart.
+BATCH_1 = 1
+BATCH_2 = 2
+
+MT_FULL_REFRESH_BATCH_1 = f"""
+{{{{ config(
+    materialized='materialized_table',
+) }}}}
+select {BATCH_1} as batch, 111 as order_id
+"""
+
+MT_FULL_REFRESH_BATCH_2 = f"""
+{{{{ config(
+    materialized='materialized_table',
+) }}}}
+select {BATCH_2} as batch, 222 as order_id
+"""
+
+
+class TestMaterializedTableFullRefreshWipesOldData(_MTFixtures):
+    """Regression test: --full-refresh must drop and recreate a materialized
+    table's backing Kafka topic, not merely add a second query writing
+    alongside the first. Two literal (sourceless) datasets, tagged with a
+    distinct `batch` marker, prove this: if the topic were only appended to
+    rather than wiped, BATCH_1's row would still be readable alongside
+    BATCH_2's after the --full-refresh recreate."""
+
+    NAME = "mtfrwipe"
+    # No streaming source is involved -- both datasets are literal SELECTs,
+    # so nothing but the MT's own AS SELECT can supply the batch marker that
+    # distinguishes "old" data from "new".
+    SRC = f"dbttest_src_frwipe_{_RUN_TAG}"
+    MT = f"dbttest_mt_frwipe_{_RUN_TAG}"
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {f"{self.MT}.sql": MT_FULL_REFRESH_BATCH_1}
+
+    def test_full_refresh_wipes_old_data(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results)
+
+        rel = relation_from_name(project.adapter, self.MT)
+        # A successful CREATE OR ALTER only means the DDL was accepted, not
+        # that the (bounded, literal) query has finished landing its row yet
+        # -- wait for it, in SNAPSHOT mode so we never see a preliminary
+        # changelog result instead of the table's final, settled contents.
+        rows = wait_for_snapshot_rows(project, f"select batch from {rel}")
+        assert {row[0] for row in rows} == {BATCH_1}
+
+        # Recreate with a clearly distinguishable second dataset.
+        set_model_file(project, relation(project, self.MT), MT_FULL_REFRESH_BATCH_2)
+        results = run_dbt(["run", "--full-refresh", "-s", self.MT])
+        assert all(r.status.name == "Success" for r in results)
+
+        # Wait for BATCH_2 specifically, not just any row: an unfiltered wait
+        # could return the instant a stale BATCH_1 row is still transiently
+        # visible right after the recreate (catalog/routing not yet caught up
+        # to the new topic), which would fail this test for the wrong reason
+        # -- looking like the old data survived, when really the new data
+        # just hadn't landed yet.
+        wait_for_snapshot_rows(project, f"select batch from {rel} where batch = {BATCH_2}")
+
+        rows = snapshot_query(project, f"select batch from {rel}", fetch="all")
+        batches = {row[0] for row in rows}
+        assert batches == {BATCH_2}, (
+            f"Expected only batch {BATCH_2} after --full-refresh, but found {batches} -- "
+            f"batch {BATCH_1}'s row survived, meaning the old topic was appended to "
+            "instead of being wiped and recreated."
+        )
+
+
+# NO_KEY_SOURCE (defined above), not SOURCE: SOURCE declares a PRIMARY KEY on
+# order_id, which Confluent auto-infers as the MT's key even with no
+# distributed_by set. Casting a key column to a nullable type fails with a
+# key-specific error ("Invalid primary key ... is nullable") that has nothing
+# to do with the type change itself -- an unrelated quirk that would
+# otherwise mask the type-incompatibility error this test targets. price is
+# along for the ride, unused otherwise.
+MT_ORDER_ID_INT = """
+{{ config(
+    materialized='materialized_table',
+) }}
+select order_id, price from {{ ref('__SOURCE__') }}
+"""
+
+# order_id's type changes BIGINT -> STRING; price is untouched. CREATE OR
+# ALTER only tolerates additive/compatible changes, so a column's type
+# changing is rejected by the server outright rather than evolved in place.
+MT_ORDER_ID_STRING = """
+{{ config(
+    materialized='materialized_table',
+) }}
+select cast(order_id as string) as order_id, price from {{ ref('__SOURCE__') }}
+"""
+
+
+class TestMaterializedTableBreakingTypeChangeRequiresFullRefresh(_MTFixtures):
+    """A column type change is a breaking schema change that CREATE OR ALTER
+    cannot apply in place: a plain re-run must fail with a clear error, and
+    --full-refresh must drop and recreate the table with the new type."""
+
+    NAME = "mttypechange"
+    SRC = f"dbttest_src_typechange_{_RUN_TAG}"
+    MT = f"dbttest_mt_typechange_{_RUN_TAG}"
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        # Drop the forced +full_refresh: the plain re-run must fail on its
+        # own merits before we retry it with --full-refresh.
+        return {"name": self.NAME, "models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            f"{self.SRC}.sql": NO_KEY_SOURCE,
+            f"{self.MT}.sql": MT_ORDER_ID_INT.replace("__SOURCE__", self.SRC),
+        }
+
+    def test_breaking_type_change_requires_full_refresh(self, project):
+        results = run_dbt(["run"])
+        assert all(r.status.name == "Success" for r in results)
+
+        # Change order_id's type from BIGINT to STRING in place.
+        set_model_file(
+            project,
+            relation(project, self.MT),
+            MT_ORDER_ID_STRING.replace("__SOURCE__", self.SRC),
+        )
+
+        # Plain run: the server rejects the type change before applying it.
+        results = run_dbt(["run", "-s", self.MT], expect_pass=False)
+        r = get_result_by_name(results, self.MT)
+        assert r is not None
+        assert r.status.name == "Error"
+        assert "Modifying type of a persisted column is not supported" in r.message, (
+            f"expected the plain rerun to fail with a column-type-change error, got: {r.message}"
+        )
+        assert "order_id" in r.message
+
+        # --full-refresh: drop and recreate succeeds with the new column type.
+        results = run_dbt(["run", "--full-refresh", "-s", self.MT])
+        assert all(r.status.name == "Success" for r in results)
+
+        rel = relation_from_name(project.adapter, self.MT)
+        # Wait for the recreated table to actually produce a row before
+        # reading it -- see the note in TestMaterializedTableFullRefreshWipesOldData.
+        rows = wait_for_snapshot_rows(project, f"select order_id, price from {rel} limit 1")
+        assert len(rows) == 1, "no row landed after the full-refresh recreate"
+        row = rows[0]
+        assert isinstance(row[0], str), (
+            f"order_id should now be a STRING after the full-refresh recreate, got {row[0]!r}"
+        )
 
 
 # -- Materialization switch --
@@ -567,15 +844,13 @@ class TestMaterializedTableReverseSwitch(_MTFixtures):
 
     --full-refresh drops the MT via drop_relation's IS_MATERIALIZED pre-check
     (a plain DROP TABLE would be silently accepted but phantom-drop the MT,
-    blocking the recreate), but the recreate itself is then blocked by the
-    platform: dropping a relation does not delete its Schema Registry
-    subjects, and the `table` snapshot CTAS registers a keyless schema while
-    the MT registered a keyed one, so the lingering '<name>-value' subject is
-    incompatible. The adapter surfaces this with recovery guidance appended
-    (delete the subject, or use a different relation name); this test pins
-    that error and that the MT itself was still dropped. If Confluent starts
-    deleting subjects on drop, the expect_pass=False run below will start
-    succeeding — revisit then (the switch would just work)."""
+    blocking the recreate) and then recreates it as a regular table. This
+    used to be platform-blocked: dropping a relation didn't delete its Schema
+    Registry subjects, and the `table` snapshot CTAS registers a keyless
+    schema while the MT registered a keyed one, so the lingering
+    '<name>-value' subject was incompatible with the recreate. Confluent has
+    since fixed the underlying subject cleanup on drop (confirmed 2026-09-30),
+    so the recreate now succeeds outright."""
 
     NAME = "matrevswitch"
     SRC = f"dbttest_src_revswitch_{_RUN_TAG}"
@@ -611,25 +886,18 @@ class TestMaterializedTableReverseSwitch(_MTFixtures):
         assert "materialized table" in r.message
         assert "--full-refresh" in r.message
 
-        # --full-refresh: the MT is dropped (via drop_relation's pre-check),
-        # then the snapshot CTAS is rejected against the MT's lingering
-        # Schema Registry subject (see class docstring) and the adapter
-        # surfaces the enriched, actionable error.
-        results = run_dbt(["run", "--full-refresh", "-s", self.MT], expect_pass=False)
-        r = get_result_by_name(results, self.MT)
-        assert r is not None
-        assert r.status.name == "Error"
-        assert "Schema Registry subject" in r.message
-        assert "delete the lingering subject" in r.message
+        # --full-refresh: the MT is dropped (via drop_relation's pre-check)
+        # and recreated as a regular table.
+        results = run_dbt(["run", "--full-refresh", "-s", self.MT])
+        assert all(r.status.name == "Success" for r in results)
 
-        # The MT itself is gone — the guard and the MT drop routing worked;
-        # only the platform-blocked recreate failed.
+        # The MT is gone and a regular table now exists under the same name.
         row = project.run_sql(
             "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "
             f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{self.MT}'",
             fetch="one",
         )
-        assert not row
+        assert row is not None and row[0][0] == "NO"
 
 
 # -- Invalid config models --
@@ -698,10 +966,16 @@ class TestMaterializedTableInvalidConfig(ConfluentFixtures):
             assert r.status.name == "Error", f"{name} expected Error, got {r.status.name}"
             return r.message
 
-        assert "not supported by the 'materialized_table'" in msg("mt_freshness")
-        assert "Supported config options are: distributed_by, with, start_mode" in msg(
-            "mt_freshness"
-        )
+        freshness_msg = msg("mt_freshness")
+        assert "not supported by the 'materialized_table'" in freshness_msg
+        # The supported-keys list is generated from MATERIALIZATION_CONFIG_KEYS
+        # (see ConfluentAdapter.validate_materialized_table_config) and grows
+        # as new config options are added, so check the stable prefix and a
+        # representative subset rather than the full exact list.
+        assert "Supported config options include:" in freshness_msg
+        for key in ("distributed_by", "with", "start_mode"):
+            assert key in freshness_msg
+
         assert "not a valid value for 'start_mode'" in msg("mt_start_mode")
         assert "must be a positive integer" in msg("mt_dist")
 
