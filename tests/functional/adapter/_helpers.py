@@ -106,18 +106,18 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
     """
     with project.adapter.connection_named("snapshot_query"):
         conn = project.adapter.connections.get_thread_connection()
-        cursor = conn.handle.cursor(mode=ExecutionMode.SNAPSHOT)
-        try:
-            # Unlike the adapter's normal execute path (connections.py), a
-            # raw cursor.execute doesn't attach the test profile's
-            # statement_label or statement_name_prefix on its own:
-            # - Without the label, delete_statements_by_label can't find
-            #   these polling statements at normal teardown.
-            # - Without the prefix, the driver defaults to its own
-            #   "dbapi-{uuid}" name (see confluent_sql.connection), which
-            #   sweep_stale_test_statements' name-prefix filter doesn't
-            #   match -- so a crashed run (no normal teardown) would leave
-            #   these unswept until Confluent's ~30-day purge.
+        # closing_cursor auto-closes on exit (mode kept explicit even though
+        # SNAPSHOT is its default) -- unlike a bare cursor.execute, it doesn't
+        # attach the test profile's statement_label or statement_name_prefix
+        # on its own:
+        # - Without the label, delete_statements_by_label can't find these
+        #   polling statements at normal teardown.
+        # - Without the prefix, the driver defaults to its own
+        #   "dbapi-{uuid}" name (see confluent_sql.connection), which
+        #   sweep_stale_test_statements' name-prefix filter doesn't match --
+        #   so a crashed run (no normal teardown) would leave these unswept
+        #   until Confluent's ~30-day purge.
+        with conn.handle.closing_cursor(mode=ExecutionMode.SNAPSHOT) as cursor:
             cursor.execute(
                 sql,
                 statement_name=f"{conn.credentials.statement_name_prefix}{uuid.uuid4()}",
@@ -128,8 +128,6 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
             elif fetch == "all":
                 return fetch_from_cursor(cursor)
             raise ValueError(f"fetch must be 'one' or 'all', got: {fetch!r}")
-        finally:
-            cursor.close()
 
 
 def wait_for_snapshot_rows(
