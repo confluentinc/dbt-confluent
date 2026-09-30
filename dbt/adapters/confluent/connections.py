@@ -2,18 +2,19 @@ import logging
 import time
 import uuid
 from collections.abc import Iterable
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import confluent_sql
-from confluent_sql import HIDDEN_LABEL, Cursor
+from confluent_sql import HIDDEN_LABEL, Cursor, Property
 from confluent_sql.exceptions import (
     ComputePoolExhaustedError,
     OperationalError,
     StatementNotFoundError,
 )
 from confluent_sql.execution_mode import ExecutionMode
+from confluent_sql.statement import Schema
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.events.functions import fire_event
 from dbt_common.exceptions import (
@@ -341,6 +342,41 @@ class ConfluentConnectionManager(SQLConnectionManager):
             cursor.close()
             table = empty_table()
         return response, table
+
+    def dry_run_schema(
+        self,
+        sql: str,
+        execution_mode: str | None = None,
+        compute_pool_id: str | None = None,
+    ) -> Schema | None:
+        """Submit `sql` as a Flink `sql.dry-run` and return the result schema it reports.
+
+        Flink validates and plans a dry-run, then answers in the POST response without storing
+        the statement, so nothing runs and nothing needs deleting. Like `execute`, this applies
+        dbt's query comment, so the submitted SQL names the model, as the temp-table CTAS it
+        replaces did. The statement carries the hidden label, like the adapter's other internal
+        statements.
+
+        execution_mode and compute_pool_id default to the profile's, as in `add_query`.
+
+        Returns None when the dry-run reports no result schema (DDL statements).
+
+        Raises:
+            DbtDatabaseError: if the dry-run fails (invalid SQL), or the driver can't read its
+                result.
+        """
+        sql = self._add_query_comment(sql)
+        dry_run_properties: dict[str, str | int | bool] = {Property.DRY_RUN: "true"}
+        _, cursor = self.add_query(
+            sql,
+            auto_begin=False,
+            execution_mode=execution_mode,
+            hidden=True,
+            compute_pool_id=compute_pool_id,
+            statement_properties=dry_run_properties,
+        )
+        with closing(cursor), self.exception_handler(sql):
+            return cursor.statement.schema
 
     def add_query(
         self,
