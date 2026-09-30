@@ -175,7 +175,6 @@ See [Confluent's materialized tables concepts page](https://docs.confluent.io/cl
 
 **Known limitations:**
 
-- An unchanged definition is a server-side no-op; changing the definition can evolve the table in place.
 - Not every change can evolve in place.
   + Dropping columns is rejected at submission. The fix is `--full-refresh`.
 
