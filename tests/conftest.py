@@ -36,10 +36,12 @@ def dbt_profile_target(unique_schema):
     """The profile dictionary, used to write out profiles.yml for tests."""
     flink_api_key = os.getenv("CONFLUENT_FLINK_API_KEY")
     flink_api_secret = os.getenv("CONFLUENT_FLINK_API_SECRET")
-    # Optional: a Global key, only needed for Tableflow functional tests (Tableflow's
-    # control-plane routes require one regardless of the Flink-region pair above --
-    # see MATERIALIZATIONS.md#tableflow). None/None when unset, so confluent_sql.connect()
-    # falls back to the Flink-region pair for every other test, unaffected.
+    # A Global key works against every route this driver touches, including
+    # Tableflow's control-plane routes (see MATERIALIZATIONS.md#tableflow),
+    # so it's preferred here whenever configured -- confluent_sql.connect()
+    # accepts either pair, but warns (and silently prefers Global anyway) if
+    # both are given. Falls back to the Flink-region pair when no Global key
+    # is configured (Tableflow's own tests are skipped in that case).
     global_api_key = os.getenv("CONFLUENT_GLOBAL_API_KEY")
     global_api_secret = os.getenv("CONFLUENT_GLOBAL_API_SECRET")
     environment = os.getenv("CONFLUENT_ENV_ID")
@@ -56,14 +58,16 @@ def dbt_profile_target(unique_schema):
         "cloud_region": cloud_region,
         "compute_pool_id": compute_pool_id,
         "organization_id": organization_id,
-        "flink_api_key": flink_api_key,
-        "flink_api_secret": flink_api_secret,
-        "global_api_key": global_api_key,
-        "global_api_secret": global_api_secret,
         "database": environment,
         "schema": unique_schema,
         "test_schema": unique_schema,
     }
+    if global_api_key and global_api_secret:
+        target["global_api_key"] = global_api_key
+        target["global_api_secret"] = global_api_secret
+    else:
+        target["flink_api_key"] = flink_api_key
+        target["flink_api_secret"] = flink_api_secret
     return target
 
 
