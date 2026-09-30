@@ -660,7 +660,15 @@ class TestMaterializedTableFullRefreshWipesOldData(_MTFixtures):
         results = run_dbt(["run", "--full-refresh", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
 
-        rows = wait_for_snapshot_rows(project, f"select batch from {rel}")
+        # Wait for BATCH_2 specifically, not just any row: an unfiltered wait
+        # could return the instant a stale BATCH_1 row is still transiently
+        # visible right after the recreate (catalog/routing not yet caught up
+        # to the new topic), which would fail this test for the wrong reason
+        # -- looking like the old data survived, when really the new data
+        # just hadn't landed yet.
+        wait_for_snapshot_rows(project, f"select batch from {rel} where batch = {BATCH_2}")
+
+        rows = snapshot_query(project, f"select batch from {rel}", fetch="all")
         batches = {row[0] for row in rows}
         assert batches == {BATCH_2}, (
             f"Expected only batch {BATCH_2} after --full-refresh, but found {batches} -- "
