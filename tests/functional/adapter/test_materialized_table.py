@@ -532,9 +532,9 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
             "any extra rows -- either the evolution didn't take effect, or the no-op "
             "check above can never catch real reprocessing, making it a false assurance."
         )
-        third_row_count = snapshot_query(
-            project, f"select count(*) from {rel} where id = {THIRD_ROW_ID}", fetch="one"
-        )[0][0]
+        third_row_count = len(
+            wait_for_snapshot_rows(project, f"select id from {rel} where id = {THIRD_ROW_ID}")
+        )
         assert third_row_count >= 1, (
             f"Expected the new id={THIRD_ROW_ID} row to appear after the changed "
             "definition was applied, but found none."
