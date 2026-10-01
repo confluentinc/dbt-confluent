@@ -1,1 +1,0 @@
-Strengthen materialized_table functional test coverage: verify a breaking column type change requires --full-refresh, --full-refresh actually wipes old topic data, an unchanged resubmit doesn't reprocess (and that this check can actually fail), and that the reverse-switch --full-refresh recreate now succeeds after a Confluent-side Schema Registry fix.
