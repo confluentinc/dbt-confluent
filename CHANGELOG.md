@@ -1,20 +1,48 @@
-dbt-confluent 0.3.1 (2026-09-09)
+# Changelog
 
-# Bugfixes
+All notable changes to this dbt adapter will be documented in this file.
+
+<!-- towncrier release notes start -->
+
+## dbt-confluent 0.4.0 (2026-10-01)
+
+### Features
+
+- Add a materialized_table materialization built on Confluent Cloud for Apache Flink's `CREATE OR ALTER MATERIALIZED TABLE ... AS SELECT` statement. See [Materialized Tables in Confluent Cloud for Apache Flink](https://docs.confluent.io/cloud/current/flink/concepts/materialized-tables.html). ([#62](https://github.com/confluentinc/dbt-confluent/issues/62))
+  - Supports dbt contracts (`config(contract={'enforced': true})`), including model-level primary_key constraints, enabling snapshot queries against the resulting table. ([#81](https://github.com/confluentinc/dbt-confluent/issues/81))
+- Add a tableflow config for `table`, `streaming_table`, `streaming_source`, and `materialized_table` materializations to enable Tableflow on a model's backing Kafka topic, materializing it as an Iceberg and/or Delta Lake table. See [Tableflow in Confluent Cloud](https://docs.confluent.io/cloud/current/topics/tableflow/overview.html). ([#99](https://github.com/confluentinc/dbt-confluent/issues/99))
+  - All external storage options are supported, include the recently released Google Cloud Storage option as well as AWS S3 & Azure DataLake. ([#167](https://github.com/confluentinc/dbt-confluent/issues/167))
+- Add a `statement_properties` config for `materialized_table` and `streaming_table` materializations to set Flink SET-style statement properties. See the [SET Statement documentation](https://docs.confluent.io/cloud/current/flink/reference/statements/set.html) for available options. ([#76](https://github.com/confluentinc/dbt-confluent/issues/76))
+  - Applies to the long-running INSERT statement only, not the separate DDL statement (whose options can be configured with the existing 'with' configuration option).
+- Setting a dbt-confluent config key (e.g. `with`, `distributed_by`, `statement_properties`, etc.) on a materialization that doesn't consume it now fails the run immediately with a clear error, instead of silently doing nothing. Opt a specific key out per model with `config(ignore_unsupported_config=[...])`.
+
+### Bugfixes
+
+- Fix `dbt-core` dependency specifier from `~=1.11` (allows 1.12+) to `~=1.11.0` (locks to 1.11.x), preventing accidental installation of unsupported dbt-core versions.
+
+### Misc
+
+- Bump `confluent-sql` dependency to `~=0.6.0`.
+- Cap supported Python versions at `<3.14`.
+
+
+## dbt-confluent 0.3.1 (2026-09-09)
+
+### Bugfixes
 
 - The `table` materialization's CTAS statement is now submitted in `snapshot_ddl` mode. Previously it used no explicit execution mode, so it fell back to the connection default (`streaming_query`), contradicting the documented snapshot behavior and leaving an unbounded statement running instead of one that completes. ([#77](https://github.com/confluentinc/dbt-confluent/issues/77))
 - Surface the underlying `confluent-sql` exception on connection failure instead of masking it behind a generic `confluent_sql connection error`, so `dbt` shows the driver's actual error message (e.g. authentication failures or read timeouts).
 - Fixed `ConfluentColumn` inheriting dbt-core's default `STRING -> TEXT` `TYPE_LABELS` mapping, which produced invalid Flink SQL (`TEXT`) for any contract-enforced model with a `string` column. ([#92](https://github.com/confluentinc/dbt-confluent/issues/92))
 
-# Misc
+### Misc
 
 - Cap supported Python versions at `<3.14` (a dbt-core dependency is not yet Python 3.14 compatible) and bump `confluent-sql` to `~=0.5.4`.
 - Split the schema drift `INFORMATION_SCHEMA.COLUMNS` query into two `TABLE_NAME`-scoped `SELECT`s joined by `UNION ALL` instead of one `SELECT` with an `OR`, so the server can push the `TABLE_NAME` predicate down.
 
 
-dbt-confluent 0.3.0 (2026-07-09)
+## dbt-confluent 0.3.0 (2026-07-09)
 
-# Features
+### Features
 
 - `streaming_table` re-runs without `--full-refresh` now auto-recover when the long-running INSERT statement is missing or in a terminal phase (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`). The adapter resubmits only the INSERT under the same deterministic name; the table and its topic state are preserved. Closes the crash-recovery gap (#33) and the dead-statement half of #32.
 - When recovering under `on_schema_drift='ignore'`, the restart path still runs a columns-only drift check before resubmitting: `ignore` suppresses benign WITH-options/distribution drift, but a changed column list would make the resubmitted INSERT fail at Flink with a cryptic "Different number of columns" error, so the adapter raises a clear drift error instead.
@@ -29,7 +57,7 @@ dbt-confluent 0.3.0 (2026-07-09)
 
   `dbt init` prompts for both choices, and `dbt debug` now reports the configured compute pool.
 
-# Bugfixes
+### Bugfixes
 
 - Recover from a crash between `streaming_table`'s DDL and INSERT: a follow-up `dbt run` (no `--full-refresh`) now resubmits the missing INSERT instead of silently skipping the model. See #32 for the full lifecycle change. ([#33](https://github.com/confluentinc/dbt-confluent/issues/33))
 - Changing a `streaming_source` model's `connector` config is now detected as schema drift. Previously the drift check only compared the `with` config, so a connector change was silently skipped and the old connector kept running.
@@ -39,17 +67,17 @@ dbt-confluent 0.3.0 (2026-07-09)
 - The schema drift check now surfaces a retriable error when INFORMATION_SCHEMA returns no columns for the *existing* table (metadata propagation lag), instead of falsely reporting every model column as added and advising a destructive `--full-refresh`. This mirrors the guard that already existed for the temp table.
 
 
-dbt-confluent 0.2.1 (2026-05-27)
+## dbt-confluent 0.2.1 (2026-05-27)
 
-# Bugfixes
+### Bugfixes
 
 - Fix `dbt run` failures under compute-pool-scoped FlinkDeveloper roles caused by DELETE-on-missing Flink statements returning 403 (not 404). The adapter now warns rather than errors on a 403 from statement DELETE, and retries CREATE on 409 name-conflicts to handle the async teardown race. ([#58](https://github.com/confluentinc/dbt-confluent/issues/58))
 - Increase the HTTP client timeout to 60s so cold INFORMATION_SCHEMA lookups (notably the unified drift-catalog UNION ALL) no longer surface as "read operation timed out" on the default 5s budget.
 
 
-dbt-confluent 0.2.0 (2026-04-22)
+## dbt-confluent 0.2.0 (2026-04-22)
 
-# Features
+### Features
 
 - Removed `materialized_view` materialization (use `table`, see "Not Supported" section in MATERIALIZATIONS.md)
 - Schema drift detection configurable via "on_schema_drift: 'fail' | 'ignore'". See MATERIALIZATIONS.md
@@ -57,11 +85,11 @@ dbt-confluent 0.2.0 (2026-04-22)
 - Mark internal/metadata queries with the hidden label so they are filtered by default in the Confluent UI ([#39](https://github.com/confluentinc/dbt-confluent/issues/39))
 - Add custom endpoint configuration for private and other non-standard cluster urls ([#44](https://github.com/confluentinc/dbt-confluent/issues/44))
 
-# Bugfixes
+### Bugfixes
 
 - Delete existing statements before re-submitting with the same deterministic name on `--full-refresh` ([#29](https://github.com/confluentinc/dbt-confluent/issues/29))
 - Render model-level `PRIMARY KEY` constraints with the column list before the constraint expression (e.g. `PRIMARY KEY (col1, col2) NOT ENFORCED`), so Flink accepts the generated DDL. ([#31](https://github.com/confluentinc/dbt-confluent/issues/31))
 
-# Misc
+### Misc
 
 - Update to confluent-sql 0.3 ([#40](https://github.com/confluentinc/dbt-confluent/issues/40))
