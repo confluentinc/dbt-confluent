@@ -15,7 +15,7 @@ tests cover its glue, while the per-concern logic gets exhaustive coverage.
 
 import agate
 import pytest
-from dbt_common.exceptions import CompilationError, DbtDatabaseError
+from dbt_common.exceptions import CompilationError, DbtDatabaseError, DbtRuntimeError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
 from tests.unit._helpers import relation as _relation
@@ -457,6 +457,17 @@ class TestPartitionDriftCatalog:
             catalog, "existing", "temp"
         )
         assert is_materialized is False
+
+    def test_no_temp_identifier_reads_existing_only(self):
+        """Dry-run path: the catalog has no temp rows and no temp identifier."""
+        catalog = _make_catalog(
+            [_row(section="COLUMNS", table_name="existing", col_name="id", data_type="BIGINT")]
+        )
+        existing, expected, *_ = ConfluentAdapter._partition_drift_catalog(
+            catalog, "existing", None
+        )
+        assert existing == {"id": "BIGINT"}
+        assert expected == {}
 
 
 # ---------------------------------------------------------------------------
@@ -946,3 +957,123 @@ class TestCheckSchemaDriftOrchestrator:
                 enforce="columns",
             )
         assert "column added: 'extra'" in str(excinfo.value)
+
+    def test_expected_columns_replace_temp_rows(self):
+        """Dry-run path: expected columns arrive resolved, the catalog holds only the existing
+        table, and drift is still detected."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                catalog,
+                expected_with={},
+                expected_columns={"id": "BIGINT", "extra": "VARCHAR(2147483647)"},
+            )
+        assert "column added: 'extra'" in str(excinfo.value)
+
+    def test_expected_columns_no_drift_returns_silently(self):
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="price",
+                    data_type="DECIMAL(10, 2)",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            None,
+            catalog,
+            expected_with={},
+            expected_columns={"price": "DECIMAL(10, 2)"},
+        )
+
+    def test_expected_columns_with_enforce_columns(self):
+        """The streaming restart path under on_schema_drift='ignore' dry-runs too:
+        options/distribution drift is ignored, column drift still raises."""
+        catalog = _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                _row(
+                    section="TABLE_OPTIONS",
+                    table_name=self.EXISTING_ID,
+                    option_key="changelog.mode",
+                    option_value="upsert",
+                ),
+            ]
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            None,
+            catalog,
+            expected_with={"changelog.mode": "append"},
+            enforce="columns",
+            expected_columns={"id": "BIGINT"},
+        )
+        with pytest.raises(CompilationError, match="column added: 'extra'"):
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                catalog,
+                expected_with={"changelog.mode": "append"},
+                enforce="columns",
+                expected_columns={"id": "BIGINT", "extra": "INT"},
+            )
+
+    def test_expected_columns_existing_empty_guard_still_fires(self):
+        """The existing-side propagation-lag guard applies on the dry-run path too."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtDatabaseError, match="existing schema"):
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                _make_catalog([]),
+                expected_with={},
+                expected_columns={"id": "BIGINT"},
+            )
+
+    def test_empty_expected_columns_is_a_bug_not_lag(self):
+        """The resolver returns None (fall back), never {}. An empty dict must not reach
+        the temp-table guard's "metadata propagation lag, retry" advice."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtRuntimeError, match="empty expected_columns"):
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                _make_catalog([]),
+                expected_with={},
+                expected_columns={},
+            )
+
+    @pytest.mark.parametrize("both", [True, False])
+    def test_requires_exactly_one_expected_source(self, both):
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtRuntimeError, match="exactly one") as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID) if both else None,
+                _make_catalog([]),
+                expected_with={},
+                expected_columns={"id": "BIGINT"} if both else None,
+            )
+        assert "dbt-confluent" in str(excinfo.value)

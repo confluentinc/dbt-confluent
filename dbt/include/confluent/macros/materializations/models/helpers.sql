@@ -248,10 +248,17 @@ WITH (
      raise a compilation error on any drift (columns, types, WITH options,
      or DISTRIBUTED BY).
 
-     Round-trips to Confluent are expensive, so we batch every metadata
-     read into a single UNION ALL against INFORMATION_SCHEMA.  The temp
-     table is the only way to get a normalized expected schema without
-     parsing types ourselves.
+     Expected columns (GH-118):
+       - SELECT models (table, streaming_table): a `sql.dry-run` of the
+         model's SELECT, rendered to FULL_DATA_TYPE by
+         adapter.get_expected_columns_from_dry_run. Creates nothing.
+       - Fallback: a short-lived temp table read back from
+         INFORMATION_SCHEMA (_create_schema_check_temp_table). Used for
+         streaming_source (a DDL dry-run reports no schema), and for a
+         SELECT the resolver can't render exactly (it returns none).
+
+     Round-trips to Confluent are expensive, so every metadata read is
+     batched into a single UNION ALL against INFORMATION_SCHEMA.
 
      has_select_query: true if the model SQL is a SELECT (table,
                        streaming_table); false if it's column definitions
@@ -262,39 +269,49 @@ WITH (
               safe without rejecting benign options/distribution drift. #}
 
   {% set temp_table_name = adapter.generate_schema_check_temp_name(this.identifier) %}
-  {% set temp_relation = adapter.Relation.create(
-    database=this.database,
-    schema=this.schema,
-    identifier=temp_table_name,
-    type='table'
-  ) %}
-
-  {# Cleanup happens in the adapter's post_model_hook (see defer_drop below),
-     which runs even when this macro raises. This preemptive drop remains as
-     the backstop for the cases the hook can't cover: a hard-killed process,
-     or a cleanup drop that failed for the same reason the run died. The name
-     is deterministic per model, so any leftover is reclaimed here. #}
-  {% call statement('drop_leaked_temp_table', hidden=True) %}
-    DROP TABLE IF EXISTS {{ temp_relation }}
-  {% endcall %}
-
-  {# Registered before the CREATE: the deferred drop is IF EXISTS, so it
-     covers a half-created table (CTAS is not atomic) at no cost when the
-     CREATE never ran. #}
-  {% do adapter.defer_drop(temp_relation) %}
-
+  {% set expected_columns = none %}
   {% if has_select_query %}
-    {% call statement('create_temp_table', hidden=True) %}
-      CREATE TABLE {{ temp_relation }} AS
-      SELECT * FROM (
-        {{ sql }}
-      ) WHERE FALSE
-    {% endcall %}
+    {# Dry-run the SELECT in the mode that evaluates it when the model is
+       built: `table` creates its CTAS in snapshot_ddl (table.sql), so its
+       SELECT runs as a snapshot; streaming_table's INSERT runs in
+       streaming_query (streaming_table.sql). This also keeps a DDL-mode
+       profile (snapshot_ddl, streaming_ddl) away from the dry-run, which was
+       only probed in the two query modes. Any other materialization keeps
+       the temp-table CTAS's old resolution: the model's execution_mode
+       config, else the profile's. The model's statement_properties aren't
+       passed, just as they never were to the temp-table CTAS. #}
+    {% set dry_run_modes = {'table': 'snapshot', 'streaming_table': 'streaming_query'} %}
+    {% set dry_run_mode = dry_run_modes.get(
+      config.get('materialized'), config.get('execution_mode', none)
+    ) %}
+    {% set expected_columns = adapter.get_expected_columns_from_dry_run(
+      existing_relation,
+      sql,
+      execution_mode=dry_run_mode,
+      compute_pool_id=config.get('compute_pool_id', none)
+    ) %}
+  {% endif %}
+
+  {% if expected_columns is none %}
+    {% set temp_relation = adapter.Relation.create(
+      database=this.database,
+      schema=this.schema,
+      identifier=temp_table_name,
+      type='table'
+    ) %}
+    {{ _create_schema_check_temp_table(temp_relation, has_select_query) }}
   {% else %}
-    {# streaming_source: column definitions are the source of truth. #}
-    {% call statement('create_temp_table', hidden=True) %}
-      CREATE TABLE {{ temp_relation }} ( {{ sql }} )
-    {% endcall %}
+    {% set temp_relation = none %}
+    {# The dry-run path creates no temp table, but an earlier run that died
+       hard on the fallback path may have leaked one. dbt populated the
+       relation cache for this schema at the start of the run, so this lookup
+       costs no round-trip; a leak (rare) is dropped by post_model_hook. #}
+    {% set leaked_temp_relation = adapter.get_relation(
+      this.database, this.schema, temp_table_name
+    ) %}
+    {% if leaked_temp_relation is not none %}
+      {% do adapter.defer_drop(leaked_temp_relation) %}
+    {% endif %}
   {% endif %}
 
   {{ get_drift_catalog(existing_relation, temp_relation) }}
@@ -309,8 +326,46 @@ WITH (
     config.get('with', {}),
     config.get('distributed_by'),
     enforce,
-    config.get('connector')
+    config.get('connector'),
+    expected_columns=expected_columns
   ) %}
+{% endmacro %}
+
+
+{% macro _create_schema_check_temp_table(temp_relation, has_select_query) %}
+  {# Temp-table fallback for check_for_schema_drift: create an empty table
+     from the model definition so INFORMATION_SCHEMA reports its canonical
+     column types.
+
+     Cleanup happens in the adapter's post_model_hook (see defer_drop below),
+     which runs even when the drift check raises. This preemptive drop remains
+     as the backstop for the cases the hook can't cover: a hard-killed process,
+     or a cleanup drop that failed for the same reason the run died. The name
+     is deterministic per model, so any leftover is reclaimed here. #}
+  {% call statement('drop_leaked_temp_table', hidden=True) %}
+    DROP TABLE IF EXISTS {{ temp_relation }}
+  {% endcall %}
+
+  {# Registered before the CREATE: the deferred drop is IF EXISTS, so it
+     covers a half-created table (CTAS is not atomic) at no cost when the
+     CREATE never ran. #}
+  {% do adapter.defer_drop(temp_relation) %}
+
+  {% if has_select_query %}
+    {# Keep this wrapper in sync with get_expected_columns_from_dry_run
+       (impl.py): both check the same SELECT. #}
+    {% call statement('create_temp_table', hidden=True) %}
+      CREATE TABLE {{ temp_relation }} AS
+      SELECT * FROM (
+        {{ sql }}
+      ) WHERE FALSE
+    {% endcall %}
+  {% else %}
+    {# streaming_source: column definitions are the source of truth. #}
+    {% call statement('create_temp_table', hidden=True) %}
+      CREATE TABLE {{ temp_relation }} ( {{ sql }} )
+    {% endcall %}
+  {% endif %}
 {% endmacro %}
 
 
@@ -338,8 +393,11 @@ WITH (
 {%- endmacro %}
 
 
-{% macro get_drift_catalog(existing_relation, temp_relation) %}
-  {# Fetch every piece of metadata the drift check needs in one query.
+{% macro get_drift_catalog(existing_relation, temp_relation=none) %}
+  {# Fetch every piece of metadata the drift check needs in one query. The
+     COLUMNS section always covers the existing relation, plus the temp
+     relation when the temp-table fallback is in use (temp_relation is not
+     none).
      The result is a sparse table with a `section` discriminator and a
      `table_name` discriminator (existing vs temp for the COLUMNS section).
      Confluent's INFORMATION_SCHEMA only supports the primitives we use here:
@@ -368,8 +426,10 @@ WITH (
      dicts before any drift check runs. #}
   {% call statement('get_drift_catalog', fetch_result=True, hidden=True) %}
 {{ _drift_catalog_columns_select(existing_relation, existing_relation.identifier) }}
+{%- if temp_relation is not none %}
     UNION ALL
 {{ _drift_catalog_columns_select(existing_relation, temp_relation.identifier) }}
+{%- endif %}
     UNION ALL
     SELECT
       'TABLES' AS section,

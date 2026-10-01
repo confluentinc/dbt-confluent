@@ -3,6 +3,7 @@
 Underscore-prefixed so pytest does not treat it as a test module.
 """
 
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -304,35 +305,85 @@ def sweep_stale_test_relations(project, pattern, current_tag, min_age=SWEEP_MIN_
 
 
 def capture_submitted_statement_properties(monkeypatch):
-    """Patch ConfluentConnectionManager.add_query to record every submitted
-    statement's properties, keyed by its (sanitized) statement name, as the
-    caller's `dbt run` executes.
+    """Patch ConfluentConnectionManager.add_query to record every statement
+    the caller's `dbt run` submits, in order, as a dict with keys `name` (the
+    sanitized statement name), `sql` (as submitted, query comment included)
+    and `properties` (as the server echoed them back).
 
     Some statements are reaped (deleted server-side) the instant they
     complete -- e.g. materialized_table's DDL, submitted under a per-run name
     and deleted by the driver as soon as the CREATE OR ALTER finishes (see
     materialized_table.sql) -- so a post-hoc get_statement() lookup after
-    `dbt run` returns would always 404. Capturing properties here, at
-    add_query's return (after the statement is submitted but before the
-    caller's execute() wrapper closes the cursor and triggers that deletion),
-    is the only way to observe them.
+    `dbt run` returns would always 404. A `sql.dry-run` statement is never
+    stored at all. Capturing here, at add_query's return (after the statement
+    is submitted but before the caller's execute() wrapper closes the cursor
+    and triggers that deletion), is the only way to observe them. A statement
+    whose submission raises is not recorded.
 
-    Returns the dict that accumulates {statement_name: properties} as the
-    run proceeds; call after `run_dbt` and filter by name substring to find
-    the model(s) of interest.
+    Returns the list that accumulates as the run proceeds; inspect it after
+    `run_dbt`.
     """
     from dbt.adapters.confluent.connections import ConfluentConnectionManager
 
-    captured: dict[str, dict] = {}
+    captured: list[dict] = []
     original_add_query = ConfluentConnectionManager.add_query
 
     def add_query_and_capture(self, sql, *args, **kwargs):
         connection, cursor = original_add_query(self, sql, *args, **kwargs)
-        captured[cursor.statement.name] = dict(cursor.statement.properties)
+        captured.append(
+            {
+                "name": cursor.statement.name,
+                "sql": sql,
+                "properties": dict(cursor.statement.properties),
+            }
+        )
         return connection, cursor
 
     monkeypatch.setattr(ConfluentConnectionManager, "add_query", add_query_and_capture)
     return captured
+
+
+# The target of a CREATE TABLE, after dbt's optional leading query comment.
+_CREATE_TABLE_TARGET = re.compile(
+    r"\s*(?:/\*.*?\*/\s*)?create\s+table\s+(?:if\s+not\s+exists\s+)?(?P<target>[^\s(]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+# The model name in dbt's default query comment, e.g. "node_id": "model.proj.my_table".
+_QUERY_COMMENT_MODEL = re.compile(r'"node_id":\s*"model\.[^".]+\.(?P<model>[^"]+)"')
+
+
+def created_table_identifiers(submitted):
+    """The identifiers of the tables CREATEd by `submitted` (from
+    capture_submitted_statement_properties), parsed from each statement's
+    CREATE TABLE target rather than matched as a substring."""
+    identifiers = set()
+    for statement in submitted:
+        match = _CREATE_TABLE_TARGET.match(statement["sql"])
+        if match:
+            identifiers.add(match.group("target").split(".")[-1].strip("`"))
+    return identifiers
+
+
+def drift_temp_tables_created(submitted, adapter, *model_names):
+    """The subset of `model_names` whose drift-check temp table was CREATEd."""
+    created = created_table_identifiers(submitted)
+    return {
+        name for name in model_names if adapter.generate_schema_check_temp_name(name) in created
+    }
+
+
+def dry_run_models(submitted):
+    """The models whose drift check submitted a `sql.dry-run`, read from the
+    node_id in dbt's query comment (the dry-run's own statement name is a
+    UUID). A dry-run without a node_id is reported as "<no node_id>", so an
+    assertion on the set fails loudly."""
+    models = set()
+    for statement in submitted:
+        if str(statement["properties"].get("sql.dry-run", "")).lower() != "true":
+            continue
+        match = _QUERY_COMMENT_MODEL.search(statement["sql"])
+        models.add(match.group("model") if match else "<no node_id>")
+    return models
 
 
 def sweep_stale_test_statements(

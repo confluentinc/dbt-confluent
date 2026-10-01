@@ -75,6 +75,12 @@ Repository = "https://github.com/confluentinc/dbt-confluent"
 [project.entry-points."dbt.adapters"]
 confluent = "dbt.adapters.confluent"
 
+[tool.uv.sources]
+# Pinned to the unreleased confluent-sql sql.dry-run fix (confluentinc/confluent-sql#245) that the
+# schema drift check relies on (issue #118), so CI can resolve it. Move off this branch commit
+# before merging: to the confluent-sql main commit with the fix, or to the release that ships it.
+confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "0841e04d9280675a3530f8c93af6d5c1c83e3b3d" }
+
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
 addopts = "-v --color=yes"
