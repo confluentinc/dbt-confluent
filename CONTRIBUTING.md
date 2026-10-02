@@ -6,6 +6,7 @@
 git clone https://github.com/confluentinc/dbt-confluent
 cd dbt-confluent
 uv sync --dev
+uv run poe install-git-hooks
 ```
 
 See the [README](README.md) for code quality checks and test instructions.

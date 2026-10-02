@@ -152,6 +152,7 @@ See [Materializations](MATERIALIZATIONS.md) for the full list and details.
 git clone https://github.com/confluentinc/dbt-confluent
 cd dbt-confluent
 uv sync --dev
+uv run poe install-git-hooks
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for changelog and contribution guidelines.
