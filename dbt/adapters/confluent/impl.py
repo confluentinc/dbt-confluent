@@ -954,24 +954,17 @@ class ConfluentAdapter(SQLAdapter):
         Splitting it client-side trades one round-trip for a bit of Python.
 
         The columns come from exactly one of:
-            dry_run_columns  — from `get_columns_from_dry_run` (SELECT models):
-                               the model's SELECT (expected) and the existing
-                               table (existing), each dry-run. Its expected
-                               map must be non-empty.
-                               They're compared as Flink types, after
-                               `comparable_type` (no top-level nullability), the
-                               model's after `stored_type` (as an Avro table
-                               stores it). drift_catalog then holds only the
-                               existing relation, for options and
-                               distribution; get_columns_from_dry_run has
-                               already run the materialized-table and
-                               metadata-lag guards on it, which pass again
-                               here. Pass temp_relation=None.
-            temp_relation    — the temp-table fallback (streaming_source, or a
-                               SELECT the dry-runs can't stand in for). Its
-                               columns are read from drift_catalog and compared
-                               with the existing table's as FULL_DATA_TYPE
-                               strings.
+            dry_run_columns  — from `get_columns_from_dry_run` (SELECT models): the model's SELECT
+                               (expected) and the existing table (existing), each dry-run. Its
+                               expected map must be non-empty. They're compared as Flink types,
+                               after `comparable_type` (no top-level nullability), the model's
+                               after `stored_type` (as an Avro table stores it). drift_catalog
+                               then holds only the existing relation, for options and distribution;
+                               get_columns_from_dry_run has already run the materialized-table and
+                               metadata-lag guards on it, which pass again here.
+            temp_relation    — the temp-table fallback (streaming_source, or a SELECT the dry-runs
+                               can't stand in for). Its columns are read from drift_catalog and
+                               compared with the existing table's as FULL_DATA_TYPE strings.
 
         Each helper returns a list of one-line violation strings; we collect
         them all and raise a single error so the user sees every drift in one
@@ -979,10 +972,9 @@ class ConfluentAdapter(SQLAdapter):
 
         `enforce` controls which concerns can produce violations:
             "all"     — columns + options + distribution (default).
-            "columns" — only column drift raises. Used by the streaming
-                        restart path under `on_schema_drift='ignore'`, where
-                        options/distribution drift is fine but a column
-                        mismatch would cause Flink to reject the INSERT.
+            "columns" — only column drift raises. Used by the streaming restart path under
+                        `on_schema_drift='ignore'`, where options/distribution drift is fine but
+                        a column mismatch would cause Flink to reject the INSERT.
 
         `expected_connector` is streaming_source's mandatory `connector`
         config. The materialization renders it into the DDL's WITH clause
@@ -1005,7 +997,7 @@ class ConfluentAdapter(SQLAdapter):
                 "map, when it can't resolve them. Please report it at "
                 "https://github.com/confluentinc/dbt-confluent/issues."
             )
-        temp_identifier: str | None = None
+        temp_identifier = None
         if temp_relation is not None:
             assert temp_relation.identifier is not None
             temp_identifier = temp_relation.identifier
@@ -1021,15 +1013,14 @@ class ConfluentAdapter(SQLAdapter):
 
         self._raise_if_materialized(existing_relation, existing_is_materialized)
 
-        # Temp-table path only (dry_run_columns.expected is checked non-empty
-        # above): an empty catalog_expected_columns means the
-        # drift-check temp table came back with zero columns from
-        # INFORMATION_SCHEMA. The temp table was just
-        # created from the model's column definitions / select query, so it has
-        # columns; an empty result almost always means Confluent Cloud's
-        # INFORMATION_SCHEMA hasn't yet propagated the freshly-created table.
-        # Surface this as a retriable database error rather than letting it
-        # cascade into a false "drift detected" message.
+        # Temp-table path only (dry_run_columns.expected is checked non-empty above):
+        # an empty catalog_expected_columns means the drift-check temp table came back
+        # with zero columns from INFORMATION_SCHEMA. The temp table was just created
+        # from the model's column definitions / select query, so it has columns; an
+        # empty result almost always means Confluent Cloud's INFORMATION_SCHEMA hasn't
+        # yet propagated the freshly-created table. Surface this as a retriable
+        # database error rather than letting it cascade into a false "drift detected"
+        # message.
         if dry_run_columns is None and not catalog_expected_columns:
             raise DbtDatabaseError(
                 f"Drift check could not introspect the expected schema for "
@@ -1156,7 +1147,7 @@ class ConfluentAdapter(SQLAdapter):
     ) -> dict[str, ColumnTypeDefinition] | None:
         """Dry-run `sql` and return its result column types keyed by name, or None when the
         dry-run reports no result schema or a duplicate column name. `what` names the dry-run
-        in the debug line logged for None."""
+        in the debug line logged when its None."""
         schema = self.connections.dry_run_schema(
             sql, execution_mode=execution_mode, compute_pool_id=compute_pool_id
         )
@@ -1183,10 +1174,9 @@ class ConfluentAdapter(SQLAdapter):
     ) -> None:
         """Raise CompilationError if the drift catalog flags the existing relation as a Flink
         materialized table."""
-        # A materialized table can't be managed by the drop-and-recreate
-        # materializations at all — a skip would silently leave Flink
-        # maintaining the old defining query, and a streaming restart would
-        # submit an INSERT against it.
+        # A materialized table can't be managed by the drop-and-recreate materializations at all —
+        # a skip would silently leave Flink maintaining the old defining query, and a streaming
+        # restart would submit an INSERT against it.
         if existing_is_materialized:
             raise CompilationError(
                 f"{existing_relation} exists as a Flink materialized table, which "
@@ -1205,12 +1195,10 @@ class ConfluentAdapter(SQLAdapter):
     ) -> None:
         """Raise DbtDatabaseError if the drift catalog has no columns for the existing
         relation."""
-        # The drift check only runs when dbt's cache says the relation exists,
-        # so zero COLUMNS rows for it means a metadata propagation lag, as in
-        # check_schema_drift's temp-side guard (or the table was dropped
-        # externally mid-run). Without this guard the check would report
-        # every model column as "column added" and steer the user toward a
-        # needless --full-refresh.
+        # The drift check only runs when dbt's cache says the relation exists, so zero COLUMNS
+        # rows for it means a metadata propagation lag, as in check_schema_drift's temp-side guard
+        # (or the table was dropped externally mid-run). Without this guard the check would report
+        # every model column as "column added" and steer the user toward a needless --full-refresh.
         if not existing_columns:
             raise DbtDatabaseError(
                 f"Drift check could not introspect the existing schema for "

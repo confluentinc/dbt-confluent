@@ -10,11 +10,9 @@ dry-run schema matches the SELECT it was created from, except for two difference
   before, leaves it out too. Nullability inside an ARRAY, MULTISET, MAP or ROW is kept.
 - String MAP keys and MULTISET elements, which `stored_type` applies to the model's side. An
   Avro or JSON table, the default, stores a CHAR or VARCHAR key or element, at any depth, as
-  VARCHAR(2147483647) NOT NULL, whatever its length or nullability in the query. Any other key
-  or element keeps its type and its own nullability. The temp table the drift check used before
-  stored the model's SELECT the same way, since it had no WITH clause. A Protobuf table keeps
-  the declared type instead, so a string key or element drifts there, as it did with the temp
-  table.
+  VARCHAR(2147483647) NOT NULL, regardless of its length/nullability in the query. Any other key
+  or element keeps its type and its own nullability. A Protobuf table keeps the declared type
+  instead, so a string key or element drifts there, as it did with the temp table.
 
 `display_type` spells a type for drift messages the way FULL_DATA_TYPE does, so messages read
 the same on the dry-run and temp-table paths.
@@ -27,8 +25,7 @@ from confluent_sql.types import ColumnTypeDefinition
 # VARCHAR(2147483647) is STRING.
 _MAX_LENGTH = 2147483647
 
-# MAP key and MULTISET element types an Avro or JSON table stores as
-# VARCHAR(2147483647) NOT NULL.
+# MAP key and MULTISET element types an Avro or JSON table stores as VARCHAR(2147483647) NOT NULL.
 _STRING_KEY_TYPES = frozenset({"CHAR", "VARCHAR"})
 
 # Dry-run type name -> (FULL_DATA_TYPE name, suffix after the parameters). Any other name is
@@ -92,9 +89,9 @@ def _optional(column_type: ColumnTypeDefinition | None) -> ColumnTypeDefinition 
 
 
 def display_type(column_type: ColumnTypeDefinition) -> str:
-    """Spell a top-level column type for a drift message, the way FULL_DATA_TYPE does.
+    """Spell a top-level column type for drift messages only, the way FULL_DATA_TYPE does.
 
-    For messages only: drift is decided by comparing `comparable_type` results, never these
+    Drift is only decided by comparing `comparable_type` results, never these
     strings. A type no table stores (INTERVAL, VARIANT, anything newer) is spelled from its name
     and whichever of length, precision and scale it has.
     """
