@@ -755,7 +755,7 @@ class TestDistributedByDefaultIsNotChecked(ConfluentFixtures):
 # an unchanged re-run must SKIP on the dry-run path. The literals and casts are NOT NULL in the
 # query (top-level, ignored). The string MAP keys (CHAR(1), VARCHAR(5), and a nullable CHAR(1)
 # from nullif) are all stored as VARCHAR(2147483647) NOT NULL (GH-118 probe runs 995e2382 and
-# 6b109689), which dry_run_types.comparable_type applies; the INT key keeps its type.
+# 6b109689), which dry_run_types.stored_type applies; the INT key keeps its type.
 DRY_RUN_TYPES_MODEL = """
 {{ config(materialized='table') }}
 select
@@ -777,7 +777,7 @@ select
   cast(row(1, 'b') as row<`a` int, `b` string>) as named_row
 """
 
-# A CTE (decision B): the dry-run takes the SELECT as written, with no wrapper.
+# A CTE: the dry-run takes the SELECT as written, with no wrapper.
 DRY_RUN_CTE_MODEL = """
 {{ config(materialized='table') }}
 with base as (
@@ -835,8 +835,8 @@ class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
         assert len(results) == 3
         for r in results:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-        # Every model ran both dry-runs; forced_fallback's columns were then declined, so only
-        # it fell back to a temp table.
+        # Every model dry-ran (a unit test pins both dry-runs); forced_fallback's columns were
+        # then declined, so only it fell back to a temp table.
         assert dry_run_models(submitted) == {"dry_run_types", "dry_run_cte", "forced_fallback"}
         assert drift_temp_tables_created(
             submitted, project.adapter, "dry_run_types", "dry_run_cte", "forced_fallback"
@@ -846,7 +846,7 @@ class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
         )
 
 
-# -- A streaming_table built from yml columns (decisions A and C) --
+# -- A streaming_table built from yml columns --
 
 YML_STREAMING_TABLE_MODEL = """
 {{ config(
@@ -896,11 +896,11 @@ models:
 """
 
 
-class TestYmlStreamingTableNullabilityAndA3(ConfluentFixtures):
+class TestYmlStreamingTableNullabilityAndTypes(ConfluentFixtures):
     """A streaming_table whose DDL comes from yml columns: the table's top-level nullability
     differs from the SELECT's (price is nullable in the source but not_null in yml; qty is NOT
     NULL in the query but nullable in yml), which must not drift. A SELECT type that differs
-    from the yml type must drift (A3). No nested NOT NULL here: dbt-confluent rejects NOT NULL
+    from the yml type must drift. No nested NOT NULL here: dbt-confluent rejects NOT NULL
     anywhere in a yml data_type (validate_column_data_types), so TestNestedNullabilityDrifts
     covers it with a table model."""
 
@@ -942,7 +942,7 @@ class TestYmlStreamingTableNullabilityAndA3(ConfluentFixtures):
             results = run_dbt(["run"], expect_pass=False)
             assert_drift_error(results, "yml_streaming_table")
             message = get_result_by_name(results, "yml_streaming_table").message
-            # A3: the INSERT would accept DECIMAL(10, 2) into the yml's DECIMAL(12, 2), but the
+            # The INSERT would accept DECIMAL(10, 2) into the yml's DECIMAL(12, 2), but the
             # drift check compares the SELECT with the table, as it did before GH-118. Whether
             # yml-built tables should compare against the yml types instead is a follow-up to
             # issue #118, not this change.

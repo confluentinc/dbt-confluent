@@ -1088,8 +1088,8 @@ class ConfluentAdapter(SQLAdapter):
         Dry-runs the model's SELECT, then `SELECT * FROM <relation>`, in the same mode and on
         the same compute pool, and returns both result schemas' column types, keyed by name in
         query order. `check_for_schema_drift` hands the result to `check_schema_drift`, as
-        `dry_run_columns`, in place of creating and introspecting a temp table. Both sides are Flink's own types, so nothing
-        has to be rendered to INFORMATION_SCHEMA spelling.
+        `dry_run_columns`, in place of creating and introspecting a temp table. Both sides are
+        Flink's own types, so nothing has to be rendered to INFORMATION_SCHEMA spelling.
 
         drift_catalog is `get_drift_catalog`'s result for the existing relation alone. Before
         any dry-run, it's checked the way `check_schema_drift` checks it, so a materialized
