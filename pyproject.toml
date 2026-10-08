@@ -76,10 +76,13 @@ Repository = "https://github.com/confluentinc/dbt-confluent"
 confluent = "dbt.adapters.confluent"
 
 [tool.uv.sources]
-# Pinned to the unreleased confluent-sql sql.dry-run fix (confluentinc/confluent-sql#245) that the
-# schema drift check relies on (issue #118), so CI can resolve it. Move off this branch commit
-# before merging: to the confluent-sql main commit with the fix, or to the release that ships it.
-confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "0841e04d9280675a3530f8c93af6d5c1c83e3b3d" }
+# Pinned to the confluent-sql main commit that adds Connection.dry_run_statement
+# (confluentinc/confluent-sql#246), which the schema drift check needs (issue #118). No release
+# has it yet. [tool.uv.sources] is uv-only: a wheel built from this branch still requires
+# `confluent-sql~=0.6.0` (dependencies above), which excludes 0.7.0, and no 0.6.x release has
+# dry_run_statement. Before the next dbt-confluent release: cut confluent-sql 0.7.0, change the
+# dependency above to `confluent-sql>=0.7.0,<0.8`, and delete this source.
+confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "15bbb927da91f262e1379fdfdcb9cd35568d9a26" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]

@@ -180,7 +180,7 @@ wheels = [
 [[package]]
 name = "confluent-sql"
 version = "0.7.0rc0"
-source = { git = "https://github.com/confluentinc/confluent-sql?rev=0841e04d9280675a3530f8c93af6d5c1c83e3b3d#0841e04d9280675a3530f8c93af6d5c1c83e3b3d" }
+source = { git = "https://github.com/confluentinc/confluent-sql?rev=15bbb927da91f262e1379fdfdcb9cd35568d9a26#15bbb927da91f262e1379fdfdcb9cd35568d9a26" }
 dependencies = [
     { name = "httpx" },
 ]
@@ -350,7 +350,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "agate", specifier = "~=1.0" },
-    { name = "confluent-sql", git = "https://github.com/confluentinc/confluent-sql?rev=0841e04d9280675a3530f8c93af6d5c1c83e3b3d" },
+    { name = "confluent-sql", git = "https://github.com/confluentinc/confluent-sql?rev=15bbb927da91f262e1379fdfdcb9cd35568d9a26" },
     { name = "dbt-adapters", specifier = "~=1.16" },
     { name = "dbt-common", specifier = "~=1.12" },
     { name = "dbt-core", specifier = "~=1.11.0" },

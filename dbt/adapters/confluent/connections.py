@@ -2,12 +2,12 @@ import logging
 import time
 import uuid
 from collections.abc import Iterable
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import confluent_sql
-from confluent_sql import HIDDEN_LABEL, Cursor, Property
+from confluent_sql import HIDDEN_LABEL, Cursor
 from confluent_sql.exceptions import (
     ComputePoolExhaustedError,
     OperationalError,
@@ -351,32 +351,59 @@ class ConfluentConnectionManager(SQLConnectionManager):
     ) -> Schema | None:
         """Submit `sql` as a Flink `sql.dry-run` and return the result schema it reports.
 
-        Flink validates and plans a dry-run, then answers in the POST response without storing
-        the statement, so nothing runs and nothing needs deleting. Like `execute`, this applies
-        dbt's query comment, so the submitted SQL names the model, as the temp-table CTAS it
-        replaces did. The statement carries the hidden label, like the adapter's other internal
-        statements.
+        Flink validates and plans a dry-run, then answers in the submission response without
+        storing the statement, so nothing runs and nothing needs deleting. Like `execute`, this
+        applies dbt's query comment, so the submitted SQL names the model, as the temp-table CTAS
+        it replaces did, and it fires the same query events as `add_query`.
 
-        execution_mode and compute_pool_id default to the profile's, as in `add_query`.
+        execution_mode defaults to the profile's, as in `add_query`. compute_pool_id defaults to
+        the connection's.
 
         Returns None when the dry-run reports no result schema (DDL statements).
 
+        The dry-run is submitted once, with no retries: none of add_query's retries apply, and
+        the driver retries nothing.
+
         Raises:
-            DbtDatabaseError: if the dry-run fails (invalid SQL), or the driver can't read its
-                result.
+            DbtDatabaseError: for any confluent-sql error: Flink rejects the statement ("Dry-run
+                failed: <detail>", e.g. invalid SQL), the request fails ("error sending request
+                '<status>' - <detail>", e.g. a 429 or 5xx), or the response isn't final
+                ("non-terminal phase PENDING", e.g. an exhausted compute pool).
+            DbtRuntimeError: for anything else the driver lets escape, such as a response
+                body that isn't JSON.
         """
         sql = self._add_query_comment(sql)
-        dry_run_properties: dict[str, str | int | bool] = {Property.DRY_RUN: "true"}
-        _, cursor = self.add_query(
-            sql,
-            auto_begin=False,
-            execution_mode=execution_mode,
-            hidden=True,
-            compute_pool_id=compute_pool_id,
-            statement_properties=dry_run_properties,
+        connection = self.get_thread_connection()
+        fire_event(
+            ConnectionUsed(
+                conn_type=self.TYPE,
+                conn_name=cast_to_str(connection.name),
+                node_info=get_node_info(),
+            )
         )
-        with closing(cursor), self.exception_handler(sql):
-            return cursor.statement.schema
+        with self.exception_handler(sql):
+            fire_event(
+                SQLQuery(
+                    conn_name=cast_to_str(connection.name),
+                    sql=sql,
+                    node_info=get_node_info(),
+                )
+            )
+            pre = time.perf_counter()
+            mode = ExecutionMode(execution_mode or connection.credentials.execution_mode)
+            statement = self.get_thread_handle().dry_run_statement(
+                sql, mode=mode, compute_pool_id=compute_pool_id
+            )
+            result = AdapterResponse(f"{statement.phase}")
+            fire_event(
+                SQLQueryStatus(
+                    status=str(result),
+                    elapsed=time.perf_counter() - pre,
+                    node_info=get_node_info(),
+                    query_id=result.query_id,
+                )
+            )
+            return statement.schema
 
     def add_query(
         self,

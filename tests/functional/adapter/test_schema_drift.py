@@ -20,21 +20,105 @@ materialization rather than re-verifying every drift kind through a (slow)
 live run — the kind-by-kind discrimination is the unit tests' job.
 """
 
+import re
+
 import pytest
 
 from dbt.adapters.confluent.flink_types import UnverifiedTypeError, render_full_data_type
+from dbt.adapters.confluent.impl import ConfluentAdapter
 from dbt.tests.util import run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
+    SubmittedStatement,
     assert_distribution_drift_error,
     assert_drift_error,
     assert_tables_absent,
     capture_submitted_statement_properties,
-    drift_temp_tables_created,
-    dry_run_models,
     get_result_by_name,
     relation,
 )
 from tests.functional.adapter.fixtures import ClassScopedCleanup, ConfluentFixtures
+
+# -- Reading the drift check's statements from capture_submitted_statement_properties --
+
+# The target of a CREATE TABLE, after dbt's optional leading query comment. The target is
+# optional, so a CREATE TABLE whose target can't be read still matches and fails loudly in
+# created_table_identifiers instead of being skipped. Known limits, none of which the adapter
+# emits today: CREATE OR REPLACE TABLE, CREATE MATERIALIZED TABLE and a leading `--` comment
+# don't match (so they're skipped), and CREATE TABLE AS SELECT reads as target `AS`.
+_CREATE_TABLE_TARGET = re.compile(
+    r"\s*(?:/\*.*?\*/\s*)?create\s+table\s+(?:if\s+not\s+exists\s+)?(?P<target>[^\s(]+)?",
+    re.IGNORECASE | re.DOTALL,
+)
+# The model name in dbt's default query comment, e.g. "node_id": "model.proj.my_table".
+_QUERY_COMMENT_MODEL = re.compile(r'"node_id":\s*"model\.[^".]+\.(?P<model>[^"]+)"')
+
+
+def created_table_identifiers(submitted: list[SubmittedStatement]) -> set[str]:
+    """The identifiers of the tables CREATEd by `submitted` (from
+    capture_submitted_statement_properties), parsed from each statement's
+    CREATE TABLE target rather than matched as a substring. Statements that
+    aren't a CREATE TABLE are skipped.
+
+    Raises:
+        AssertionError: if a CREATE TABLE's target can't be parsed, so an
+            assertion on the result can't pass by missing a table.
+    """
+    identifiers = set()
+    for statement in submitted:
+        match = _CREATE_TABLE_TARGET.match(statement["sql"])
+        if not match:
+            continue
+        target = match.group("target")
+        if target is None:
+            raise AssertionError(f"Can't parse the CREATE TABLE target of: {statement['sql']}")
+        identifiers.add(target.split(".")[-1].strip("`"))
+    return identifiers
+
+
+def drift_temp_tables_created(
+    submitted: list[SubmittedStatement], adapter: ConfluentAdapter, *model_names: str
+) -> set[str]:
+    """The subset of `model_names` whose drift-check temp table was CREATEd."""
+    created = created_table_identifiers(submitted)
+    return {
+        name for name in model_names if adapter.generate_schema_check_temp_name(name) in created
+    }
+
+
+def dry_run_models(submitted: list[SubmittedStatement]) -> set[str]:
+    """The models whose drift check submitted a `sql.dry-run`, read from the
+    node_id in dbt's query comment (the dry-run's own statement name is a
+    UUID). A dry-run without a node_id is reported as "<no node_id>", so an
+    assertion on the set fails loudly."""
+    models = set()
+    for statement in submitted:
+        if not statement["is_dry_run"]:
+            continue
+        match = _QUERY_COMMENT_MODEL.search(statement["sql"])
+        models.add(match.group("model") if match else "<no node_id>")
+    return models
+
+
+def _submitted(sql: str) -> SubmittedStatement:
+    return {"name": "dbt-1", "sql": sql, "properties": {}, "is_dry_run": False}
+
+
+def test_created_table_identifiers_reads_targets_and_skips_the_rest():
+    """Offline: no Confluent connection."""
+    submitted = [
+        _submitted('/* {"node_id": "model.proj.a"} */\nCREATE TABLE `env`.`cluster`.`t1` AS ...'),
+        _submitted("create table if not exists t2 (id INT)"),
+        _submitted("DROP TABLE IF EXISTS `env`.`cluster`.`t3`"),
+        _submitted("SELECT * FROM t4"),
+    ]
+    assert created_table_identifiers(submitted) == {"t1", "t2"}
+
+
+def test_created_table_identifiers_rejects_an_unparseable_target():
+    """Offline: a CREATE TABLE the regex can't read must fail, not be skipped."""
+    with pytest.raises(AssertionError, match="Can't parse the CREATE TABLE target"):
+        created_table_identifiers([_submitted("CREATE TABLE (id INT)")])
+
 
 # -- Shared faker source feeding the table / streaming_table models --
 #
