@@ -74,17 +74,18 @@ class TestStoredType:
     def test_other_map_keys_keep_type_and_nullability(self):
         nullable_int_key = stored_type(_type(_map(INT)))
         assert nullable_int_key.key_type == _type(INT)
-        assert nullable_int_key != stored_type(_type(_map({**INT, "nullable": False})))
+        assert nullable_int_key.key_type != _type({**INT, "nullable": False})
 
     @pytest.mark.parametrize(
         "element",
         [
             {"type": "CHAR", "nullable": False, "length": 1},
+            {"type": "CHAR", "nullable": True, "length": 3},
             {"type": "VARCHAR", "nullable": False, "length": 5},
             {"type": "VARCHAR", "nullable": True, "length": 2147483647},
             STORED_KEY,
         ],
-        ids=["char1", "varchar5", "nullable-string", "stored"],
+        ids=["char1", "nullable-char3", "varchar5", "nullable-string", "stored"],
     )
     def test_string_multiset_elements_compare_as_stored(self, element):
         assert stored_type(_type(_multiset(element))) == stored_type(_type(_multiset(STORED_KEY)))
@@ -110,6 +111,24 @@ class TestStoredType:
     def test_nested_map_keys_compare_as_stored(self, wrap):
         char_keyed = _map({"type": "CHAR", "nullable": False, "length": 1})
         assert stored_type(_type(wrap(char_keyed))) == stored_type(_type(wrap(_map(STORED_KEY))))
+
+    @pytest.mark.parametrize(
+        "wrap",
+        [
+            lambda inner: {"type": "ARRAY", "nullable": True, "element_type": inner},
+            lambda inner: {
+                "type": "ROW",
+                "nullable": True,
+                "fields": [{"name": "m", "field_type": inner}],
+            },
+            lambda inner: _map({**INT, "nullable": False}, inner),
+        ],
+        ids=["array-element", "row-field", "map-value"],
+    )
+    def test_nested_multiset_elements_compare_as_stored(self, wrap):
+        char_elements = _multiset({"type": "CHAR", "nullable": False, "length": 1})
+        stored_elements = _multiset(STORED_KEY)
+        assert stored_type(_type(wrap(char_elements))) == stored_type(_type(wrap(stored_elements)))
 
     def test_top_level_nullability_is_kept(self):
         assert stored_type(_type({"type": "BIGINT", "nullable": False})).nullable is False
@@ -150,6 +169,10 @@ class TestDisplayType:
             ),
             (_map(STORED_KEY), "MAP<VARCHAR(2147483647) NOT NULL, INT>"),
             (
+                _multiset({"type": "VARCHAR", "nullable": False, "length": 5}),
+                "MULTISET<VARCHAR(5) NOT NULL>",
+            ),
+            (
                 {
                     "type": "ROW",
                     "nullable": True,
@@ -177,6 +200,7 @@ class TestDisplayType:
             "time",
             "array-not-null-element",
             "map",
+            "multiset",
             "row-with-description",
             "top-level-not-null-omitted",
             "unstorable-type",
