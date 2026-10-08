@@ -6,9 +6,11 @@ Underscore-prefixed so pytest does not treat it as a test module.
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, TypedDict
 
 import agate
+import pytest
+from confluent_sql import Connection
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
@@ -303,35 +305,72 @@ def sweep_stale_test_relations(project, pattern, current_tag, min_age=SWEEP_MIN_
         drop_any_relation(project, row[0])
 
 
-def capture_submitted_statement_properties(monkeypatch):
-    """Patch ConfluentConnectionManager.add_query to record every submitted
-    statement's properties, keyed by its (sanitized) statement name, as the
-    caller's `dbt run` executes.
+class SubmittedStatement(TypedDict):
+    """A statement recorded by capture_submitted_statement_properties."""
+
+    name: str
+    sql: str
+    properties: dict[str, str | int | bool]
+    is_dry_run: bool
+
+
+def capture_submitted_statement_properties(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[SubmittedStatement]:
+    """Patch ConfluentConnectionManager.add_query and confluent_sql.Connection.dry_run_statement
+    to record every statement the caller's `dbt run` submits, in order, as a dict with keys
+    `name` (the statement name; a dry-run's is `dbapi-<uuid>`), `sql` (as submitted, query
+    comment included), `properties` (as the server echoed them back) and `is_dry_run` (the
+    driver's `Statement.is_dry_run`).
 
     Some statements are reaped (deleted server-side) the instant they
     complete -- e.g. materialized_table's DDL, submitted under a per-run name
     and deleted by the driver as soon as the CREATE OR ALTER finishes (see
     materialized_table.sql) -- so a post-hoc get_statement() lookup after
-    `dbt run` returns would always 404. Capturing properties here, at
-    add_query's return (after the statement is submitted but before the
+    `dbt run` returns would always 404. A `sql.dry-run` statement is never
+    stored at all, and is captured from `dry_run_statement`. Capturing here,
+    at add_query's return (after the statement is submitted but before the
     caller's execute() wrapper closes the cursor and triggers that deletion),
-    is the only way to observe them.
+    is the only way to observe them. A statement whose submission raises is
+    not recorded.
 
-    Returns the dict that accumulates {statement_name: properties} as the
-    run proceeds; call after `run_dbt` and filter by name substring to find
-    the model(s) of interest.
+    Returns the list that accumulates as the run proceeds; inspect it after
+    `run_dbt`.
     """
     from dbt.adapters.confluent.connections import ConfluentConnectionManager
 
-    captured: dict[str, dict] = {}
+    captured: list[SubmittedStatement] = []
     original_add_query = ConfluentConnectionManager.add_query
 
     def add_query_and_capture(self, sql, *args, **kwargs):
         connection, cursor = original_add_query(self, sql, *args, **kwargs)
-        captured[cursor.statement.name] = dict(cursor.statement.properties)
+        captured.append(
+            {
+                "name": cursor.statement.name,
+                "sql": sql,
+                "properties": dict(cursor.statement.properties),
+                "is_dry_run": cursor.statement.is_dry_run,
+            }
+        )
         return connection, cursor
 
     monkeypatch.setattr(ConfluentConnectionManager, "add_query", add_query_and_capture)
+
+    original_dry_run_statement = Connection.dry_run_statement
+
+    def dry_run_statement_and_capture(self, statement_text, *args, **kwargs):
+        statement = original_dry_run_statement(self, statement_text, *args, **kwargs)
+        captured.append(
+            {
+                "name": statement.name,
+                "sql": statement_text,
+                "properties": dict(statement.properties),
+                "is_dry_run": statement.is_dry_run,
+            }
+        )
+        return statement
+
+    monkeypatch.setattr(Connection, "dry_run_statement", dry_run_statement_and_capture)
     return captured
 
 
