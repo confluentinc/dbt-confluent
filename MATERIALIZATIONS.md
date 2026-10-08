@@ -12,6 +12,7 @@
   - [Table](#table)
   - [View](#view)
   - [Ephemeral](#ephemeral)
+  - [Function](#function)
 - [Model Configuration](#model-configuration)
   - [Validation](#validation)
   - [Tableflow](#tableflow)
@@ -72,6 +73,7 @@ The table below summarizes all materializations supported by the dbt-confluent a
 | [`table`](#table) | One-shot `CREATE TABLE ... AS SELECT` (CTAS). | Snapshot |
 | [`view`](#view) | A named query inlined into consumers, not a persisted result. | Inherited |
 | [`ephemeral`](#ephemeral) | Standard dbt CTE fragment. | Inherited |
+| [`function`](#function) | A scalar Java/Python UDF registered from an already-uploaded artifact. | n/a |
 
 _Note: [`view`](#view) & [`ephemeral`](#ephemeral) inherit their execution mode from any job that queries them, since they run inline in those jobs and not as independent Flink statements._
 
@@ -502,6 +504,39 @@ applies: setting `with`, `distributed_by`, `connector`, or any other dbt-conflue
 `ephemeral` model is silently ignored rather than rejected.  If multiple downstream models `ref()`
 the same `ephemeral` model over a Kafka-backed source, each one inlines and re-plans that source
 independently. Flink scans the source once per consumer, not once shared across them.
+
+### Function
+
+A `function` registers a user-defined function (UDF) in Flink from an artifact (a Java JAR or
+Python ZIP) that has already been uploaded to Confluent Cloud, by issuing
+`CREATE FUNCTION ... USING JAR 'confluent-artifact://<artifact_id>'`. dbt orders it ahead of any
+model that calls it via `{{ function('name') }}`.
+
+Declare the function with a `config()` call in a file under `functions/` (dbt requires
+a function to have a body file, so the config call is all it contains):
+
+```sql
+-- functions/is_smaller.sql
+{{ config(
+    language='java',
+    artifact_id='cfa-xxxxxx',
+    class='com.example.my.TShirtSizingIsSmaller',
+) }}
+```
+
+- `language`: `java` or `python`.
+- `artifact_id`: an artifact already uploaded to this environment.
+- `class`: the Java class, or the Python module path of the function.
+- `connections`: optional list of connection names the function may use.
+
+```sql
+-- models/orders_scored.sql
+select {{ function('is_smaller') }}(requested_size, in_stock_size) as needs_upsize
+from {{ ref('orders') }}
+```
+
+Only scalar functions are supported. Flink takes the function's signature from the class itself, so `arguments` and `returns` properties are not used. Flink UDFs are immutable (no `ALTER` or
+`CREATE OR REPLACE`), so this materialization only creates.
 
 ---
 

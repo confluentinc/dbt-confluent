@@ -22,7 +22,7 @@ from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import tableflow
+from . import functions, tableflow
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
@@ -880,6 +880,11 @@ class ConfluentAdapter(SQLAdapter):
                 f"materialization for Confluent Flink.\n"
                 f"Supported config options include: {', '.join(supported)}."
             )
+
+    @available
+    def validate_function_config(self, model_config: Any) -> dict[str, Any]:
+        """Validate a `function` node's config; see `functions.validate_function_config`."""
+        return functions.validate_function_config(model_config)
 
     @available
     def render_start_mode(self, value: object) -> str:
