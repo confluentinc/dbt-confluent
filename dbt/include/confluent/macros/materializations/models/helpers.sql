@@ -248,17 +248,24 @@ WITH (
      raise a compilation error on any drift (columns, types, WITH options,
      or DISTRIBUTED BY).
 
-     Expected columns (GH-118):
-       - SELECT models (table, streaming_table): a `sql.dry-run` of the
-         model's SELECT, rendered to FULL_DATA_TYPE by
-         adapter.get_expected_columns_from_dry_run. Creates nothing.
+     Columns (GH-118):
+       - SELECT models (table, streaming_table): two `sql.dry-run`s, of the
+         model's SELECT and of `SELECT * FROM` the existing table, by
+         adapter.get_columns_from_dry_run; check_schema_drift compares the
+         two as Flink types. Creates nothing. The catalog query runs first,
+         for the existing table's WITH options and distribution, and so a
+         materialized or unreadable existing table gets its dedicated error
+         before any dry-run.
        - Fallback: a short-lived temp table read back from
          INFORMATION_SCHEMA (_create_schema_check_temp_table). Used for
-         streaming_source (a DDL dry-run reports no schema), and for a
-         SELECT the resolver can't render exactly (it returns none).
+         streaming_source (a DDL dry-run reports no schema), and when a
+         dry-run reports no result schema or duplicate column names (the
+         resolver returns none).
 
      Round-trips to Confluent are expensive, so every metadata read is
-     batched into a single UNION ALL against INFORMATION_SCHEMA.
+     batched into a single UNION ALL against INFORMATION_SCHEMA. A SELECT
+     model that falls back runs it twice: once before the dry-runs, and
+     again to cover the temp table.
 
      has_select_query: true if the model SQL is a SELECT (table,
                        streaming_table); false if it's column definitions
@@ -269,9 +276,12 @@ WITH (
               safe without rejecting benign options/distribution drift. #}
 
   {% set temp_table_name = adapter.generate_schema_check_temp_name(this.identifier) %}
-  {% set expected_columns = none %}
+  {% set temp_relation = none %}
+  {% set dry_run_columns = none %}
   {% if has_select_query %}
-    {# Dry-run the SELECT in the mode that evaluates it when the model is
+    {{ get_drift_catalog(existing_relation, none) }}
+    {% set drift_catalog = load_result('get_drift_catalog').table %}
+    {# Dry-run in the mode that evaluates the SELECT when the model is
        built: `table` creates its CTAS in snapshot_ddl (table.sql), so its
        SELECT runs as a snapshot; streaming_table's INSERT runs in
        streaming_query (streaming_table.sql). This also keeps a DDL-mode
@@ -284,15 +294,16 @@ WITH (
     {% set dry_run_mode = dry_run_modes.get(
       config.get('materialized'), config.get('execution_mode', none)
     ) %}
-    {% set expected_columns = adapter.get_expected_columns_from_dry_run(
+    {% set dry_run_columns = adapter.get_columns_from_dry_run(
       existing_relation,
+      drift_catalog,
       sql,
       execution_mode=dry_run_mode,
       compute_pool_id=config.get('compute_pool_id', none)
     ) %}
   {% endif %}
 
-  {% if expected_columns is none %}
+  {% if dry_run_columns is none %}
     {% set temp_relation = adapter.Relation.create(
       database=this.database,
       schema=this.schema,
@@ -300,8 +311,11 @@ WITH (
       type='table'
     ) %}
     {{ _create_schema_check_temp_table(temp_relation, has_select_query) }}
+    {# Read the catalog (again, for a SELECT model) so it covers the temp
+       table's columns too. #}
+    {{ get_drift_catalog(existing_relation, temp_relation) }}
+    {% set drift_catalog = load_result('get_drift_catalog').table %}
   {% else %}
-    {% set temp_relation = none %}
     {# The dry-run path creates no temp table, but an earlier run that died
        hard on the fallback path may have leaked one. dbt populated the
        relation cache for this schema at the start of the run, so this lookup
@@ -314,20 +328,18 @@ WITH (
     {% endif %}
   {% endif %}
 
-  {{ get_drift_catalog(existing_relation, temp_relation) }}
-
   {# `connector` (streaming_source) is rendered into the DDL's WITH clause
      but configured outside `with` — pass it along so a connector change is
      caught as options drift. None for the other materializations. #}
   {% do adapter.check_schema_drift(
     existing_relation,
     temp_relation,
-    load_result('get_drift_catalog').table,
+    drift_catalog,
     config.get('with', {}),
     config.get('distributed_by'),
     enforce,
     config.get('connector'),
-    expected_columns=expected_columns
+    dry_run_columns=dry_run_columns
   ) %}
 {% endmacro %}
 
@@ -352,8 +364,6 @@ WITH (
   {% do adapter.defer_drop(temp_relation) %}
 
   {% if has_select_query %}
-    {# Keep this wrapper in sync with get_expected_columns_from_dry_run
-       (impl.py): both check the same SELECT. #}
     {% call statement('create_temp_table', hidden=True) %}
       CREATE TABLE {{ temp_relation }} AS
       SELECT * FROM (

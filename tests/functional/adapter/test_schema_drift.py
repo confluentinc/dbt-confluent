@@ -24,7 +24,6 @@ import re
 
 import pytest
 
-from dbt.adapters.confluent.flink_types import UnverifiedTypeError, render_full_data_type
 from dbt.adapters.confluent.impl import ConfluentAdapter
 from dbt.tests.util import run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
@@ -300,9 +299,8 @@ class TestSchemaDriftDetection(ConfluentFixtures):
         assert_tables_absent(project, *self._drift_temp_tables(project))
 
     def test_empty_run_skips_existing_streaming_table(self, project, monkeypatch):
-        """`dbt run --empty` wraps each ref in a `where false limit 0` subquery
-        before the dry-run wraps the whole SELECT again; the columns, and so
-        the SKIP, must not change."""
+        """`dbt run --empty` wraps each ref in a `where false limit 0` subquery;
+        the dry-run's columns, and so the SKIP, must not change."""
         submitted = capture_submitted_statement_properties(monkeypatch)
         results = run_dbt(["run", "--empty", "--select", "my_streaming_table"])
         assert [r.message for r in results] == ["SKIP"]
@@ -312,11 +310,10 @@ class TestSchemaDriftDetection(ConfluentFixtures):
     def test_column_drift_detected(self, project):
         """Every materialization drifted at once, asserted in a single run.
 
-        A `dbt run` drift-checks *every* model in the project (each pays a
-        dry-run or a temp-table create, plus a catalog query), so the per-run
-        cost is paid whether one model drifts or all three. We therefore
-        mutate all three and assert each raises, rather than spending three
-        separate runs for no extra coverage — the per-kind detection logic is
+        A `dbt run` drift-checks *every* model in the project (each pays two dry-runs or a
+        temp-table create, plus a catalog query), so the per-run cost is paid whether one model
+        drifts or all three. We therefore mutate all three and assert each raises, rather than
+        spending three separate runs for no extra coverage — the per-kind detection logic is
         unit-tested.
         """
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
@@ -751,13 +748,14 @@ class TestDistributedByDefaultIsNotChecked(ConfluentFixtures):
 
 
 # ---------------------------------------------------------------------------
-# GH-118: dry-run renderer against real FULL_DATA_TYPE output
+# GH-118: the dry-run pair against real tables
 # ---------------------------------------------------------------------------
 
-# Only shapes the renderer accepts AND whose CTAS-stored FULL_DATA_TYPE the
-# GH-118 probes observed (runs 995e2382, 0484bde2, 6b109689): an unchanged
-# re-run must SKIP on the dry-run path. The CHAR(1) key of map['a', 1] is
-# stored as VARCHAR(2147483647) NOT NULL, and the INT key keeps its type.
+# Shapes whose query type differs from the stored type only in what the drift check ignores:
+# an unchanged re-run must SKIP on the dry-run path. The literals and casts are NOT NULL in the
+# query (top-level, ignored). The string MAP keys (CHAR(1), VARCHAR(5), and a nullable CHAR(1)
+# from nullif) are all stored as VARCHAR(2147483647) NOT NULL (GH-118 probe runs 995e2382 and
+# 6b109689), which dry_run_types.comparable_type applies; the INT key keeps its type.
 DRY_RUN_TYPES_MODEL = """
 {{ config(materialized='table') }}
 select
@@ -773,32 +771,42 @@ select
   array['a', 'b'] as char_array,
   map[cast('a' as string), 1] as string_keyed_map,
   map['a', 1] as char_keyed_map,
+  map[cast('a' as varchar(5)), 1] as varchar5_keyed_map,
+  map[nullif('a', 'b'), 1] as nullable_char_keyed_map,
   map[1, cast('v' as string)] as int_keyed_map,
   cast(row(1, 'b') as row<`a` int, `b` string>) as named_row
 """
 
-# The GH-118 probes (runs 0484bde2, 6b109689, 11017c00) found no type a table
-# can store that the renderer declines, so the test forces the fallback:
-# SMALLINT appears only in this model, and the test makes the renderer decline
-# it (see _decline_smallint).
+# A CTE (decision B): the dry-run takes the SELECT as written, with no wrapper.
+DRY_RUN_CTE_MODEL = """
+{{ config(materialized='table') }}
+with base as (
+  select cast(1 as bigint) as id, cast(12.5 as decimal(10, 2)) as price
+)
+select id, price * 2 as price_x2 from base
+"""
+
+# No SELECT a table accepts makes the dry-runs decline (every query has a result schema, and a
+# CTAS rejects duplicate column names), so the test forces the fallback for this model (see
+# _decline_forced_fallback).
 FORCED_FALLBACK_MODEL = """
 {{ config(materialized='table') }}
 select cast(1 as bigint) as id, cast(1 as smallint) as small
 """
 
+_ORIGINAL_GET_COLUMNS_FROM_DRY_RUN = ConfluentAdapter.get_columns_from_dry_run
 
-def _decline_smallint(column_type):
-    """Stand in for a type the renderer doesn't know, such as one added to
-    Flink after this adapter release."""
-    if column_type.type == "SMALLINT":
-        raise UnverifiedTypeError("SMALLINT (declined by the test)")
-    return render_full_data_type(column_type)
+
+def _decline_forced_fallback(self, relation, *args, **kwargs):
+    """Resolve as usual, both dry-runs included, then decline forced_fallback's columns, the
+    way a dry-run with no result schema would."""
+    columns = _ORIGINAL_GET_COLUMNS_FROM_DRY_RUN(self, relation, *args, **kwargs)
+    return None if relation.identifier == "forced_fallback" else columns
 
 
 class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
-    """An unchanged re-run must SKIP on both the dry-run path (NOT NULL,
-    nested and precision-changing expressions) and the fallback path (a column
-    type the renderer is forced to decline)."""
+    """An unchanged re-run must SKIP on both the dry-run path (NOT NULL, nested types, MAP
+    keys, precision-changing expressions, a CTE) and the fallback path (forced)."""
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -808,6 +816,7 @@ class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
     def models(self):
         return {
             "dry_run_types.sql": DRY_RUN_TYPES_MODEL,
+            "dry_run_cte.sql": DRY_RUN_CTE_MODEL,
             "forced_fallback.sql": FORCED_FALLBACK_MODEL,
         }
 
@@ -816,21 +825,184 @@ class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
         run_dbt(["run", "--full-refresh"])
         yield
         project.run_sql("drop table if exists dry_run_types")
+        project.run_sql("drop table if exists dry_run_cte")
         project.run_sql("drop table if exists forced_fallback")
 
     def test_unchanged_rerun_skips_on_both_paths(self, project, monkeypatch):
-        monkeypatch.setattr("dbt.adapters.confluent.impl.render_full_data_type", _decline_smallint)
+        monkeypatch.setattr(ConfluentAdapter, "get_columns_from_dry_run", _decline_forced_fallback)
+        submitted = capture_submitted_statement_properties(monkeypatch)
+        results = run_dbt(["run"])
+        assert len(results) == 3
+        for r in results:
+            assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
+        # Every model ran both dry-runs; forced_fallback's columns were then declined, so only
+        # it fell back to a temp table.
+        assert dry_run_models(submitted) == {"dry_run_types", "dry_run_cte", "forced_fallback"}
+        assert drift_temp_tables_created(
+            submitted, project.adapter, "dry_run_types", "dry_run_cte", "forced_fallback"
+        ) == {"forced_fallback"}
+        assert_tables_absent(
+            project, project.adapter.generate_schema_check_temp_name("forced_fallback")
+        )
+
+
+# -- A streaming_table built from yml columns (decisions A and C) --
+
+YML_STREAMING_TABLE_MODEL = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+) }}
+select
+  order_id,
+  price,
+  cast(1 as int) as qty,
+  cast(price as decimal(12, 2)) as amount
+from {{ ref('source_for_drift') }}
+"""
+
+# amount now differs from the yml type the table was created with.
+YML_STREAMING_TABLE_MODEL_DRIFTED = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+) }}
+select
+  order_id,
+  price,
+  cast(1 as int) as qty,
+  cast(price as decimal(10, 2)) as amount
+from {{ ref('source_for_drift') }}
+"""
+
+YML_STREAMING_TABLE_YML = """
+models:
+  - name: yml_streaming_table
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+          - type: primary_key
+            expression: "not enforced"
+      - name: price
+        data_type: decimal(10,2)
+        constraints:
+          - type: not_null
+      - name: qty
+        data_type: int
+      - name: amount
+        data_type: decimal(12,2)
+"""
+
+
+class TestYmlStreamingTableNullabilityAndA3(ConfluentFixtures):
+    """A streaming_table whose DDL comes from yml columns: the table's top-level nullability
+    differs from the SELECT's (price is nullable in the source but not_null in yml; qty is NOT
+    NULL in the query but nullable in yml), which must not drift. A SELECT type that differs
+    from the yml type must drift (A3). No nested NOT NULL here: dbt-confluent rejects NOT NULL
+    anywhere in a yml data_type (validate_column_data_types), so TestNestedNullabilityDrifts
+    covers it with a table model."""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {"models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "yml_streaming_table.sql": YML_STREAMING_TABLE_MODEL,
+            "models.yml": YML_STREAMING_TABLE_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists yml_streaming_table")
+
+    def test_top_level_nullability_does_not_drift(self, project, monkeypatch):
         submitted = capture_submitted_statement_properties(monkeypatch)
         results = run_dbt(["run"])
         assert len(results) == 2
         for r in results:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
-        # Both models dry-ran; the renderer then declined forced_fallback, so
-        # only it fell back to a temp table.
-        assert dry_run_models(submitted) == {"dry_run_types", "forced_fallback"}
-        assert drift_temp_tables_created(
-            submitted, project.adapter, "dry_run_types", "forced_fallback"
-        ) == {"forced_fallback"}
-        assert_tables_absent(
-            project, project.adapter.generate_schema_check_temp_name("forced_fallback")
+        assert dry_run_models(submitted) == {"yml_streaming_table"}
+        assert not drift_temp_tables_created(submitted, project.adapter, "yml_streaming_table")
+
+    def test_yml_type_mismatch_drifts(self, project):
+        set_model_file(
+            project,
+            relation(project, "yml_streaming_table"),
+            YML_STREAMING_TABLE_MODEL_DRIFTED,
         )
+        try:
+            results = run_dbt(["run"], expect_pass=False)
+            assert_drift_error(results, "yml_streaming_table")
+            message = get_result_by_name(results, "yml_streaming_table").message
+            # A3: the INSERT would accept DECIMAL(10, 2) into the yml's DECIMAL(12, 2), but the
+            # drift check compares the SELECT with the table, as it did before GH-118. Whether
+            # yml-built tables should compare against the yml types instead is a follow-up to
+            # issue #118, not this change.
+            assert (
+                "column type: 'amount' existing='DECIMAL(12, 2)', expected='DECIMAL(10, 2)'"
+            ) in message
+            assert "'price'" not in message
+            assert "'qty'" not in message
+        finally:
+            set_model_file(
+                project, relation(project, "yml_streaming_table"), YML_STREAMING_TABLE_MODEL
+            )
+
+
+# -- Nested nullability, with a table model --
+
+NESTED_NULLABILITY_MODEL = """
+{{ config(materialized='table') }}
+select cast(1 as bigint) as id, cast(array['a'] as array<string not null>) as tags
+"""
+
+# The array's elements are now nullable.
+NESTED_NULLABILITY_MODEL_DRIFTED = """
+{{ config(materialized='table') }}
+select cast(1 as bigint) as id, cast(array['a'] as array<string>) as tags
+"""
+
+
+class TestNestedNullabilityDrifts(ConfluentFixtures):
+    """NOT NULL inside a composite type is part of the stored type, so dropping it must drift,
+    and the message spells both sides the way FULL_DATA_TYPE does."""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {"models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {"nested_nullability.sql": NESTED_NULLABILITY_MODEL}
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists nested_nullability")
+
+    def test_dropping_a_nested_not_null_drifts(self, project):
+        set_model_file(
+            project, relation(project, "nested_nullability"), NESTED_NULLABILITY_MODEL_DRIFTED
+        )
+        try:
+            results = run_dbt(["run"], expect_pass=False)
+            assert_drift_error(results, "nested_nullability")
+            message = get_result_by_name(results, "nested_nullability").message
+            assert (
+                "column type: 'tags' existing='ARRAY<VARCHAR(2147483647) NOT NULL>', "
+                "expected='ARRAY<VARCHAR(2147483647)>'"
+            ) in message
+            assert "'id'" not in message
+        finally:
+            set_model_file(
+                project, relation(project, "nested_nullability"), NESTED_NULLABILITY_MODEL
+            )
