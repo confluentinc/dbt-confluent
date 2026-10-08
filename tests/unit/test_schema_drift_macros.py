@@ -1,4 +1,4 @@
-"""Unit tests for the `check_for_schema_drift` Jinja wiring (GH-118).
+"""Unit tests for the `check_for_schema_drift` Jinja wiring.
 
 Renders the real helpers.sql with plain jinja2 and stand-ins for the dbt context the macro
 touches, then checks which statements it would submit and what it hands the adapter. Driven
@@ -194,7 +194,7 @@ def test_dry_run_path_reclaims_leaked_temp_table():
 
 def test_fallback_path_rereads_the_catalog():
     """The resolver returned None: the temp table is dropped, deferred, created from the
-    wrapped SELECT and read back, as before GH-118, by a second catalog query that covers it.
+    wrapped SELECT and read back, as before, by a second catalog query that covers it.
     check_schema_drift gets that second catalog."""
     harness = _Harness({"materialized": "table"}, dry_run_result=None)
 

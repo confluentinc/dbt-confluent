@@ -1,4 +1,4 @@
-"""Unit tests for ConfluentAdapter.get_columns_from_dry_run (GH-118).
+"""Unit tests for ConfluentAdapter.get_columns_from_dry_run.
 
 The connection manager is mocked, but the schemas it returns are real confluent-sql Schemas
 parsed from dry-run-shaped JSON, so the adapter sees exactly the objects the driver would hand

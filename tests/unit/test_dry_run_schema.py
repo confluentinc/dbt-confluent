@@ -1,4 +1,4 @@
-"""Unit tests for ConfluentConnectionManager.dry_run_schema (GH-118).
+"""Unit tests for ConfluentConnectionManager.dry_run_schema.
 
 The thread connection's handle is an autospec of confluent_sql.Connection, so a call that
 doesn't match the driver's dry_run_statement signature fails here, and nothing is submitted.

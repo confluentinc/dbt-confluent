@@ -1128,8 +1128,7 @@ class TestCheckSchemaDriftOrchestrator:
 
     def test_protobuf_map_keys_drift_as_before(self):
         """A Protobuf table keeps a VARCHAR(5) key, but the model's side is compared as an Avro
-        table stores it, as the temp table did: drift, with the temp table's message (GH-118
-        run b68104c4)."""
+        table stores it, as the temp table did: drift, with the temp table's message."""
         key = {"type": "VARCHAR", "nullable": True, "length": 5}
         column = {
             "type": "MAP",

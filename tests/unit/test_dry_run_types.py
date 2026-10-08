@@ -1,6 +1,6 @@
-"""Unit tests for dry_run_types (GH-118): how the drift check compares and displays dry-run
-column types. Types are parsed from dry-run-shaped JSON by confluent-sql, as the adapter gets
-them. The dry-run JSON spells STRING as VARCHAR(2147483647)."""
+"""Unit tests for dry_run_types: how the drift check compares and displays dry-run column
+types. Types are parsed from dry-run-shaped JSON by confluent-sql, as the adapter gets them.
+The dry-run JSON spells STRING as VARCHAR(2147483647)."""
 
 import copy
 

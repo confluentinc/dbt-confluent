@@ -241,9 +241,9 @@ class TestSchemaDriftDetection(ConfluentFixtures):
     """
 
     # Every model in this project runs a drift check on a non-full-refresh run.
-    # Since GH-118 only the streaming_source models create a temp table (the
-    # SELECT models dry-run instead); any temp table must be gone afterward
-    # (dropped by post_model_hook).
+    # Only the streaming_source models create a temp table (the SELECT models
+    # dry-run instead); any temp table must be gone afterward (dropped by
+    # post_model_hook).
     DRIFT_CHECKED_MODELS = ("source_for_drift", "my_table", "my_streaming_table", "my_source")
 
     def _drift_temp_tables(self, project):
@@ -282,8 +282,8 @@ class TestSchemaDriftDetection(ConfluentFixtures):
         """A second run with no changes must skip every model, not drift.
 
         This is the shared no-drift path for all three materializations. It
-        also pins GH-118's acceptance criterion: the SELECT models resolve
-        their expected columns by dry-run and create no temp table.
+        also pins that the SELECT models resolve their expected columns by
+        dry-run and create no temp table.
         """
         submitted = capture_submitted_statement_properties(monkeypatch)
         results = run_dbt(["run"])
@@ -748,14 +748,14 @@ class TestDistributedByDefaultIsNotChecked(ConfluentFixtures):
 
 
 # ---------------------------------------------------------------------------
-# GH-118: the dry-run pair against real tables
+# The dry-run pair against real tables
 # ---------------------------------------------------------------------------
 
 # Shapes whose query type differs from the stored type only in what the drift check ignores:
 # an unchanged re-run must SKIP on the dry-run path. The literals and casts are NOT NULL in the
 # query (top-level, ignored). The string MAP keys (CHAR(1), VARCHAR(5), and a nullable CHAR(1)
-# from nullif) are all stored as VARCHAR(2147483647) NOT NULL (GH-118 probe runs 995e2382 and
-# 6b109689), which dry_run_types.stored_type applies; the INT key keeps its type.
+# from nullif) are all stored as VARCHAR(2147483647) NOT NULL, which dry_run_types.stored_type
+# applies; the INT key keeps its type.
 DRY_RUN_TYPES_MODEL = """
 {{ config(materialized='table') }}
 select
@@ -943,9 +943,9 @@ class TestYmlStreamingTableNullabilityAndTypes(ConfluentFixtures):
             assert_drift_error(results, "yml_streaming_table")
             message = get_result_by_name(results, "yml_streaming_table").message
             # The INSERT would accept DECIMAL(10, 2) into the yml's DECIMAL(12, 2), but the
-            # drift check compares the SELECT with the table, as it did before GH-118. Whether
-            # yml-built tables should compare against the yml types instead is a follow-up to
-            # issue #118, not this change.
+            # drift check compares the SELECT with the table, as the temp-table check did.
+            # Whether yml-built tables should compare against the yml types instead is a
+            # separate follow-up, not this change.
             assert (
                 "column type: 'amount' existing='DECIMAL(12, 2)', expected='DECIMAL(10, 2)'"
             ) in message

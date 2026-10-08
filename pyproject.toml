@@ -77,7 +77,7 @@ confluent = "dbt.adapters.confluent"
 
 [tool.uv.sources]
 # Pinned to the confluent-sql main commit that adds Connection.dry_run_statement
-# (confluentinc/confluent-sql#246), which the schema drift check needs (issue #118). No release
+# (confluentinc/confluent-sql#246), which the schema drift check needs. No release
 # has it yet. [tool.uv.sources] is uv-only: a wheel built from this branch still requires
 # `confluent-sql~=0.6.0` (dependencies above), which excludes 0.7.0, and no 0.6.x release has
 # dry_run_statement. Before the next dbt-confluent release: cut confluent-sql 0.7.0, change the

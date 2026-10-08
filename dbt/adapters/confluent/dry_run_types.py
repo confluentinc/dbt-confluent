@@ -1,9 +1,8 @@
-"""Compare and display the column types a Flink `sql.dry-run` reports (issue #118).
+"""Compare and display the column types a Flink `sql.dry-run` reports.
 
 The schema drift check dry-runs both the model's SELECT and `SELECT * FROM` the existing table,
 and compares the two result schemas as confluent-sql `ColumnTypeDefinition`s. A stored table's
-dry-run schema matches the SELECT it was created from (GH-118 probe run ecc4ad5f), except for
-two differences:
+dry-run schema matches the SELECT it was created from, except for two differences:
 
 - Top-level nullability, which `comparable_type` drops from both sides. A table can differ from
   its SELECT here: a `streaming_table` column declared `not_null` in yml can be fed by a
@@ -11,11 +10,11 @@ two differences:
   before, leaves it out too. Nullability inside an ARRAY, MULTISET, MAP or ROW is kept.
 - String MAP keys and MULTISET elements, which `stored_type` applies to the model's side. An
   Avro or JSON table, the default, stores a CHAR or VARCHAR key or element, at any depth, as
-  VARCHAR(2147483647) NOT NULL, whatever its length or nullability in the query (GH-118 probe
-  runs 995e2382, 6b109689 and eb506b70). Any other key or element keeps its type and its own
-  nullability. The temp table the drift check used before stored the model's SELECT the same
-  way, since it had no WITH clause. A Protobuf table keeps the declared type instead (run
-  b68104c4), so a string key or element drifts there, as it did with the temp table.
+  VARCHAR(2147483647) NOT NULL, whatever its length or nullability in the query. Any other key
+  or element keeps its type and its own nullability. The temp table the drift check used before
+  stored the model's SELECT the same way, since it had no WITH clause. A Protobuf table keeps
+  the declared type instead, so a string key or element drifts there, as it did with the temp
+  table.
 
 `display_type` spells a type for drift messages the way FULL_DATA_TYPE does, so messages read
 the same on the dry-run and temp-table paths.

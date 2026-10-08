@@ -248,7 +248,7 @@ WITH (
      raise a compilation error on any drift (columns, types, WITH options,
      or DISTRIBUTED BY).
 
-     Columns (GH-118):
+     Columns:
        - SELECT models (table, streaming_table): two `sql.dry-run`s, of the
          model's SELECT and of `SELECT * FROM` the existing table, by
          adapter.get_columns_from_dry_run; check_schema_drift compares the
@@ -285,11 +285,11 @@ WITH (
        built: `table` creates its CTAS in snapshot_ddl (table.sql), so its
        SELECT runs as a snapshot; streaming_table's INSERT runs in
        streaming_query (streaming_table.sql). This also keeps a DDL-mode
-       profile (snapshot_ddl, streaming_ddl) away from the dry-run, which was
-       only probed in the two query modes. Any other materialization keeps
-       the temp-table CTAS's old resolution: the model's execution_mode
-       config, else the profile's. The model's statement_properties aren't
-       passed, just as they never were to the temp-table CTAS. #}
+       profile (snapshot_ddl, streaming_ddl) away from the dry-run. Any other
+       materialization keeps the temp-table CTAS's old resolution: the
+       model's execution_mode config, else the profile's. The model's
+       statement_properties aren't passed, just as they never were to the
+       temp-table CTAS. #}
     {% set dry_run_modes = {'table': 'snapshot', 'streaming_table': 'streaming_query'} %}
     {% set dry_run_mode = dry_run_modes.get(
       config.get('materialized'), config.get('execution_mode', none)

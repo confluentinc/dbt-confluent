@@ -729,10 +729,12 @@ class ConfluentAdapter(SQLAdapter):
         dropped by post_model_hook (which runs even when the materialization
         fails), but a hard-killed process or a cleanup drop that fails leaks
         it as a real Kafka-backed topic. With a stable name, the next drift
-        check reclaims the leak via its DROP TABLE IF EXISTS before
-        recreating. (Concurrent runs of the same project would collide on
-        this name, but they already collide on the deterministic Flink
-        statement names, so this adds no new hazard.)
+        check reclaims the leak: the temp-table path drops it with DROP TABLE
+        IF EXISTS before recreating, and the dry-run path finds it with
+        get_relation and defers its drop to post_model_hook. (Concurrent runs
+        of the same project would collide on this name, but they already
+        collide on the deterministic Flink statement names, so this adds no
+        new hazard.)
         """
         return "__dbt_tmp_schema_check_" + identifier
 
