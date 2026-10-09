@@ -13,11 +13,13 @@ every case — the orchestrator is small enough that a couple of partition
 tests cover its glue, while the per-concern logic gets exhaustive coverage.
 """
 
-import agate
 import pytest
-from dbt_common.exceptions import CompilationError, DbtDatabaseError
+from confluent_sql.types import ColumnTypeDefinition
+from dbt_common.exceptions import CompilationError, DbtDatabaseError, DbtRuntimeError
 
-from dbt.adapters.confluent.impl import ConfluentAdapter
+from dbt.adapters.confluent.impl import ConfluentAdapter, DryRunColumns
+from tests.unit._helpers import drift_catalog_row as _row
+from tests.unit._helpers import make_drift_catalog as _make_catalog
 from tests.unit._helpers import relation as _relation
 
 # ---------------------------------------------------------------------------
@@ -83,6 +85,13 @@ class TestCheckColumnDrift:
         expected = {"id": "BIGINT"}
         violations = ConfluentAdapter._check_column_drift(existing, expected)
         assert violations == ["column added: 'id'", "column removed: 'ID'"]
+
+    def test_display_spells_type_values(self):
+        """The dry-run path compares non-string types and spells them with display_type."""
+        violations = ConfluentAdapter._check_column_drift(
+            {"a": 1}, {"a": 2}, display=lambda value: f"<{value}>"
+        )
+        assert violations == ["column type: 'a' existing='<1>', expected='<2>'"]
 
 
 # ---------------------------------------------------------------------------
@@ -239,66 +248,6 @@ class TestCheckDistributionDrift:
 # ---------------------------------------------------------------------------
 # _partition_drift_catalog
 # ---------------------------------------------------------------------------
-
-
-def _row(
-    *,
-    section,
-    table_name=None,
-    col_name=None,
-    data_type=None,
-    dist_position=None,
-    option_key=None,
-    option_value=None,
-    is_distributed=None,
-    dist_buckets=None,
-    is_materialized=None,
-):
-    return (
-        section,
-        table_name,
-        col_name,
-        data_type,
-        dist_position,
-        option_key,
-        option_value,
-        is_distributed,
-        dist_buckets,
-        is_materialized,
-    )
-
-
-_CATALOG_COLUMNS = [
-    "section",
-    "table_name",
-    "col_name",
-    "data_type",
-    "dist_position",
-    "option_key",
-    "option_value",
-    "is_distributed",
-    "dist_buckets",
-    "is_materialized",
-]
-
-# Pin types so agate's inference doesn't coerce "YES" to a boolean (Confluent
-# returns it as a string, and the partitioner compares against the literal "YES").
-_CATALOG_TYPES = [
-    agate.Text(),  # section
-    agate.Text(),  # table_name
-    agate.Text(),  # col_name
-    agate.Text(),  # data_type
-    agate.Number(),  # dist_position
-    agate.Text(),  # option_key
-    agate.Text(),  # option_value
-    agate.Text(),  # is_distributed
-    agate.Number(),  # dist_buckets
-    agate.Text(),  # is_materialized
-]
-
-
-def _make_catalog(rows):
-    return agate.Table(rows, column_names=_CATALOG_COLUMNS, column_types=_CATALOG_TYPES)
 
 
 class TestPartitionDriftCatalog:
@@ -458,10 +407,31 @@ class TestPartitionDriftCatalog:
         )
         assert is_materialized is False
 
+    def test_no_temp_identifier_reads_existing_only(self):
+        """Dry-run path: the catalog has no temp rows and no temp identifier."""
+        catalog = _make_catalog(
+            [_row(section="COLUMNS", table_name="existing", col_name="id", data_type="BIGINT")]
+        )
+        existing, expected, *_ = ConfluentAdapter._partition_drift_catalog(
+            catalog, "existing", None
+        )
+        assert existing == {"id": "BIGINT"}
+        assert expected == {}
+
 
 # ---------------------------------------------------------------------------
 # check_schema_drift (orchestrator)
 # ---------------------------------------------------------------------------
+
+
+def _type(data: dict) -> ColumnTypeDefinition:
+    """A driver ColumnTypeDefinition, parsed from dry-run-shaped JSON."""
+    return ColumnTypeDefinition.from_response(data)
+
+
+BIGINT = _type({"type": "BIGINT", "nullable": True})
+STRING = _type({"type": "VARCHAR", "nullable": True, "length": 2147483647})
+DECIMAL_10_2 = _type({"type": "DECIMAL", "nullable": True, "precision": 10, "scale": 2})
 
 
 class TestCheckSchemaDriftOrchestrator:
@@ -946,3 +916,238 @@ class TestCheckSchemaDriftOrchestrator:
                 enforce="columns",
             )
         assert "column added: 'extra'" in str(excinfo.value)
+
+    def _existing_catalog(self, *rows):
+        """The dry-run path's catalog: the existing table's rows only. Its COLUMNS rows feed
+        only the metadata-lag guard; the compared columns come from the dry-runs."""
+        return _make_catalog(
+            [
+                _row(
+                    section="COLUMNS",
+                    table_name=self.EXISTING_ID,
+                    col_name="id",
+                    data_type="BIGINT",
+                ),
+                *rows,
+            ]
+        )
+
+    def test_dry_run_columns_replace_temp_rows(self):
+        """Dry-run path: both column maps arrive resolved, the catalog holds only the existing
+        table, and drift is still detected."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                self._existing_catalog(),
+                expected_with={},
+                dry_run_columns=DryRunColumns(
+                    existing={"id": BIGINT}, expected={"id": BIGINT, "extra": STRING}
+                ),
+            )
+        assert "column added: 'extra'" in str(excinfo.value)
+
+    def test_dry_run_columns_no_drift_returns_silently(self):
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            None,
+            self._existing_catalog(),
+            expected_with={},
+            dry_run_columns=DryRunColumns(
+                existing={"price": DECIMAL_10_2}, expected={"price": DECIMAL_10_2}
+            ),
+        )
+
+    def test_dry_run_columns_with_enforce_columns(self):
+        """The streaming restart path under on_schema_drift='ignore' dry-runs too:
+        options/distribution drift is ignored, column drift still raises."""
+        catalog = self._existing_catalog(
+            _row(
+                section="TABLE_OPTIONS",
+                table_name=self.EXISTING_ID,
+                option_key="changelog.mode",
+                option_value="upsert",
+            ),
+        )
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            None,
+            catalog,
+            expected_with={"changelog.mode": "append"},
+            enforce="columns",
+            dry_run_columns=DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT}),
+        )
+        with pytest.raises(CompilationError, match="column added: 'extra'"):
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                catalog,
+                expected_with={"changelog.mode": "append"},
+                enforce="columns",
+                dry_run_columns=DryRunColumns(
+                    existing={"id": BIGINT}, expected={"id": BIGINT, "extra": BIGINT}
+                ),
+            )
+
+    def test_dry_run_columns_existing_empty_guard_still_fires(self):
+        """The existing-side propagation-lag guard reads the catalog on the dry-run path too:
+        it protects the options and distribution checks."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtDatabaseError, match="existing schema"):
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                _make_catalog([]),
+                expected_with={},
+                dry_run_columns=DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT}),
+            )
+
+    def test_empty_expected_columns_is_a_bug_not_lag(self):
+        """The resolver returns None (fall back), never an empty expected map, which must
+        not reach the temp-table guard's "metadata propagation lag, retry" advice."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtRuntimeError, match="no expected columns"):
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                _make_catalog([]),
+                expected_with={},
+                dry_run_columns=DryRunColumns(existing={"id": BIGINT}, expected={}),
+            )
+
+    @pytest.mark.parametrize("both", [True, False])
+    def test_requires_exactly_one_expected_source(self, both):
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtRuntimeError, match="exactly one") as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID) if both else None,
+                _make_catalog([]),
+                expected_with={},
+                dry_run_columns=(
+                    DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT})
+                    if both
+                    else None
+                ),
+            )
+        assert "dbt-confluent" in str(excinfo.value)
+
+    @pytest.mark.parametrize("existing_nullable", [True, False])
+    def test_top_level_nullability_is_ignored(self, existing_nullable):
+        """A yml not_null column fed by a nullable source column (or the reverse) is no drift,
+        as it wasn't when FULL_DATA_TYPE strings were compared."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            None,
+            self._existing_catalog(),
+            expected_with={},
+            dry_run_columns=DryRunColumns(
+                existing={"id": _type({"type": "BIGINT", "nullable": not existing_nullable})},
+                expected={"id": _type({"type": "BIGINT", "nullable": existing_nullable})},
+            ),
+        )
+
+    def test_nested_nullability_drifts(self):
+        """NOT NULL inside a composite type is part of the stored type; the message spells
+        both sides the way FULL_DATA_TYPE does."""
+        element = {"type": "VARCHAR", "length": 2147483647}
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                self._existing_catalog(),
+                expected_with={},
+                dry_run_columns=DryRunColumns(
+                    existing={
+                        "tags": _type(
+                            {
+                                "type": "ARRAY",
+                                "nullable": True,
+                                "element_type": {**element, "nullable": False},
+                            }
+                        )
+                    },
+                    expected={
+                        "tags": _type(
+                            {
+                                "type": "ARRAY",
+                                "nullable": True,
+                                "element_type": {**element, "nullable": True},
+                            }
+                        )
+                    },
+                ),
+            )
+        assert (
+            "column type: 'tags' existing='ARRAY<VARCHAR(2147483647) NOT NULL>', "
+            "expected='ARRAY<VARCHAR(2147483647)>'"
+        ) in str(excinfo.value)
+
+    def test_map_keys_compare_as_stored(self):
+        """map['a', 1] has a CHAR(1) key in the model's dry-run, which the table stores as
+        VARCHAR(2147483647) NOT NULL: no drift."""
+        value = {"type": "INTEGER", "nullable": False}
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            None,
+            self._existing_catalog(),
+            expected_with={},
+            dry_run_columns=DryRunColumns(
+                existing={
+                    "m": _type(
+                        {
+                            "type": "MAP",
+                            "nullable": True,
+                            "key_type": {
+                                "type": "VARCHAR",
+                                "nullable": False,
+                                "length": 2147483647,
+                            },
+                            "value_type": value,
+                        }
+                    )
+                },
+                expected={
+                    "m": _type(
+                        {
+                            "type": "MAP",
+                            "nullable": False,
+                            "key_type": {"type": "CHAR", "nullable": False, "length": 1},
+                            "value_type": value,
+                        }
+                    )
+                },
+            ),
+        )
+
+    def test_protobuf_map_keys_drift_as_before(self):
+        """A Protobuf table keeps a VARCHAR(5) key, but the model's side is compared as an Avro
+        table stores it, as the temp table did: drift, with the temp table's message."""
+        key = {"type": "VARCHAR", "nullable": True, "length": 5}
+        column = {
+            "type": "MAP",
+            "nullable": True,
+            "key_type": key,
+            "value_type": {"type": "INTEGER", "nullable": True},
+        }
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                self._existing_catalog(),
+                expected_with={},
+                dry_run_columns=DryRunColumns(
+                    existing={"m": _type(column)}, expected={"m": _type(column)}
+                ),
+            )
+        assert (
+            "column type: 'm' existing='MAP<VARCHAR(5), INT>', "
+            "expected='MAP<VARCHAR(2147483647) NOT NULL, INT>'"
+        ) in str(excinfo.value)
