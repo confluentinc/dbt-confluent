@@ -51,6 +51,8 @@ _KAFKA_BACKED_CONFIG_KEYS = frozenset({"distributed_by", "tableflow"})
 MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "table": _UNIVERSAL_CONFIG_KEYS | _KAFKA_BACKED_CONFIG_KEYS | {"on_schema_drift"},
     "view": _UNIVERSAL_CONFIG_KEYS,
+    # A function is pure metadata (like a view) with no Kafka topic or long-running statement.
+    "function": _UNIVERSAL_CONFIG_KEYS | {"language", "artifact_id", "class", "connections"},
     "streaming_source": _UNIVERSAL_CONFIG_KEYS
     | _KAFKA_BACKED_CONFIG_KEYS
     | {"connector", "with", "on_schema_drift"},
@@ -938,14 +940,19 @@ class ConfluentAdapter(SQLAdapter):
 
     @available
     def plan_function_action(
-        self, relation: BaseRelation, changes: list[str] | None, on_configuration_change: str
+        self,
+        relation: BaseRelation,
+        changes: list[str] | None,
+        on_configuration_change: str,
+        full_refresh: bool,
     ) -> dict[str, str | None]:
-        """Decide what to do with a function given its changes and `on_configuration_change`.
+        """Decide what to do with a function given its changes, `on_configuration_change` and
+        whether this is a `--full-refresh`.
 
         See `functions.plan_function_action`; returns its `action` and `message` as a dict.
         """
         plan = functions.plan_function_action(
-            relation.render(), changes, str(on_configuration_change).lower()
+            relation.render(), changes, str(on_configuration_change).lower(), bool(full_refresh)
         )
         return plan._asdict()
 

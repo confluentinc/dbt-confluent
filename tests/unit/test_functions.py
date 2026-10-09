@@ -62,6 +62,10 @@ class TestValidateFunctionConfig:
             "connection_names": ["`my_external_service`"],
         }
 
+    def test_omitted_connections_and_type_use_defaults(self):
+        udf = validate(java_config(connections=None, type=None))
+        assert udf["connections"] == []
+
     def test_explicit_scalar_type_is_accepted(self):
         validate(java_config(type="scalar"))
 
@@ -79,6 +83,13 @@ class TestValidateFunctionConfig:
             ({"connections": [""]}, "'connections' must be a list"),
             ({"connections": ["a.b.c.d"]}, "not a valid"),
             ({"connections": ["a..c"]}, "not a valid"),
+            # Falsy but invalid values must not pass as "omitted".
+            ({"connections": ""}, "'connections' must be a list"),
+            ({"connections": 0}, "'connections' must be a list"),
+            ({"connections": False}, "'connections' must be a list"),
+            ({"connections": {}}, "'connections' must be a list"),
+            ({"type": ""}, "only scalar functions are supported"),
+            ({"type": 0}, "only scalar functions are supported"),
             ({"type": "table"}, "only scalar functions are supported"),
             ({"type": "aggregate"}, "only scalar functions are supported"),
         ],
@@ -275,6 +286,21 @@ class TestPlanFunctionAction:
         # every mode tells the user what differs and which function it concerns
         assert CHANGES[0] in plan.message
         assert FUNCTION in plan.message
+
+    @pytest.mark.parametrize("mode", ["apply", "continue", "fail"])
+    @pytest.mark.parametrize("changes", [[], CHANGES], ids=["unchanged", "changed"])
+    def test_full_refresh_replaces_an_existing_function_whatever_the_mode(self, mode, changes):
+        plan = functions.plan_function_action(FUNCTION, changes, mode, full_refresh=True)
+        assert plan.action == "replace"
+        assert "--full-refresh" in plan.message
+        assert FUNCTION in plan.message
+
+    @pytest.mark.parametrize("mode", ["apply", "continue", "fail"])
+    def test_full_refresh_of_an_absent_function_just_creates(self, mode):
+        assert functions.plan_function_action(FUNCTION, None, mode, full_refresh=True) == (
+            "create",
+            None,
+        )
 
     def test_unknown_mode_raises(self):
         with pytest.raises(CompilationError, match="on_configuration_change"):

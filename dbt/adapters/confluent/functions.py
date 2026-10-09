@@ -103,8 +103,11 @@ def validate_function_config(model_config: Any, catalog: str, database: str) -> 
     language = str(model_config.get("language") or "").lower()
     artifact_id = model_config.get("artifact_id")
     class_name = model_config.get("class")
-    raw_connections = model_config.get("connections") or []
-    function_type = str(model_config.get("type") or "scalar").lower()
+    raw_connections = model_config.get("connections")
+    if raw_connections is None:
+        raw_connections = []
+    function_type = model_config.get("type")
+    function_type = "scalar" if function_type is None else str(function_type).lower()
 
     problems = []
     if language not in _FUNCTION_LANGUAGES:
@@ -119,7 +122,7 @@ def validate_function_config(model_config: Any, catalog: str, database: str) -> 
     if not isinstance(class_name, str) or not class_name.strip():
         problems.append("'class' must be a non-empty string")
     connections: list[QualifiedName] = []
-    if isinstance(raw_connections, str) or not all(
+    if not isinstance(raw_connections, list) or not all(
         isinstance(c, str) and c for c in raw_connections
     ):
         problems.append("'connections' must be a list of connection names")
@@ -229,16 +232,28 @@ class FunctionPlan(NamedTuple):
 
 
 def plan_function_action(
-    function: str, changes: list[str] | None, on_configuration_change: str
+    function: str,
+    changes: list[str] | None,
+    on_configuration_change: str,
+    full_refresh: bool = False,
 ) -> FunctionPlan:
     """Decide what to do given `plan_function_change`'s result and dbt's
     `on_configuration_change` setting (apply | continue | fail).
 
     `function` is the rendered function name, for messages. When the function differs from its
     config, `apply` drops and re-creates it, `continue` leaves it in place, and `fail` errors.
+    `full_refresh` always drops and re-creates an existing function, matching or not, and
+    overrides `on_configuration_change`, which governs changes to an existing function, not a
+    rebuild the user asked for.
     """
     if changes is None:
         return FunctionPlan("create")
+    if full_refresh:
+        return FunctionPlan(
+            "replace",
+            f"Replacing function {function} because of --full-refresh. "
+            "Statements already running with the old function may need to be restarted.",
+        )
     if not changes:
         return FunctionPlan("unchanged")
     details = "; ".join(changes)

@@ -574,6 +574,10 @@ re-creating it. On each run the materialization compares the live function (via
 | `continue` | Warns and leaves the existing function in place |
 | `fail` | Fails the run without changing anything |
 
+`--full-refresh` always drops and re-creates an existing function, even if it matches the config,
+and `on_configuration_change` doesn't apply to it (that setting governs changes to an existing
+function, not a rebuild you asked for).
+
 Dropping a function can break statements that already use it. A running statement keeps the old
 function, and a healthy `streaming_table` won't be resubmitted on the next run unless you also
 `--full-refresh` it. Since `apply` is the default, set `on_configuration_change` to `fail` or
@@ -601,7 +605,7 @@ Each per-materialization section links back to the specific subsections below th
 
 Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing. For example, `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
 
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `language`, `artifact_id`, `class`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
 
 If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
 
