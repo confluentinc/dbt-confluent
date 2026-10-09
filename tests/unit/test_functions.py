@@ -140,6 +140,17 @@ class TestParseQualifiedName:
     def test_parse(self, text, expected):
         assert functions.parse_qualified_name(text, CATALOG, DATABASE) == expected
 
+    @pytest.mark.parametrize(
+        "text", ["`svc", "svc`", "db.`svc", "`db.svc", "`a`b`", "a`b", "`a``", "`", "``x"]
+    )
+    def test_malformed_quoting_is_rejected(self, text):
+        with pytest.raises(ValueError, match="backtick"):
+            functions.parse_qualified_name(text, CATALOG, DATABASE)
+
+    def test_malformed_quoting_in_connections_is_a_config_error(self):
+        with pytest.raises(CompilationError, match="'connections'"):
+            validate(java_config(connections=["db.`svc"]))
+
     def test_render_round_trips_awkward_names(self):
         name = conn("odd.`name")
         assert functions.parse_qualified_name(name.render(), "x", "y") == name

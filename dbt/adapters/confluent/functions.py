@@ -59,9 +59,19 @@ def _split_outside_backticks(text: str, sep: str) -> list[str]:
 
 
 def _unquote(part: str) -> str:
+    """Strip one identifier part's backticks (`` inside is an escaped backtick).
+
+    A part is either wholly unquoted, with no backticks at all, or fully enclosed in backticks
+    with every inner backtick doubled. Anything else is malformed: raises ValueError.
+    """
     part = part.strip()
-    if len(part) >= 2 and part.startswith("`") and part.endswith("`"):
-        return part[1:-1].replace("``", "`")
+    if part.startswith("`"):
+        inner = part[1:-1]
+        if len(part) < 2 or not part.endswith("`") or "`" in inner.replace("``", ""):
+            raise ValueError(f"{part!r} has unbalanced backtick quoting")
+        return inner.replace("``", "`")
+    if "`" in part:
+        raise ValueError(f"{part!r} has unbalanced backtick quoting")
     return part
 
 
@@ -69,7 +79,7 @@ def parse_qualified_name(text: str, catalog: str, database: str) -> QualifiedNam
     """Parse `name`, `database.name` or `catalog.database.name` (parts optionally backtick-quoted).
 
     Missing leading parts default to the given `catalog` and `database`. Raises ValueError for
-    empty parts or more than three parts.
+    empty parts, more than three parts or malformed backtick quoting.
     """
     parts = [_unquote(p) for p in _split_outside_backticks(text, ".")]
     if not 1 <= len(parts) <= 3 or not all(parts):

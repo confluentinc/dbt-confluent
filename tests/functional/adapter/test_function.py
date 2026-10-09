@@ -17,6 +17,7 @@ import os
 import pytest
 
 from dbt.adapters.confluent import functions
+from dbt.adapters.confluent.connections import ConfluentConnectionManager
 from dbt.tests.util import run_dbt, write_file
 from tests.functional.adapter._helpers import get_result_by_name
 from tests.functional.adapter.fixtures import ConfluentFixtures
@@ -78,6 +79,20 @@ def detected_state(monkeypatch):
 
     monkeypatch.setattr(functions, "plan_function_change", recording)
     return results
+
+
+@pytest.fixture
+def submitted_sql(monkeypatch):
+    """The SQL of every statement submitted to Flink during the test, in order."""
+    submitted: list[str] = []
+    real = ConfluentConnectionManager.add_query
+
+    def recording(self, sql, *args, **kwargs):
+        submitted.append(sql)
+        return real(self, sql, *args, **kwargs)
+
+    monkeypatch.setattr(ConfluentConnectionManager, "add_query", recording)
+    return submitted
 
 
 class FunctionFixtures(ConfluentFixtures):
@@ -268,3 +283,37 @@ class TestFunctionLifecycle(FunctionFixtures):
         run_dbt(["build", "--full-refresh"])
         assert plan_actions == ["replace"]
         assert self.live_artifact_id(project) == UDF_ARTIFACT_ID_2
+
+
+@pytest.mark.skipif(
+    not (UDF_ARTIFACT_ID and UDF_CLASS), reason="Needs a pre-uploaded UDF artifact"
+)
+class TestFunctionRunsHooks(FunctionFixtures):
+    """`pre_hook` runs before the function is created and `post_hook` after. The hooks are cheap
+    `SHOW` statements tagged with a marker comment so they can be found in what was submitted."""
+
+    NAME = "functionhooks"
+    PRE_MARKER = "/* function pre_hook */"
+    POST_MARKER = "/* function post_hook */"
+
+    @pytest.fixture(scope="class")
+    def functions(self):
+        return {
+            f"{FUNCTION_NAME}.sql": function_sql(
+                UDF_ARTIFACT_ID,
+                UDF_CLASS,
+                UDF_LANGUAGE,
+                pre_hook=f"show catalogs {self.PRE_MARKER}",
+                post_hook=f"show catalogs {self.POST_MARKER}",
+            )
+        }
+
+    def test_hooks_run_around_create(self, project, submitted_sql):
+        run_dbt(["build"])
+
+        def position(fragment: str) -> int:
+            matches = [i for i, sql in enumerate(submitted_sql) if fragment.lower() in sql.lower()]
+            assert len(matches) == 1, f"expected one {fragment!r} in {submitted_sql}"
+            return matches[0]
+
+        assert position(self.PRE_MARKER) < position("CREATE FUNCTION") < position(self.POST_MARKER)

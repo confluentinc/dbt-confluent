@@ -13,29 +13,36 @@
   {%- set plan = adapter.plan_function_action(target_relation, changes, config.get('on_configuration_change'), should_full_refresh()) -%}
 
   {% if plan.action == 'fail' %}
-    {% do exceptions.raise_fail_fast_error(plan.message) %}
+    {% do exceptions.raise_compiler_error(plan.message) %}
   {% endif %}
 
-  {{ run_hooks(pre_hooks) }}
+  {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
   {% if plan.action in ('unchanged', 'keep') %}
     {# Nothing to submit, but dbt's function runner reads the 'main' result. #}
     {% if plan.message %}{% do adapter.warn_function_change(plan.message) %}{% endif %}
     {% do store_result('main', response=adapter.noop_response('Function unchanged'), agate_table=none) %}
-  {% else %}
-    {# Confluent UDFs are immutable (no ALTER / CREATE OR REPLACE), so a change is a drop + create. #}
-    {% if plan.action == 'replace' %}
-      {% do adapter.warn_function_change(plan.message) %}
-      {% call statement('drop_function', statement_name=get_statement_name('-drop')) -%}
-        drop function {{ target_relation.render() }}
-      {%- endcall %}
-    {% endif %}
-    {% call statement('main', statement_name=get_statement_name()) -%}
-      {{ get_create_function_sql(target_relation, udf) }}
-    {%- endcall %}
+    {{ run_hooks(post_hooks, inside_transaction=False) }}
+    {{ return({'relations': [target_relation]}) }}
   {% endif %}
 
-  {{ run_hooks(post_hooks) }}
+  -- `BEGIN` happens here:
+  {{ run_hooks(pre_hooks, inside_transaction=True) }}
+
+  {# Confluent UDFs are immutable (no ALTER / CREATE OR REPLACE), so a change is a drop + create. #}
+  {% if plan.action == 'replace' %}
+    {% do adapter.warn_function_change(plan.message) %}
+    {% call statement('drop_function', statement_name=get_statement_name('-drop')) -%}
+      drop function {{ target_relation.render() }}
+    {%- endcall %}
+  {% endif %}
+  {% call statement('main', statement_name=get_statement_name()) -%}
+    {{ get_create_function_sql(target_relation, udf) }}
+  {%- endcall %}
+
+  {{ run_hooks(post_hooks, inside_transaction=True) }}
+  {{ adapter.commit() }}
+  {{ run_hooks(post_hooks, inside_transaction=False) }}
 
   {{ return({'relations': [target_relation]}) }}
 {%- endmaterialization -%}
