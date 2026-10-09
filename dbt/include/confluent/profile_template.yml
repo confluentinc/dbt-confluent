@@ -45,8 +45,8 @@ prompts:
     hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'"
     type: "string"
     default: 'streaming_query'
-  statement_name_prefix:
-    hint: "Prefix for statement names (project name is appended automatically)"
+  resource_name_prefix:
+    hint: "Prefix for topic and statement names (project name is appended to statement names automatically)"
     type: "string"
     default: "dbt-"
   statement_label:

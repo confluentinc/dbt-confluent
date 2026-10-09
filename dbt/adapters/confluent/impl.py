@@ -408,17 +408,12 @@ class ConfluentAdapter(SQLAdapter):
 
         Called from Jinja macros via adapter.get_statement_name().
         Returns the final name ready for the Flink API.
-
-        The profile's isolation_prefix is applied to overrides too, so a
-        model with a custom statement_name stays isolated per developer.
         """
-        credentials = self.config.credentials
-        isolation = credentials.isolation_prefix
         if statement_name_override:
-            name = f"{isolation}{statement_name_override}{suffix}"
+            name = f"{statement_name_override}{suffix}"
         else:
-            prefix = credentials.statement_name_prefix
-            name = f"{prefix}{isolation}{project_name}-{model_name}{suffix}"
+            prefix = self.config.credentials.resource_name_prefix
+            name = f"{prefix}{project_name}-{model_name}{suffix}"
         return sanitize_statement_name(name)
 
     def _handle_pool_scoped_403(
@@ -735,15 +730,15 @@ class ConfluentAdapter(SQLAdapter):
         so we can't look up nodes directly. Instead, we extract the model
         identifier from the unique_id (format: model.<package>.<name>)
         and find the relation in the adapter's cache. The profile's
-        isolation_prefix is prepended to mirror confluent__generate_alias_name.
+        resource_name_prefix is prepended to mirror confluent__generate_alias_name.
         """
         # unique_id format:
         #   non-versioned: model.<package>.<name>
         #   versioned:     model.<package>.<name>.v<version>
         _, _, name, *v = tested_node_unique_id.split(".")
         version = f"_{v[0]}" if v and v[0].startswith("v") else ""
-        isolation = self.config.credentials.isolation_prefix
-        identifier = f"{isolation}{name}{version}"
+        prefix = self.config.credentials.resource_name_prefix
+        identifier = f"{prefix}{name}{version}"
         relation = self.get_relation(database, schema, identifier)
         if relation is None:
             raise DbtDatabaseError(

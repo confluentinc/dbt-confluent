@@ -47,7 +47,7 @@ class TestProfileTemplate:
             "my-key",  # flink_api_key
             "my-secret",  # flink_api_secret
             "streaming_query",  # execution_mode
-            "dbt-confluent-",  # statement_name_prefix
+            "dbt-confluent-",  # resource_name_prefix
             "dbt-confluent",  # statement_label
             1,  # threads
         ]
@@ -74,7 +74,7 @@ class TestProfileTemplate:
             "my-key",  # flink_api_key
             "my-secret",  # flink_api_secret
             "streaming_query",  # execution_mode
-            "dbt-confluent-",  # statement_name_prefix
+            "dbt-confluent-",  # resource_name_prefix
             "dbt-confluent",  # statement_label
             1,  # threads
         ]
@@ -100,7 +100,7 @@ class TestProfileTemplate:
             "my-key",  # flink_api_key
             "my-secret",  # flink_api_secret
             "streaming_query",  # execution_mode
-            "dbt-confluent-",  # statement_name_prefix
+            "dbt-confluent-",  # resource_name_prefix
             "dbt-confluent",  # statement_label
             1,  # threads
         ]
@@ -125,7 +125,7 @@ class TestProfileTemplate:
             "global-key",  # global_api_key
             "global-secret",  # global_api_secret
             "streaming_query",  # execution_mode
-            "dbt-confluent-",  # statement_name_prefix
+            "dbt-confluent-",  # resource_name_prefix
             "dbt-confluent",  # statement_label
             1,  # threads
         ]
