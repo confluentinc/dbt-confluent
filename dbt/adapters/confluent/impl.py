@@ -930,13 +930,18 @@ class ConfluentAdapter(SQLAdapter):
 
     @available
     def plan_function_change(
-        self, relation: BaseRelation, udf: dict[str, Any]
+        self, relation: BaseRelation, udf: dict[str, Any], compute_pool_id: str | None = None
     ) -> list[str] | None:
         """Compare the live function at `relation` to the validated config `udf`.
 
-        See `functions.plan_function_change`.
+        The lookup runs on the function's `compute_pool_id` override (the connection default if
+        None), like the statements that create or drop it. See `functions.plan_function_change`.
         """
-        return functions.plan_function_change(self.execute, relation, udf)
+
+        def execute(sql: str, **kwargs: Any) -> tuple[AdapterResponse, "agate.Table"]:
+            return self.execute(sql, compute_pool_id=compute_pool_id, **kwargs)
+
+        return functions.plan_function_change(execute, relation, udf)
 
     @available
     def plan_function_action(

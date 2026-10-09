@@ -234,6 +234,22 @@ def test_adapter_delegates_validation_to_functions_module():
     assert adapter.validate_function_config(java_config(), Relation()) == validate(java_config())
 
 
+def test_adapter_runs_the_function_lookup_on_the_configured_compute_pool():
+    POOL_ID = "lfcp-abc123"
+    adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+    adapter.execute = MagicMock(  # type: ignore[method-assign]
+        side_effect=DbtDatabaseError("Function with the identifier '`is_smaller`' doesn't exist.")
+    )
+    relation = SimpleNamespace(
+        database=CATALOG, schema=DATABASE, identifier="is_smaller", render=lambda: "`is_smaller`"
+    )
+
+    assert adapter.plan_function_change(relation, validate(java_config()), POOL_ID) is None
+
+    adapter.execute.assert_called_once()
+    assert adapter.execute.call_args.kwargs["compute_pool_id"] == POOL_ID
+
+
 class TestPlanFunctionChange:
     """`plan_function_change` infers existence from DESCRIBE's outcome, not a catalog query."""
 
