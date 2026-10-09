@@ -12,6 +12,7 @@
   - [Table](#table)
   - [View](#view)
   - [Ephemeral](#ephemeral)
+  - [Function](#function)
 - [Model Configuration](#model-configuration)
   - [Validation](#validation)
   - [Tableflow](#tableflow)
@@ -72,6 +73,7 @@ The table below summarizes all materializations supported by the dbt-confluent a
 | [`table`](#table) | One-shot `CREATE TABLE ... AS SELECT` (CTAS). | Snapshot |
 | [`view`](#view) | A named query inlined into consumers, not a persisted result. | Inherited |
 | [`ephemeral`](#ephemeral) | Standard dbt CTE fragment. | Inherited |
+| [`function`](#function) | A scalar Java/Python UDF registered from an already-uploaded artifact. | n/a |
 
 _Note: [`view`](#view) & [`ephemeral`](#ephemeral) inherit their execution mode from any job that queries them, since they run inline in those jobs and not as independent Flink statements._
 
@@ -502,6 +504,91 @@ applies: setting `with`, `distributed_by`, `connector`, or any other dbt-conflue
 `ephemeral` model is silently ignored rather than rejected.  If multiple downstream models `ref()`
 the same `ephemeral` model over a Kafka-backed source, each one inlines and re-plans that source
 independently. Flink scans the source once per consumer, not once shared across them.
+
+### Function
+
+A `function` registers a user-defined function (UDF) in Flink from an artifact (a Java JAR or
+Python ZIP) that has already been uploaded to Confluent Cloud, by issuing
+`CREATE FUNCTION ... USING JAR 'confluent-artifact://<artifact_id>'`. dbt orders it ahead of any
+model that calls it via `{{ function('name') }}`.
+
+Declare the function with a `config()` call in a file under `functions/` (dbt requires
+a function to have a body file, so the config call is all it contains):
+
+```sql
+-- functions/is_smaller.sql
+{{ config(
+    language='java',
+    artifact_id='cfa-xxxxxx',
+    class='com.example.my.TShirtSizingIsSmaller',
+) }}
+```
+
+- `language`: `java` or `python`.
+- `artifact_id`: an artifact already uploaded to this environment.
+- `class`: the Java class, or the Python module path of the function.
+- `connections`: optional list of connection names the function may use.
+
+```sql
+-- models/orders_scored.sql
+select {{ function('is_smaller') }}(requested_size, in_stock_size) as needs_upsize
+from {{ ref('orders') }}
+```
+
+Only scalar functions are supported. Flink takes the function's signature from the class itself, so `arguments` and `returns` properties are not used.
+
+#### Experimental: behavior flag required
+
+The `function` materialization is experimental and fails with an error unless the
+`enable_experimental_function_materialization` behavior flag is enabled:
+
+```yaml
+# dbt_project.yml
+flags:
+  enable_experimental_function_materialization: true
+```
+
+**Current limitations:**
+
+- [#187](https://github.com/confluentinc/dbt-confluent/issues/187):
+  Changing a function's config drops and re-creates it without validating the artifact ID first,
+  so using an invalid artifact ID can cause the function to be dropped.
+- [#180](https://github.com/confluentinc/dbt-confluent/issues/180):
+  The desired artifact must be uploaded to Confluent separately.
+
+#### Changing an existing function
+
+Flink UDFs are immutable (no `ALTER` or `CREATE OR REPLACE`), so changing one means dropping and
+re-creating it. On each run the materialization compares the live function (via
+`DESCRIBE FUNCTION`) to the config (class, language, artifact and connections):
+
+- **Function doesn't exist:** it is created.
+- **Function matches the config:** nothing is submitted.
+- **Function differs from the config:** what happens is controlled by dbt's standard
+  [`on_configuration_change`](https://docs.getdbt.com/reference/resource-configs/on_configuration_change)
+  config, and every option names what differs:
+
+| `on_configuration_change` | Behavior when the config differs from the live function |
+|---|---|
+| `apply` (dbt's default) | Warns, drops the function, and creates it again |
+| `continue` | Warns and leaves the existing function in place |
+| `fail` | Fails the run without changing anything |
+
+Dropping a function can break statements that already use it. A running statement keeps the old
+function, and a healthy `streaming_table` won't be resubmitted on the next run unless you also
+`--full-refresh` it. Since `apply` is the default, set `on_configuration_change` to `fail` or
+`continue` wherever consumers can't be updated together with the function, for example for the
+whole folder:
+
+```yaml
+# dbt_project.yml
+functions:
+  +on_configuration_change: fail
+```
+
+A `connections` entry that isn't fully qualified (`name`, `database.name` or
+`catalog.database.name`) is resolved against the function's own catalog and database when
+comparing. Runs that replace the same function concurrently can interfere with each other.
 
 ---
 

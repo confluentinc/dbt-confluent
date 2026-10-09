@@ -10,9 +10,11 @@ from confluent_sql.exceptions import (
     OperationalError,
     StatementNotFoundError,
 )
+from dbt_common.behavior_flags import BehaviorFlag
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
+from dbt_common.ui import warning_tag
 
 from dbt.adapters.base import BaseRelation, available
 from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_table
@@ -22,7 +24,7 @@ from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import tableflow
+from . import functions, tableflow
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
@@ -130,6 +132,9 @@ class _CleanupRegistry(threading.local):
         self.relations: list = []
 
 
+FUNCTION_MATERIALIZATION_FLAG = "enable_experimental_function_materialization"
+
+
 class ConfluentAdapter(SQLAdapter):
     """
     Controls actual implementation of adapter, and ability to override certain methods.
@@ -147,6 +152,34 @@ class ConfluentAdapter(SQLAdapter):
         # worker thread; _CleanupRegistry.__init__ gives each of those threads
         # its own empty list on first access.
         self._deferred_cleanups = _CleanupRegistry()
+
+    @property
+    def _behavior_flags(self) -> list[BehaviorFlag]:
+        return [
+            {
+                "name": FUNCTION_MATERIALIZATION_FLAG,
+                "default": False,
+                "source": "dbt-confluent",
+                "description": (
+                    "The `function` materialization (Flink UDFs) is experimental. Changing a "
+                    "function's config drops and re-creates it, and if the re-create fails (for "
+                    "example, the artifact doesn't exist) the function is left missing. It is "
+                    "disabled unless this flag is enabled."
+                ),
+                "docs_url": "https://github.com/confluentinc/dbt-confluent/blob/main/MATERIALIZATIONS.md#function",
+            }
+        ]
+
+    @available
+    def require_function_materialization_enabled(self) -> None:
+        """Raise unless the experimental `function` materialization flag is enabled."""
+        # .no_warn: dbt would otherwise add a "this will change" warning on top of our error.
+        if not getattr(self.behavior, FUNCTION_MATERIALIZATION_FLAG).no_warn:
+            raise CompilationError(
+                "The `function` materialization is experimental and disabled by default. "
+                f"To use it, set `{FUNCTION_MATERIALIZATION_FLAG}: true` under `flags:` in "
+                "dbt_project.yml."
+            )
 
     @classmethod
     def quote(cls, identifier: str) -> str:
@@ -880,6 +913,51 @@ class ConfluentAdapter(SQLAdapter):
                 f"materialization for Confluent Flink.\n"
                 f"Supported config options include: {', '.join(supported)}."
             )
+
+    @available
+    def validate_function_config(
+        self, model_config: Any, relation: BaseRelation
+    ) -> dict[str, Any]:
+        """Validate a `function` node's config; see `functions.validate_function_config`.
+
+        Unqualified connection names resolve against the function's own catalog and database.
+        """
+        return functions.validate_function_config(
+            model_config, cast(str, relation.database), cast(str, relation.schema)
+        )
+
+    @available
+    def plan_function_change(
+        self, relation: BaseRelation, udf: dict[str, Any]
+    ) -> list[str] | None:
+        """Compare the live function at `relation` to the validated config `udf`.
+
+        See `functions.plan_function_change`.
+        """
+        return functions.plan_function_change(self.execute, relation, udf)
+
+    @available
+    def plan_function_action(
+        self, relation: BaseRelation, changes: list[str] | None, on_configuration_change: str
+    ) -> dict[str, str | None]:
+        """Decide what to do with a function given its changes and `on_configuration_change`.
+
+        See `functions.plan_function_action`; returns its `action` and `message` as a dict.
+        """
+        plan = functions.plan_function_action(
+            relation.render(), changes, str(on_configuration_change).lower()
+        )
+        return plan._asdict()
+
+    @available
+    def warn_function_change(self, message: str) -> None:
+        """Log a function-config-change warning, tagged so it stands out in the terminal."""
+        logger.warning(warning_tag(message))
+
+    @available
+    def noop_response(self, message: str) -> AdapterResponse:
+        """A response for a materialization step that deliberately submitted no statement."""
+        return AdapterResponse(_message=message)
 
     @available
     def render_start_mode(self, value: object) -> str:
