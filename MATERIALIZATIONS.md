@@ -537,6 +537,25 @@ from {{ ref('orders') }}
 
 Only scalar functions are supported. Flink takes the function's signature from the class itself, so `arguments` and `returns` properties are not used.
 
+#### Experimental: behavior flag required
+
+The `function` materialization is experimental and fails with an error unless the
+`enable_experimental_function_materialization` behavior flag is enabled:
+
+```yaml
+# dbt_project.yml
+flags:
+  enable_experimental_function_materialization: true
+```
+
+**Current limitations:**
+
+- [#187](https://github.com/confluentinc/dbt-confluent/issues/187):
+  Changing a function's config drops and re-creates it without validating the artifact ID first,
+  so using an invalid artifact ID can cause the function to be dropped.
+- [#180](https://github.com/confluentinc/dbt-confluent/issues/180):
+  The desired artifact must be uploaded to Confluent separately.
+
 #### Changing an existing function
 
 Flink UDFs are immutable (no `ALTER` or `CREATE OR REPLACE`), so changing one means dropping and
