@@ -4,10 +4,8 @@ The schema drift check dry-runs both the model's SELECT and `SELECT * FROM` the 
 and compares the two result schemas as confluent-sql `ColumnTypeDefinition`s. A stored table's
 dry-run schema matches the SELECT it was created from, except for two differences:
 
-- Top-level nullability, which `comparable_type` drops from both sides. A table can differ from
-  its SELECT here: a `streaming_table` column declared `not_null` in yml can be fed by a
-  nullable source column. INFORMATION_SCHEMA's FULL_DATA_TYPE, which the drift check compared
-  before, leaves it out too. Nullability inside an ARRAY, MULTISET, MAP or ROW is kept.
+- Top-level nullability, which `comparable_type` drops from both sides; its docstring says why.
+  Nullability inside an ARRAY, MULTISET, MAP or ROW is kept.
 - String MAP keys and MULTISET elements, which `stored_type` applies to the model's side. An
   Avro or JSON table, the default, stores a CHAR or VARCHAR key or element, at any depth, as
   VARCHAR(2147483647) NOT NULL, regardless of its length/nullability in the query. Any other key
@@ -41,7 +39,16 @@ _DISPLAY_NAMES: dict[str, tuple[str, str]] = {
 
 def comparable_type(column_type: ColumnTypeDefinition) -> ColumnTypeDefinition:
     """Return a copy of a top-level column type to compare for drift, with top-level
-    nullability dropped. The input isn't modified."""
+    nullability dropped. The input isn't modified.
+
+    Top-level nullability can differ without the model changing, and the temp-table check never
+    compared it (FULL_DATA_TYPE leaves it out). A table built from yml columns (a
+    `streaming_table`, or a `table` with an enforced contract) takes it from the yml's `not_null`
+    and primary key constraints, not from the SELECT. So a nullable source column can feed a
+    `not_null` column, and an expression that can't be null, like `CAST(1 AS INT)`, can feed a
+    nullable one. Comparing it would report drift on every run, and `--full-refresh` wouldn't clear
+    it, since it rebuilds the table from the same yml.
+    """
     return replace(column_type, nullable=True)
 
 
