@@ -5,8 +5,9 @@
   {% do validate_materialization_config() %}
   {%- set target_relation = this.incorporate(type='function') -%}
   {%- set udf = adapter.validate_function_config(config, target_relation) -%}
-  {#- None if absent; else the differences from the config (empty if identical). -#}
-  {%- set changes = adapter.plan_function_change(target_relation, udf) -%}
+  {#- None if absent; else the differences from the config (empty if identical). Live lookup,
+     so skipped at parse/compile time (`execute` is false), where None just means "create". -#}
+  {%- set changes = adapter.plan_function_change(target_relation, udf) if execute else none -%}
   {#- What to do about them, per dbt's `on_configuration_change` (apply | continue | fail),
      unless --full-refresh, which always replaces an existing function. -#}
   {%- set plan = adapter.plan_function_action(target_relation, changes, config.get('on_configuration_change'), should_full_refresh()) -%}

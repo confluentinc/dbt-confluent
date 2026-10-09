@@ -943,16 +943,20 @@ class ConfluentAdapter(SQLAdapter):
         self,
         relation: BaseRelation,
         changes: list[str] | None,
-        on_configuration_change: str,
+        on_configuration_change: str | None,
         full_refresh: bool,
     ) -> dict[str, str | None]:
         """Decide what to do with a function given its changes, `on_configuration_change` and
         whether this is a `--full-refresh`.
 
         See `functions.plan_function_action`; returns its `action` and `message` as a dict.
+        An unset `on_configuration_change` means dbt's default, `apply`.
         """
         plan = functions.plan_function_action(
-            relation.render(), changes, str(on_configuration_change).lower(), bool(full_refresh)
+            relation.render(),
+            changes,
+            str(on_configuration_change or "apply").lower(),
+            bool(full_refresh),
         )
         return plan._asdict()
 
