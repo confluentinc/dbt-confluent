@@ -535,8 +535,41 @@ select {{ function('is_smaller') }}(requested_size, in_stock_size) as needs_upsi
 from {{ ref('orders') }}
 ```
 
-Only scalar functions are supported. Flink takes the function's signature from the class itself, so `arguments` and `returns` properties are not used. Flink UDFs are immutable (no `ALTER` or
-`CREATE OR REPLACE`), so this materialization only creates.
+Only scalar functions are supported. Flink takes the function's signature from the class itself, so `arguments` and `returns` properties are not used.
+
+#### Changing an existing function
+
+Flink UDFs are immutable (no `ALTER` or `CREATE OR REPLACE`), so changing one means dropping and
+re-creating it. On each run the materialization compares the live function (via
+`DESCRIBE FUNCTION`) to the config (class, language, artifact and connections):
+
+- **Function doesn't exist:** it is created.
+- **Function matches the config:** nothing is submitted.
+- **Function differs from the config:** what happens is controlled by dbt's standard
+  [`on_configuration_change`](https://docs.getdbt.com/reference/resource-configs/on_configuration_change)
+  config, and every option names what differs:
+
+| `on_configuration_change` | Behavior when the config differs from the live function |
+|---|---|
+| `apply` (dbt's default) | Warns, drops the function, and creates it again |
+| `continue` | Warns and leaves the existing function in place |
+| `fail` | Fails the run without changing anything |
+
+Dropping a function can break statements that already use it. A running statement keeps the old
+function, and a healthy `streaming_table` won't be resubmitted on the next run unless you also
+`--full-refresh` it. Since `apply` is the default, set `on_configuration_change` to `fail` or
+`continue` wherever consumers can't be updated together with the function, for example for the
+whole folder:
+
+```yaml
+# dbt_project.yml
+functions:
+  +on_configuration_change: fail
+```
+
+A `connections` entry that isn't fully qualified (`name`, `database.name` or
+`catalog.database.name`) is resolved against the function's own catalog and database when
+comparing. Runs that replace the same function concurrently can interfere with each other.
 
 ---
 

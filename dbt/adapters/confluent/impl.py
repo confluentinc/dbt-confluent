@@ -13,6 +13,7 @@ from confluent_sql.exceptions import (
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
+from dbt_common.ui import warning_tag
 
 from dbt.adapters.base import BaseRelation, available
 from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_table
@@ -882,9 +883,49 @@ class ConfluentAdapter(SQLAdapter):
             )
 
     @available
-    def validate_function_config(self, model_config: Any) -> dict[str, Any]:
-        """Validate a `function` node's config; see `functions.validate_function_config`."""
-        return functions.validate_function_config(model_config)
+    def validate_function_config(
+        self, model_config: Any, relation: BaseRelation
+    ) -> dict[str, Any]:
+        """Validate a `function` node's config; see `functions.validate_function_config`.
+
+        Unqualified connection names resolve against the function's own catalog and database.
+        """
+        return functions.validate_function_config(
+            model_config, cast(str, relation.database), cast(str, relation.schema)
+        )
+
+    @available
+    def plan_function_change(
+        self, relation: BaseRelation, udf: dict[str, Any]
+    ) -> list[str] | None:
+        """Compare the live function at `relation` to the validated config `udf`.
+
+        See `functions.plan_function_change`.
+        """
+        return functions.plan_function_change(self.execute, relation, udf)
+
+    @available
+    def plan_function_action(
+        self, relation: BaseRelation, changes: list[str] | None, on_configuration_change: str
+    ) -> dict[str, str | None]:
+        """Decide what to do with a function given its changes and `on_configuration_change`.
+
+        See `functions.plan_function_action`; returns its `action` and `message` as a dict.
+        """
+        plan = functions.plan_function_action(
+            relation.render(), changes, str(on_configuration_change).lower()
+        )
+        return plan._asdict()
+
+    @available
+    def warn_function_change(self, message: str) -> None:
+        """Log a function-config-change warning, tagged so it stands out in the terminal."""
+        logger.warning(warning_tag(message))
+
+    @available
+    def noop_response(self, message: str) -> AdapterResponse:
+        """A response for a materialization step that deliberately submitted no statement."""
+        return AdapterResponse(_message=message)
 
     @available
     def render_start_mode(self, value: object) -> str:
