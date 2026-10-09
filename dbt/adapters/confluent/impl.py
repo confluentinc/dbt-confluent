@@ -1147,7 +1147,7 @@ class ConfluentAdapter(SQLAdapter):
     ) -> dict[str, ColumnTypeDefinition] | None:
         """Dry-run `sql` and return its result column types keyed by name, or None when the
         dry-run reports no result schema or a duplicate column name. `what` names the dry-run
-        in the debug line logged when its None."""
+        in the debug line logged when it's None."""
         schema = self.connections.dry_run_schema(
             sql, execution_mode=execution_mode, compute_pool_id=compute_pool_id
         )

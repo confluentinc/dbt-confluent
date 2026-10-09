@@ -35,6 +35,7 @@ _DISPLAY_NAMES: dict[str, tuple[str, str]] = {
     "TIME_WITHOUT_TIME_ZONE": ("TIME", ""),
     "TIMESTAMP_WITHOUT_TIME_ZONE": ("TIMESTAMP", ""),
     "TIMESTAMP_WITH_LOCAL_TIME_ZONE": ("TIMESTAMP", " WITH LOCAL TIME ZONE"),
+    "TIMESTAMP_WITH_TIME_ZONE": ("TIMESTAMP", " WITH TIME ZONE"),
 }
 
 
@@ -91,34 +92,31 @@ def _optional(column_type: ColumnTypeDefinition | None) -> ColumnTypeDefinition 
 def display_type(column_type: ColumnTypeDefinition) -> str:
     """Spell a top-level column type for drift messages only, the way FULL_DATA_TYPE does.
 
-    Drift is only decided by comparing `comparable_type` results, never these
-    strings. A type no table stores (INTERVAL, VARIANT, anything newer) is spelled from its name
-    and whichever of length, precision and scale it has.
+    Drift is only decided by comparing `comparable_type` results, never these strings, but two
+    types a dry run returns that compare differently always spell differently. A type without a
+    FULL_DATA_TYPE spelling here (INTERVAL, RAW, a structured type, anything newer) is spelled from
+    its name and every parameter it has, which keeps it distinct but doesn't match FULL_DATA_TYPE.
     """
     return _display(column_type, nested=False)
 
 
 def _display(column_type: ColumnTypeDefinition, *, nested: bool) -> str:
     if column_type.element_type is not None:
-        text = f"{column_type.type}<{_display(column_type.element_type, nested=True)}>"
+        element = _display(column_type.element_type, nested=True)
+        text = f"{column_type.type}{_parameters(column_type)}<{element}>"
     elif column_type.key_type is not None and column_type.value_type is not None:
         key = _display(column_type.key_type, nested=True)
         value = _display(column_type.value_type, nested=True)
-        text = f"MAP<{key}, {value}>"
+        text = f"{column_type.type}{_parameters(column_type)}<{key}, {value}>"
     elif column_type.fields is not None:
         fields = (
             _display_field(field.name, field.field_type, field.description)
             for field in column_type.fields
         )
-        text = f"ROW<{', '.join(fields)}>"
+        text = f"{column_type.type}{_parameters(column_type)}<{', '.join(fields)}>"
     else:
         name, suffix = _DISPLAY_NAMES.get(column_type.type, (column_type.type, ""))
-        parameters = [
-            str(value)
-            for value in (column_type.length, column_type.precision, column_type.scale)
-            if value is not None
-        ]
-        text = f"{name}({', '.join(parameters)}){suffix}" if parameters else f"{name}{suffix}"
+        text = f"{name}{_parameters(column_type)}{suffix}"
     # FULL_DATA_TYPE carries NOT NULL only inside composite types; top-level nullability lives
     # in the separate IS_NULLABLE column.
     if nested and not column_type.nullable:
@@ -126,8 +124,26 @@ def _display(column_type: ColumnTypeDefinition, *, nested: bool) -> str:
     return text
 
 
+def _parameters(column_type: ColumnTypeDefinition) -> str:
+    """Spell length, precision and scale the way FULL_DATA_TYPE does, then any interval resolution,
+    fractional precision or class name, labeled."""
+    parameters = [
+        str(value)
+        for value in (column_type.length, column_type.precision, column_type.scale)
+        if value is not None
+    ]
+    details = {
+        "resolution": column_type.resolution,
+        "fractional_precision": column_type.fractional_precision,
+        "class_name": column_type.class_name,
+    }
+    parameters.extend(f"{label}={value}" for label, value in details.items() if value is not None)
+    return f"({', '.join(parameters)})" if parameters else ""
+
+
 def _display_field(name: str, field_type: ColumnTypeDefinition, description: str | None) -> str:
-    text = f"`{name}` {_display(field_type, nested=True)}"
+    # FULL_DATA_TYPE doubles a backtick inside a field name, so a name can't close its quotes.
+    text = f"`{name.replace('`', '``')}` {_display(field_type, nested=True)}"
     if description is not None:
         text += " '" + description.replace("'", "''") + "'"
     return text
