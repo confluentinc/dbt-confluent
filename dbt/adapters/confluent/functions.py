@@ -43,7 +43,9 @@ class FunctionState(NamedTuple):
 
 def _split_outside_backticks(text: str, sep: str) -> list[str]:
     """Split on `sep`, ignoring separators inside backtick-quoted identifiers."""
-    parts, current, quoted = [], [], False
+    parts: list[str] = []
+    current: list[str] = []
+    quoted = False
     for char in text:
         if char == "`":
             quoted = not quoted
