@@ -508,8 +508,9 @@ independently. Flink scans the source once per consumer, not once shared across 
 ### Function
 
 A `function` registers a user-defined function (UDF) in Flink from an artifact (a Java JAR or
-Python ZIP) that has already been uploaded to Confluent Cloud, by issuing
-`CREATE FUNCTION ... USING JAR 'confluent-artifact://<artifact_id>'`. dbt orders it ahead of any
+Python ZIP) in Confluent Cloud, by issuing
+`CREATE FUNCTION ... USING JAR 'confluent-artifact://<artifact_id>'`. The artifact is either
+one you uploaded yourself (`artifact_id`) or a local package that dbt uploads for you (`artifact_path`). dbt orders it ahead of any
 model that calls it via `{{ function('name') }}`.
 
 Declare the function with a `config()` call in a file under `functions/` (dbt requires
@@ -715,7 +716,7 @@ Each per-materialization section links back to the specific subsections below th
 
 Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing. For example, `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
 
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `language`, `artifact_id`, `class`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `language`, `artifact_id`, `artifact_path`, `class`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
 
 If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
 

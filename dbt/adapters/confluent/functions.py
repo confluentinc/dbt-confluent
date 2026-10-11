@@ -1,7 +1,8 @@
 """Config validation and state comparison for the `function` materialization (#179).
 
-A Confluent UDF is registered from an artifact (a Java JAR or Python ZIP) that was already
-uploaded to Confluent Cloud, so a function's config must name the artifact and the class to bind.
+A Confluent UDF is registered from an artifact (a Java JAR or Python ZIP) in Confluent Cloud, so a
+function's config must name the artifact (an uploaded `artifact_id`, or a local `artifact_path`
+that dbt uploads, see function_artifacts.py) and the class to bind.
 Functions are immutable in Flink (no ALTER / CREATE OR REPLACE), so re-running the materialization
 compares the live function (via `DESCRIBE FUNCTION`) to the config: identical is a no-op, anything
 else is a drop and re-create.
@@ -9,6 +10,7 @@ else is a drop and re-create.
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, NamedTuple, cast
 
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
@@ -98,20 +100,25 @@ def render_identifier(text: str) -> str:
     return ".".join("`" + part.replace("`", "``") + "`" for part in parts)
 
 
-def validate_function_config(model_config: Any, catalog: str, database: str) -> dict[str, Any]:
+def validate_function_config(
+    model_config: Any, catalog: str, database: str, project_root: Path | None = None
+) -> dict[str, Any]:
     """Validate a `function` node's config and return the values the DDL needs.
 
-    The config must name the `language` (java/python), the `artifact_id` (`cfa-...`) and the
-    `class` to bind (a Python module path for python). `connections` is an optional list of
+    The config must name the `language` (java/python), the `class` to bind (a Python module path
+    for python) and exactly one of `artifact_id` (`cfa-...`, already uploaded) or `artifact_path`
+    (a local .jar/.zip matching the language, relative to `project_root`, that dbt uploads). `connections` is an optional list of
     connection names; a name that isn't fully qualified is resolved against `catalog` and
     `database` (the function's own). Only scalar functions are supported. Collects every
     problem into one error. `model_config` is the Jinja config object (anything with `.get`).
 
-    Returns `language`, `artifact_id`, `class_name`, `connections` (a list of `QualifiedName`,
+    Returns `language`, `artifact_id` and `artifact_path` (the absolute path; each None if not
+    configured), `class_name`, `connections` (a list of `QualifiedName`,
     for comparison) and `connection_names` (the names as configured, rendered as identifiers, for the DDL).
     """
     language = str(model_config.get("language") or "").lower()
     artifact_id = model_config.get("artifact_id")
+    artifact_path = model_config.get("artifact_path")
     class_name = model_config.get("class")
     raw_connections = model_config.get("connections")
     if raw_connections is None:
@@ -125,9 +132,15 @@ def validate_function_config(model_config: Any, catalog: str, database: str) -> 
             f"'language' must be one of {', '.join(_FUNCTION_LANGUAGES)} "
             f"(got {model_config.get('language')!r})"
         )
-    if not isinstance(artifact_id, str) or not _ARTIFACT_ID_RE.fullmatch(artifact_id):
+    resolved_path: Path | None = None
+    if artifact_id is not None and artifact_path is not None:
+        problems.append("'artifact_id' and 'artifact_path' are mutually exclusive")
+    elif artifact_path is not None:
+        resolved_path = _resolve_artifact_path(artifact_path, language, project_root, problems)
+    elif not isinstance(artifact_id, str) or not _ARTIFACT_ID_RE.fullmatch(artifact_id):
         problems.append(
-            f"'artifact_id' must be an artifact ID of the form 'cfa-...' (got {artifact_id!r})"
+            "one of 'artifact_id' (an artifact ID of the form 'cfa-...') or 'artifact_path' "
+            f"(a local package to upload) is required (got artifact_id={artifact_id!r})"
         )
     if not isinstance(class_name, str) or not class_name.strip():
         problems.append("'class' must be a non-empty string")
@@ -151,10 +164,31 @@ def validate_function_config(model_config: Any, catalog: str, database: str) -> 
     return {
         "language": language,
         "artifact_id": artifact_id,
+        "artifact_path": str(resolved_path) if resolved_path else None,
         "class_name": class_name.strip(),
         "connections": connections,
         "connection_names": [render_identifier(raw) for raw in raw_connections],
     }
+
+
+def _resolve_artifact_path(
+    artifact_path: Any, language: str, project_root: Path | None, problems: list[str]
+) -> Path | None:
+    """The absolute path of a configured `artifact_path`, or None after recording why not."""
+    if not isinstance(artifact_path, str) or not artifact_path:
+        problems.append(f"'artifact_path' must be a non-empty string (got {artifact_path!r})")
+        return None
+    path = (project_root or Path()) / artifact_path
+    if not path.is_file():
+        problems.append(f"'artifact_path' {str(path)!r} is not a file")
+        return None
+    expected = {"java": ".jar", "python": ".zip"}.get(language)
+    if expected and path.suffix.lower() != expected:
+        problems.append(
+            f"'artifact_path' must be a {expected} file for {language} (got {path.name!r})"
+        )
+        return None
+    return path.resolve()
 
 
 def parse_describe_function(rows: Any, catalog: str, database: str) -> FunctionState:
@@ -181,11 +215,15 @@ def parse_describe_function(rows: Any, catalog: str, database: str) -> FunctionS
 
 
 def desired_function_state(udf: dict[str, Any]) -> FunctionState:
-    """The FunctionState a validated config (see `validate_function_config`) asks for."""
+    """The FunctionState a validated config (see `validate_function_config`) asks for.
+
+    A function from an `artifact_path` whose artifact doesn't exist yet has no artifact ID
+    (`udf["artifact_id"]` is None), which never equals a live one: it always needs creating.
+    """
     return FunctionState(
         class_name=udf["class_name"],
         language=udf["language"],
-        artifact_id=udf["artifact_id"],
+        artifact_id=udf["artifact_id"] or f"<new upload of {udf['artifact_name']}>",
         connections=frozenset(udf["connections"]),
     )
 
@@ -206,15 +244,17 @@ def diff_function_state(existing: FunctionState, desired: FunctionState) -> list
     return changes
 
 
-def plan_function_change(
-    execute: Callable[..., Any], relation: BaseRelation, udf: dict[str, Any]
-) -> list[str] | None:
-    """Compare the live function at `relation` to the validated config `udf`.
+def plan_function_change(existing: FunctionState | None, udf: dict[str, Any]) -> list[str] | None:
+    """Compare the live function (`describe_function`'s result) to the validated config `udf`.
 
-    `execute` is the adapter's `execute` (called as `execute(sql, fetch=True)`, returning
-    `(response, table)`). Returns None when the function doesn't exist, otherwise the (possibly
-    empty) list of differences; empty means the function is already what the config asks for.
+    Returns None when the function doesn't exist, otherwise the (possibly empty) list of
+    differences; empty means the function is already what the config asks for.
     """
+    return None if existing is None else diff_function_state(existing, desired_function_state(udf))
+
+
+def describe_function(execute: Callable[..., Any], relation: BaseRelation) -> FunctionState | None:
+    """The live function at `relation` (via `DESCRIBE FUNCTION`), or None if it doesn't exist."""
     database, schema = cast(str, relation.database), cast(str, relation.schema)
     # DESCRIBE alone tells us both whether the function exists and what it is, saving an
     # INFORMATION_SCHEMA round-trip on every run. The driver has no typed "function not
@@ -229,8 +269,25 @@ def plan_function_change(
         if "doesn't exist" in message and f"`{relation.identifier}`" in message:
             return None
         raise
-    existing = parse_describe_function(described.rows, database, schema)
-    return diff_function_state(existing, desired_function_state(udf))
+    return parse_describe_function(described.rows, database, schema)
+
+
+def render_create_function(
+    relation: BaseRelation,
+    class_name: str,
+    language: str,
+    artifact_id: str,
+    connection_names: list[str],
+) -> str:
+    """The `CREATE FUNCTION` statement. `connection_names` are already rendered identifiers."""
+    escaped_class = class_name.replace("'", "''")
+    sql = f"create function {relation.render()} as '{escaped_class}'"
+    if language == "python":
+        sql += " language python"
+    sql += f" using jar 'confluent-artifact://{artifact_id}'"
+    if connection_names:
+        sql += f" using connections ({', '.join(connection_names)})"
+    return sql
 
 
 class FunctionPlan(NamedTuple):
