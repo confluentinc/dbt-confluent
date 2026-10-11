@@ -4,9 +4,11 @@ import time
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, NamedTuple, TypeVar, cast
 
 import agate
+from confluent_sql import ArtifactNotFoundError
 from confluent_sql.exceptions import (
     OperationalError,
     StatementNotFoundError,
@@ -26,7 +28,7 @@ from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import functions, tableflow
+from . import function_artifacts, functions, tableflow
 from .dry_run_types import comparable_type, display_type, stored_type
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
@@ -58,7 +60,14 @@ MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "table": _UNIVERSAL_CONFIG_KEYS | _KAFKA_BACKED_CONFIG_KEYS | {"on_schema_drift"},
     "view": _UNIVERSAL_CONFIG_KEYS,
     # A function is pure metadata (like a view) with no Kafka topic or long-running statement.
-    "function": _UNIVERSAL_CONFIG_KEYS | {"language", "artifact_id", "class", "connections"},
+    "function": _UNIVERSAL_CONFIG_KEYS
+    | {
+        "language",
+        "artifact_id",
+        "artifact_path",
+        "class",
+        "connections",
+    },
     "streaming_source": _UNIVERSAL_CONFIG_KEYS
     | _KAFKA_BACKED_CONFIG_KEYS
     | {"connector", "with", "on_schema_drift"},
@@ -177,8 +186,8 @@ class ConfluentAdapter(SQLAdapter):
                 "source": "dbt-confluent",
                 "description": (
                     "The `function` materialization (Flink UDFs) is experimental. Changing a "
-                    "function's config drops and re-creates it, and if the re-create fails (for "
-                    "example, the artifact doesn't exist) the function is left missing. It is "
+                    "function's config drops and re-creates it, and if the re-create fails the "
+                    "previous function is restored on a best-effort basis. It is "
                     "disabled unless this flag is enabled."
                 ),
                 "docs_url": "https://github.com/confluentinc/dbt-confluent/blob/main/MATERIALIZATIONS.md#function",
@@ -937,26 +946,64 @@ class ConfluentAdapter(SQLAdapter):
     ) -> dict[str, Any]:
         """Validate a `function` node's config; see `functions.validate_function_config`.
 
-        Unqualified connection names resolve against the function's own catalog and database.
+        Unqualified connection names resolve against the function's own catalog and database,
+        and a relative `artifact_path` against the dbt project root. For an `artifact_path`,
+        the result also has the `artifact_name` its artifact is (or will be) uploaded under,
+        which embeds a digest of the package's content (`artifact_digest`).
         """
-        return functions.validate_function_config(
-            model_config, cast(str, relation.database), cast(str, relation.schema)
+        udf = functions.validate_function_config(
+            model_config,
+            cast(str, relation.database),
+            cast(str, relation.schema),
+            Path(self.config.project_root),
         )
+        if udf["artifact_path"]:
+            udf["project"] = self.config.project_name
+            udf["artifact_digest"] = function_artifacts.file_digest(Path(udf["artifact_path"]))
+            udf["artifact_name"] = function_artifacts.artifact_display_name(
+                self.config.credentials.statement_name_prefix,
+                self.config.project_name,
+                cast(str, relation.identifier),
+                udf["artifact_digest"],
+            )
+        return udf
+
+    @available
+    def describe_function(
+        self, relation: BaseRelation, compute_pool_id: str | None = None
+    ) -> functions.FunctionState | None:
+        """The live function at `relation`, or None if it doesn't exist.
+
+        The lookup runs on the function's `compute_pool_id` override (the connection default if
+        None), like the statements that create or drop it. See `functions.describe_function`.
+        This is the one `DESCRIBE`: pass its result to `plan_function_change` and
+        `apply_function`.
+        """
+        return functions.describe_function(self._function_executor(compute_pool_id), relation)
 
     @available
     def plan_function_change(
-        self, relation: BaseRelation, udf: dict[str, Any], compute_pool_id: str | None = None
+        self, existing: functions.FunctionState | None, udf: dict[str, Any]
     ) -> list[str] | None:
-        """Compare the live function at `relation` to the validated config `udf`.
+        """Compare the live function (`describe_function`'s result) to the validated config `udf`.
 
-        The lookup runs on the function's `compute_pool_id` override (the connection default if
-        None), like the statements that create or drop it. See `functions.plan_function_change`.
+        See `functions.plan_function_change`. A function from an `artifact_path` is compared
+        against the artifact already uploaded for that content, if any.
         """
+        if udf["artifact_path"]:
+            artifact = function_artifacts.find_artifact(
+                self.connections.get_thread_handle(), udf["artifact_name"], udf["language"]
+            )
+            udf = {**udf, "artifact_id": artifact.id if artifact else None}
+        return functions.plan_function_change(existing, udf)
+
+    def _function_executor(self, compute_pool_id: str | None) -> Any:
+        """`self.execute` bound to a function's `compute_pool_id` override."""
 
         def execute(sql: str, **kwargs: Any) -> tuple[AdapterResponse, "agate.Table"]:
             return self.execute(sql, compute_pool_id=compute_pool_id, **kwargs)
 
-        return functions.plan_function_change(execute, relation, udf)
+        return execute
 
     @available
     def plan_function_action(
@@ -979,6 +1026,166 @@ class ConfluentAdapter(SQLAdapter):
             bool(full_refresh),
         )
         return plan._asdict()
+
+    @available
+    def apply_function(
+        self,
+        relation: BaseRelation,
+        udf: dict[str, Any],
+        existing: functions.FunctionState | None,
+        compute_pool_id: str | None,
+        create_statement_name: str,
+        drop_statement_name: str,
+    ) -> AdapterResponse:
+        """Create the function at `relation`, first dropping `existing` (its live state, from
+        `describe_function`) if there is one.
+
+        The artifact is sorted out *before* anything is dropped: an `artifact_path` is uploaded
+        (see `function_artifacts`) and a configured `artifact_id` is checked to exist, so a bad
+        artifact fails the run with the existing function untouched. If the drop or create
+        then fails, the previous function is put back. The artifact the function replaced is left
+        in place, since statements may still be bound to it.
+        Returns the create statement's response.
+        """
+        conn = self.connections.get_thread_handle()
+        execute = self._function_executor(compute_pool_id)
+
+        # What to put back if this change fails: the function live now, or nothing on a first create.
+        journal = function_artifacts.Journal(
+            restore=function_artifacts.function_state_to_restore(existing) if existing else None
+        )
+        if udf["artifact_path"]:
+            artifact = function_artifacts.ensure_artifact(conn, udf, journal)
+            artifact_id = artifact.id
+            # An earlier, interrupted attempt's journal is kept as is, and may be stale.
+            kept = function_artifacts.decode_description(artifact.description)[1]
+            if kept is not None and kept != journal:
+                journal = self._reconcile_journal(conn, relation, udf, artifact_id, kept, execute)
+        else:
+            artifact_id = udf["artifact_id"]
+            self._require_artifact_exists(conn, artifact_id)
+        restore = journal.restore
+
+        create_sql = functions.render_create_function(
+            relation, udf["class_name"], udf["language"], artifact_id, udf["connection_names"]
+        )
+        try:
+            if existing is not None:
+                execute(f"drop function {relation.render()}", statement_name=drop_statement_name)
+            response, _ = execute(create_sql, statement_name=create_statement_name)
+        except Exception:
+            if restore:
+                self._restore_function(relation, restore, execute, create_statement_name)
+            raise
+        if udf["artifact_path"]:
+            self._settle_function_artifact(conn, relation, artifact_id)
+        if existing is not None and existing.artifact_id != artifact_id:
+            logger.warning(
+                warning_tag(
+                    f"Function {relation.render()} now uses artifact {artifact_id}. Statements "
+                    f"started before this change stay on the old artifact {existing.artifact_id} "
+                    "until they are recreated; it is not deleted."
+                )
+            )
+        return response
+
+    @available
+    def settle_function(
+        self, relation: BaseRelation, udf: dict[str, Any], compute_pool_id: str | None
+    ) -> None:
+        """Finish an interrupted change to a function that is already what the config asks for.
+
+        See `function_artifacts.settle_journal`. A no-op unless the function has an
+        `artifact_path` whose artifact still carries a journal.
+        """
+        if not udf["artifact_path"]:
+            return
+        conn = self.connections.get_thread_handle()
+        artifact = function_artifacts.find_artifact(conn, udf["artifact_name"], udf["language"])
+        if artifact:
+            self._settle_function_artifact(conn, relation, artifact.id)
+
+    def _require_artifact_exists(self, conn: Any, artifact_id: str) -> None:
+        """Fail if the artifact doesn't exist, rather than dropping a function we can't recreate.
+
+        Any failure to look it up blocks too (e.g. a key that can't use the artifact API): a
+        config that names an artifact needs the credentials to check it.
+        """
+        try:
+            conn.get_artifact(artifact_id)
+        except ArtifactNotFoundError as e:
+            raise CompilationError(
+                f"Artifact '{artifact_id}' doesn't exist in this environment, cloud and region."
+            ) from e
+
+    def _reconcile_journal(
+        self,
+        conn: Any,
+        relation: BaseRelation,
+        udf: dict[str, Any],
+        artifact_id: str,
+        journal: function_artifacts.Journal,
+        execute: Any,
+    ) -> function_artifacts.Journal:
+        """Bring a journal left by an interrupted attempt up to date, and return it.
+
+        Other runs may have replaced the function since, which makes its restore record stale. The
+        function is described again here, *after* the journal was read, so one that differs from
+        the record has certainly superseded it, and the journal is rewritten to describe it. If
+        there is no function, the journal is the only record of the original and is kept.
+        """
+        live = functions.describe_function(execute, relation)
+        if live is None:
+            return journal
+        current = function_artifacts.Journal(
+            restore=function_artifacts.function_state_to_restore(live)
+        )
+        if current != journal:
+            conn.update_artifact(
+                artifact_id,
+                description=function_artifacts.encode_description(udf["project"], current),
+            )
+        return current
+
+    def _restore_function(
+        self, relation: BaseRelation, restore: dict[str, Any], execute: Any, statement_name: str
+    ) -> None:
+        """Best-effort: re-create the previous function if the change left none in place."""
+        try:
+            if functions.describe_function(execute, relation) is not None:
+                return
+            sql = functions.render_create_function(
+                relation,
+                restore["class_name"],
+                restore["language"],
+                restore["artifact_id"],
+                restore["connections"],
+            )
+            execute(sql, statement_name=sanitize_statement_name(f"{statement_name}-restore"))
+            logger.warning(
+                warning_tag(
+                    f"Changing function {relation.render()} failed; restored the previous one."
+                )
+            )
+        except Exception as e:
+            logger.error(
+                f"Could not restore the previous function {relation.render()} ({e}). The next "
+                "run will try again."
+            )
+
+    def _settle_function_artifact(
+        self, conn: Any, relation: BaseRelation, artifact_id: str
+    ) -> None:
+        """Clear the journal after a completed change, leaving it for the next run on failure."""
+        try:
+            function_artifacts.settle_journal(conn, artifact_id)
+        except Exception as e:
+            logger.warning(
+                warning_tag(
+                    f"Function {relation.render()} was updated but finishing its journal "
+                    f"failed ({e}). The next run will retry."
+                )
+            )
 
     @available
     def warn_function_change(self, message: str) -> None:
