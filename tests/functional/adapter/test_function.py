@@ -6,24 +6,30 @@ tests/unit/test_functions.py. These prove the wiring end to end through a real `
 Most classes need no uploaded artifact: they fail before (or at) `CREATE FUNCTION`, which is
 all that's needed to prove the behavior flag, config validation and absent-function detection.
 
-`TestFunctionLifecycle` walks every plan outcome (create, unchanged, keep, fail, replace) and
-needs two pre-uploaded artifacts that both contain the same class; it is skipped unless
-CONFLUENT_TEST_UDF_ARTIFACT_ID, CONFLUENT_TEST_UDF_ARTIFACT_ID_2 and CONFLUENT_TEST_UDF_CLASS
-are set (CONFLUENT_TEST_UDF_LANGUAGE defaults to python).
+`TestFunctionLifecycle` walks every plan outcome (create, unchanged, keep, fail, replace) using two
+artifacts it uploads itself, and `TestFunctionArtifactUpload` covers dbt uploading a local package
+(`artifact_path`). Both need a key that can use the artifact API (the Global key), and delete
+whatever they upload.
 """
 
 import os
+import tarfile
+import uuid
+import zipfile
+from pathlib import Path
 
 import pytest
+from confluent_sql import ArtifactNotFoundError
 
-from dbt.adapters.confluent import functions
+from dbt.adapters.confluent import function_artifacts, functions
 from dbt.adapters.confluent.connections import ConfluentConnectionManager
-from dbt.tests.util import run_dbt, write_file
+from dbt.tests.util import run_dbt, run_dbt_and_capture, write_file
 from tests.functional.adapter._helpers import get_result_by_name
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 FLAG = "enable_experimental_function_materialization"
 FUNCTION_NAME = "udf"
+FUNCTION_FILE = f"{FUNCTION_NAME}.sql"
 
 # Well-formed but (presumably) nonexistent, so it passes validation but can't be created.
 NONEXISTENT_ARTIFACT_ID = "cfa-doesnotexist"
@@ -154,9 +160,14 @@ class TestFunctionConfigErrors(FunctionFixtures):
     # function name -> (config overrides, expected error substring)
     CASES = {
         "bad_language": ({"language": "sql"}, "'language' must be one of"),
-        "bad_artifact_id": ({"artifact_id": "abc123"}, "'artifact_id' must be"),
+        "bad_artifact_id": ({"artifact_id": "abc123"}, "one of 'artifact_id'"),
         "bad_class": ({"class_name": " "}, "'class' must be a non-empty string"),
         "bad_connections": ({"connections": ["a..c"]}, "'connections'"),
+        "bad_id_and_path": ({"artifact_path": "udf.zip"}, "mutually exclusive"),
+        "bad_missing_package": (
+            {"language": "python", "artifact_id": None, "artifact_path": "missing.zip"},
+            "is not a file",
+        ),
     }
     FUNCTIONS = list(CASES)
 
@@ -204,40 +215,84 @@ class TestFunctionWithNonexistentArtifact(FunctionFixtures):
         assert plan_actions == ["create"]
 
 
-UDF_ARTIFACT_ID = os.getenv("CONFLUENT_TEST_UDF_ARTIFACT_ID")
-UDF_ARTIFACT_ID_2 = os.getenv("CONFLUENT_TEST_UDF_ARTIFACT_ID_2")
-UDF_CLASS = os.getenv("CONFLUENT_TEST_UDF_CLASS")
-UDF_LANGUAGE = os.getenv("CONFLUENT_TEST_UDF_LANGUAGE", "python")
+PACKAGE_FILE = "udf_package.zip"
+EXAMPLE_UDF_SOURCE = Path(__file__).parent / "data" / "example_udf-0.1.0"
+EXAMPLE_UDF_CLASS = "example_udf.tshirt_sizing.is_smaller"
 
-
-@pytest.mark.skipif(
-    not (UDF_ARTIFACT_ID and UDF_ARTIFACT_ID_2 and UDF_CLASS)
-    or UDF_ARTIFACT_ID == UDF_ARTIFACT_ID_2,
-    reason=(
-        "Needs two different pre-uploaded UDF artifacts containing the same class: set "
-        "CONFLUENT_TEST_UDF_ARTIFACT_ID, CONFLUENT_TEST_UDF_ARTIFACT_ID_2 and "
-        "CONFLUENT_TEST_UDF_CLASS (and optionally CONFLUENT_TEST_UDF_LANGUAGE)"
-    ),
+# Uploading an artifact is a control-plane call, which needs the Global key (like Tableflow).
+requires_global_key = pytest.mark.skipif(
+    not (os.getenv("CONFLUENT_GLOBAL_API_KEY") and os.getenv("CONFLUENT_GLOBAL_API_SECRET")),
+    reason="Uploading artifacts needs CONFLUENT_GLOBAL_API_KEY and CONFLUENT_GLOBAL_API_SECRET",
 )
+
+
+def build_package(path: Path, version: str) -> None:
+    """Write a Python UDF package (a ZIP of the example UDF's sdist, as Confluent's UDF guide
+    describes) to `path`. The server validates a package's contents, so it has to be real.
+    `version` is a marker file's content, so changing it changes the package's digest."""
+    sdist = path.parent / f"{EXAMPLE_UDF_SOURCE.name}.tar.gz"
+    with tarfile.open(sdist, "w:gz") as tar:
+        tar.add(EXAMPLE_UDF_SOURCE, arcname=EXAMPLE_UDF_SOURCE.name)
+    with zipfile.ZipFile(path, "w") as package:
+        package.write(sdist, f"dist/{sdist.name}")
+        package.writestr("version.txt", version)
+    sdist.unlink()
+
+
+def write_package(project, version: str) -> None:
+    build_package(Path(project.project_root) / PACKAGE_FILE, version)
+
+
+@pytest.fixture(scope="class")
+def udf_artifact_ids(project, tmp_path_factory) -> list[str]:
+    """Two different, valid Python UDF artifacts (both contain `EXAMPLE_UDF_CLASS`), uploaded for
+    the duration of the test class."""
+    prefix = project.adapter.config.credentials.statement_name_prefix
+    ids: list[str] = []
+    try:
+        with project.adapter.connection_named("upload_udf_artifacts"):
+            handle = project.adapter.connections.get_thread_handle()
+            for version in ("a", "b"):
+                path = tmp_path_factory.mktemp("udf") / "package.zip"
+                build_package(path, version)
+                artifact = handle.create_artifact(
+                    f"{prefix}{uuid.uuid4().hex[:12]}", file=path, runtime_language="PYTHON"
+                )
+                ids.append(artifact.id)
+        yield ids
+    finally:
+        # A new connection: dbt closes the one above after each of its own invocations.
+        with project.adapter.connection_named("delete_udf_artifacts"):
+            handle = project.adapter.connections.get_thread_handle()
+            for artifact_id in ids:
+                try:
+                    handle.delete_artifact(artifact_id)
+                except ArtifactNotFoundError:
+                    pass
+
+
+@requires_global_key
 class TestFunctionLifecycle(FunctionFixtures):
     """One function taken through every plan outcome, in order (each test builds on the last):
     create, unchanged, keep, fail, replace on a config change, replace on --full-refresh.
-    The function's state is checked with `DESCRIBE FUNCTION`, the plan with `plan_actions`."""
+    The function's state is checked with `DESCRIBE FUNCTION`, the plan with `plan_actions`.
+
+    Uses pre-uploaded artifacts (`artifact_id`), as opposed to `TestFunctionArtifactUpload`."""
 
     NAME = "functionlifecycle"
 
     @pytest.fixture(scope="class")
     def functions(self):
-        return {f"{FUNCTION_NAME}.sql": self.sql(UDF_ARTIFACT_ID)}
+        # The artifacts need the project, which needs this: test_1 fills in the real ID.
+        return {f"{FUNCTION_NAME}.sql": self.sql(NONEXISTENT_ARTIFACT_ID)}
 
     @staticmethod
     def sql(artifact_id: str, **extra) -> str:
-        return function_sql(artifact_id, UDF_CLASS, UDF_LANGUAGE, **extra)
+        return function_sql(artifact_id, EXAMPLE_UDF_CLASS, "python", **extra)
 
-    @staticmethod
-    def configure(project, artifact_id: str, **extra) -> None:
+    def configure(self, project, artifact_id: str, **extra) -> None:
         write_file(
-            TestFunctionLifecycle.sql(artifact_id, **extra),
+            self.sql(artifact_id, **extra),
             project.project_root,
             "functions",
             f"{FUNCTION_NAME}.sql",
@@ -248,46 +303,62 @@ class TestFunctionLifecycle(FunctionFixtures):
         rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
         return {str(name): str(value) for name, value in rows}["plugin id"]
 
-    def test_1_create(self, project, plan_actions):
+    def test_1_create(self, project, plan_actions, udf_artifact_ids):
+        self.configure(project, udf_artifact_ids[0])
         run_dbt(["build"])
         assert plan_actions == ["create"]
-        assert self.live_artifact_id(project) == UDF_ARTIFACT_ID
+        assert self.live_artifact_id(project) == udf_artifact_ids[0]
 
-    def test_2_unchanged_rerun_is_a_noop(self, project, plan_actions):
+    def test_2_unchanged_rerun_is_a_noop(self, project, plan_actions, udf_artifact_ids):
         run_dbt(["build"])
         assert plan_actions == ["unchanged"]
-        assert self.live_artifact_id(project) == UDF_ARTIFACT_ID
+        assert self.live_artifact_id(project) == udf_artifact_ids[0]
 
-    def test_3_changed_with_continue_keeps_the_existing_function(self, project, plan_actions):
-        self.configure(project, UDF_ARTIFACT_ID_2, on_configuration_change="continue")
+    def test_3_changed_with_continue_keeps_the_existing_function(
+        self, project, plan_actions, udf_artifact_ids
+    ):
+        self.configure(project, udf_artifact_ids[1], on_configuration_change="continue")
         run_dbt(["build"])
         assert plan_actions == ["keep"]
-        assert self.live_artifact_id(project) == UDF_ARTIFACT_ID
+        assert self.live_artifact_id(project) == udf_artifact_ids[0]
 
-    def test_4_changed_with_fail_errors_and_changes_nothing(self, project, plan_actions):
-        self.configure(project, UDF_ARTIFACT_ID_2, on_configuration_change="fail")
+    def test_4_changed_with_fail_errors_and_changes_nothing(
+        self, project, plan_actions, udf_artifact_ids
+    ):
+        self.configure(project, udf_artifact_ids[1], on_configuration_change="fail")
         errors = run_failing()
         assert "on_configuration_change" in errors[FUNCTION_NAME]
         assert plan_actions == ["fail"]
-        assert self.live_artifact_id(project) == UDF_ARTIFACT_ID
+        assert self.live_artifact_id(project) == udf_artifact_ids[0]
 
-    def test_5_changed_with_apply_replaces_the_function(self, project, plan_actions):
-        self.configure(project, UDF_ARTIFACT_ID_2)  # `apply` is dbt's default
+    def test_5_changed_with_apply_replaces_the_function(
+        self, project, plan_actions, udf_artifact_ids
+    ):
+        self.configure(project, udf_artifact_ids[1])  # `apply` is dbt's default
         run_dbt(["build"])
         assert plan_actions == ["replace"]
-        assert self.live_artifact_id(project) == UDF_ARTIFACT_ID_2
+        assert self.live_artifact_id(project) == udf_artifact_ids[1]
 
-    def test_6_full_refresh_replaces_an_unchanged_function(self, project, plan_actions):
+    def test_6_full_refresh_replaces_an_unchanged_function(
+        self, project, plan_actions, udf_artifact_ids
+    ):
         # `fail` would block a change, but never a rebuild the user asked for.
-        self.configure(project, UDF_ARTIFACT_ID_2, on_configuration_change="fail")
+        self.configure(project, udf_artifact_ids[1], on_configuration_change="fail")
         run_dbt(["build", "--full-refresh"])
         assert plan_actions == ["replace"]
-        assert self.live_artifact_id(project) == UDF_ARTIFACT_ID_2
+        assert self.live_artifact_id(project) == udf_artifact_ids[1]
+
+    def test_7_replacing_with_a_missing_artifact_leaves_the_function_alone(
+        self, project, plan_actions, udf_artifact_ids
+    ):
+        """The artifact is checked before the function is dropped (#187)."""
+        self.configure(project, NONEXISTENT_ARTIFACT_ID)
+        errors = run_failing()
+        assert NONEXISTENT_ARTIFACT_ID in errors[FUNCTION_NAME]
+        assert self.live_artifact_id(project) == udf_artifact_ids[1]
 
 
-@pytest.mark.skipif(
-    not (UDF_ARTIFACT_ID and UDF_CLASS), reason="Needs a pre-uploaded UDF artifact"
-)
+@requires_global_key
 class TestFunctionRunsHooks(FunctionFixtures):
     """`pre_hook` runs before the function is created and `post_hook` after. The hooks are cheap
     `SHOW` statements tagged with a marker comment so they can be found in what was submitted."""
@@ -298,17 +369,20 @@ class TestFunctionRunsHooks(FunctionFixtures):
 
     @pytest.fixture(scope="class")
     def functions(self):
-        return {
-            f"{FUNCTION_NAME}.sql": function_sql(
-                UDF_ARTIFACT_ID,
-                UDF_CLASS,
-                UDF_LANGUAGE,
-                pre_hook=f"show catalogs {self.PRE_MARKER}",
-                post_hook=f"show catalogs {self.POST_MARKER}",
-            )
-        }
+        return {FUNCTION_FILE: self.sql(NONEXISTENT_ARTIFACT_ID)}
 
-    def test_hooks_run_around_create(self, project, submitted_sql):
+    def sql(self, artifact_id: str) -> str:
+        return function_sql(
+            artifact_id,
+            EXAMPLE_UDF_CLASS,
+            "python",
+            pre_hook=f"show catalogs {self.PRE_MARKER}",
+            post_hook=f"show catalogs {self.POST_MARKER}",
+        )
+
+    def test_hooks_run_around_create(self, project, submitted_sql, udf_artifact_ids):
+        # The artifact needs the project, which needs `functions`: fill in the real ID here.
+        write_file(self.sql(udf_artifact_ids[0]), project.project_root, "functions", FUNCTION_FILE)
         run_dbt(["build"])
 
         def position(fragment: str) -> int:
@@ -317,3 +391,211 @@ class TestFunctionRunsHooks(FunctionFixtures):
             return matches[0]
 
         assert position(self.PRE_MARKER) < position("CREATE FUNCTION") < position(self.POST_MARKER)
+
+
+@requires_global_key
+class TestFunctionArtifactUpload(FunctionFixtures):
+    """A function from a local `artifact_path`: dbt uploads the package and registers the
+    function from it. Re-running reuses the artifact; a changed package gets a new artifact,
+    and the function's previous one is kept (statements may still be bound to it). Each test
+    builds on the last.
+
+    Needs no pre-uploaded artifact, but does write to Confluent's artifact API (and so needs a
+    key that can: the Global key). Anything it uploads is deleted afterwards."""
+
+    NAME = "functionupload"
+    FIRST_VERSION, SECOND_VERSION = "v1", "v2"
+    # The package file the live function was created from. Rebuilding a package gives different
+    # bytes each time (file timestamps), so a test that needs the *same* package puts these back.
+    live_package: dict[str, bytes] = {}
+
+    @pytest.fixture(scope="class")
+    def functions(self):
+        return {
+            f"{FUNCTION_NAME}.sql": function_sql(
+                artifact_id=None, class_name=EXAMPLE_UDF_CLASS, language="python"
+            ).replace("artifact_id=None", f"artifact_path={PACKAGE_FILE!r}")
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def package(self, project):
+        write_package(project, self.FIRST_VERSION)
+
+    @pytest.fixture(scope="class", autouse=True)
+    def delete_artifacts(self, project):
+        yield
+        with project.adapter.connection_named("cleanup_artifacts"):
+            for artifact in self.our_artifacts(project):
+                try:
+                    project.adapter.connections.get_thread_handle().delete_artifact(artifact.id)
+                except Exception:
+                    pass  # best effort
+
+    def our_artifacts(self, project) -> list:
+        prefix = project.adapter.config.credentials.statement_name_prefix
+        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
+        handle = project.adapter.connections.get_thread_handle()
+        return [a for a in handle.list_artifacts() if a.display_name.startswith(stem)]
+
+    def live_artifact_id(self, project) -> str:
+        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        return {str(name): str(value) for name, value in rows}["plugin id"]
+
+    def artifacts(self, project) -> dict[str, str]:
+        """Our artifacts, id -> description."""
+        with project.adapter.connection_named("list_artifacts"):
+            return {a.id: a.description for a in self.our_artifacts(project)}
+
+    def leave_journal(self, project, artifact_id: str) -> None:
+        """Mark an artifact as having an unfinished change, as a run that died would."""
+        with project.adapter.connection_named("leave_journal"):
+            project.adapter.connections.get_thread_handle().update_artifact(
+                artifact_id,
+                description=function_artifacts.encode_description(
+                    project.adapter.config.project_name, function_artifacts.Journal(restore=None)
+                ),
+            )
+
+    def test_0_compile_does_not_upload_or_create_anything(self, project, submitted_sql):
+        """Parsing and compiling never run a materialization, so there is no side effect."""
+        run_dbt(["compile"])
+        assert self.artifacts(project) == {}
+        assert submitted_sql == []
+
+    def test_1_uploads_the_package_and_creates_the_function(self, project, plan_actions):
+        run_dbt(["build"])
+        assert plan_actions == ["create"]
+        (artifact_id,) = self.artifacts(project)
+        assert self.live_artifact_id(project) == artifact_id
+
+    def test_2_unchanged_package_reuses_the_artifact(self, project, plan_actions, submitted_sql):
+        """And finishes a change a dead run left unfinished (a leftover journal)."""
+        (artifact_id,) = self.artifacts(project)
+        self.leave_journal(project, artifact_id)
+
+        run_dbt(["build"])
+
+        assert plan_actions == ["unchanged"]
+        artifacts = self.artifacts(project)
+        assert artifacts.keys() == {artifact_id}
+        assert "journal" not in artifacts[artifact_id]
+        assert not any("create function" in sql.lower() for sql in submitted_sql)
+
+    def test_3_changed_package_replaces_the_function_and_keeps_the_old_artifact(
+        self, project, plan_actions, submitted_sql
+    ):
+        (first_artifact_id,) = self.artifacts(project)
+        write_package(project, self.SECOND_VERSION)
+
+        run_dbt(["build"])
+
+        assert plan_actions == ["replace"]
+        # the live function is described once, and the result reused to plan and to replace it
+        assert sum("describe function" in sql.lower() for sql in submitted_sql) == 1
+        artifacts = self.artifacts(project)
+        (second_artifact_id,) = artifacts.keys() - {first_artifact_id}
+        assert self.live_artifact_id(project) == second_artifact_id
+        # the journal was cleared: nothing is left half-done
+        assert "journal" not in artifacts[second_artifact_id]
+
+    def configure(self, project, class_name: str = EXAMPLE_UDF_CLASS, **extra) -> None:
+        write_file(
+            function_sql(
+                artifact_id=None, class_name=class_name, language="python", **extra
+            ).replace("artifact_id=None", f"artifact_path={PACKAGE_FILE!r}"),
+            project.project_root,
+            "functions",
+            f"{FUNCTION_NAME}.sql",
+        )
+
+    def test_4_failed_create_restores_the_previous_function(self, project):
+        previous_artifact_id = self.live_artifact_id(project)
+        before = self.artifacts(project)
+        write_package(project, "v3")
+        self.configure(project, class_name="example_udf.tshirt_sizing.no_such_function")
+
+        errors = run_failing()
+
+        assert FUNCTION_NAME in errors
+        assert self.live_artifact_id(project) == previous_artifact_id  # put back
+        artifacts = self.artifacts(project)
+        assert before.keys() <= artifacts.keys()
+        (new_artifact_id,) = artifacts.keys() - before.keys()
+        assert "journal" in artifacts[new_artifact_id]  # the unfinished change is recorded
+
+    def test_5_the_next_run_rolls_forward_and_clears_the_journal(self, project):
+        before = self.artifacts(project)
+        (pending_artifact_id,) = (a for a, d in before.items() if "journal" in d)
+        self.configure(project, class_name=EXAMPLE_UDF_CLASS)
+
+        run_dbt(["build"])
+
+        assert self.live_artifact_id(project) == pending_artifact_id
+        artifacts = self.artifacts(project)
+        assert "journal" not in artifacts[pending_artifact_id]
+        assert artifacts.keys() == before.keys()  # no artifact was deleted
+
+    def test_6_continue_and_fail_upload_nothing(self, project, plan_actions):
+        """The plan is made before anything is uploaded, so neither touches artifacts."""
+        before, live_artifact_id = self.artifacts(project), self.live_artifact_id(project)
+        package_file = Path(project.project_root) / PACKAGE_FILE
+        self.live_package["bytes"] = package_file.read_bytes()
+        write_package(project, "v4")
+
+        self.configure(project, on_configuration_change="continue")
+        run_dbt(["build"])
+        assert plan_actions == ["keep"]
+
+        self.configure(project, on_configuration_change="fail")
+        assert FUNCTION_NAME in run_failing()
+        assert plan_actions == ["keep", "fail"]
+
+        assert self.artifacts(project) == before
+        assert self.live_artifact_id(project) == live_artifact_id
+
+    def test_7_full_refresh_re_creates_on_the_same_artifact(
+        self, project, plan_actions, submitted_sql
+    ):
+        """An unchanged package is replaced on --full-refresh, without a new upload."""
+        (Path(project.project_root) / PACKAGE_FILE).write_bytes(self.live_package["bytes"])
+        self.configure(project)
+        before, live_artifact_id = self.artifacts(project), self.live_artifact_id(project)
+
+        run_dbt(["build", "--full-refresh"])
+
+        assert plan_actions == ["replace"]
+        assert any("create function" in sql.lower() for sql in submitted_sql)
+        assert self.artifacts(project) == before
+        assert self.live_artifact_id(project) == live_artifact_id
+
+
+class TestFunctionEmptyRun(FunctionFixtures):
+    """`--empty` only limits the rows models read; a function is DDL, so it is still created
+    (models that call it in an `--empty` run need it), uploading its package like any other run."""
+
+    NAME = "functionempty"
+
+    @pytest.fixture(scope="class")
+    def functions(self):
+        return {
+            FUNCTION_FILE: function_sql(
+                artifact_id=None, class_name=EXAMPLE_UDF_CLASS, language="python"
+            ).replace("artifact_id=None", f"artifact_path={PACKAGE_FILE!r}")
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def package(self, project):
+        write_package(project, "empty-run")
+        yield
+        prefix = project.adapter.config.credentials.statement_name_prefix
+        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
+        with project.adapter.connection_named("delete_artifacts"):
+            handle = project.adapter.connections.get_thread_handle()
+            for artifact in handle.list_artifacts():
+                if artifact.display_name.startswith(stem):
+                    handle.delete_artifact(artifact.id)
+
+    def test_empty_run_uploads_and_creates_the_function(self, project):
+        run_dbt(["build", "--empty"])
+        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        assert {str(name): str(value) for name, value in rows}["plugin id"].startswith("cfa-")

@@ -5,9 +5,11 @@
   {% do validate_materialization_config() %}
   {%- set target_relation = this.incorporate(type='function') -%}
   {%- set udf = adapter.validate_function_config(config, target_relation) -%}
-  {#- None if absent; else the differences from the config (empty if identical). Live lookup,
-     so skipped at parse/compile time (`execute` is false), where None just means "create". -#}
-  {%- set changes = adapter.plan_function_change(target_relation, udf, config.get('compute_pool_id')) if execute else none -%}
+  {#- The live function (None if absent), described once and reused below. Live lookup, so skipped
+     at parse/compile time (`execute` is false), where None just means "create". -#}
+  {%- set existing = adapter.describe_function(target_relation, config.get('compute_pool_id')) if execute else none -%}
+  {#- None if absent; else the differences from the config (empty if identical). -#}
+  {%- set changes = adapter.plan_function_change(existing, udf) if execute else none -%}
   {#- What to do about them, per dbt's `on_configuration_change` (apply | continue | fail),
      unless --full-refresh, which always replaces an existing function. -#}
   {%- set plan = adapter.plan_function_action(target_relation, changes, config.get('on_configuration_change'), should_full_refresh()) -%}
@@ -22,6 +24,10 @@
     {# Nothing to submit, but dbt's function runner reads the 'main' result. #}
     {% if plan.message %}{% do adapter.warn_function_change(plan.message) %}{% endif %}
     {% do store_result('main', response=adapter.noop_response('Function unchanged'), agate_table=none) %}
+    {% if plan.action == 'unchanged' and execute %}
+      {#- Finish any interrupted replacement of its artifact (see function_artifacts.py). -#}
+      {% do adapter.settle_function(target_relation, udf, config.get('compute_pool_id')) %}
+    {% endif %}
     {{ run_hooks(post_hooks, inside_transaction=False) }}
     {{ return({'relations': [target_relation]}) }}
   {% endif %}
@@ -29,16 +35,16 @@
   -- `BEGIN` happens here:
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
-  {# Confluent UDFs are immutable (no ALTER / CREATE OR REPLACE), so a change is a drop + create. #}
+  {#- Confluent UDFs are immutable (no ALTER / CREATE OR REPLACE), so a change is a drop + create.
+     The adapter sorts out the artifact (upload / existence check) before dropping anything, and
+     puts the old function back if the new one can't be created. -#}
   {% if plan.action == 'replace' %}
     {% do adapter.warn_function_change(plan.message) %}
-    {% call statement('drop_function', statement_name=get_statement_name('-drop')) -%}
-      drop function {{ target_relation.render() }}
-    {%- endcall %}
   {% endif %}
-  {% call statement('main', statement_name=get_statement_name()) -%}
-    {{ get_create_function_sql(target_relation, udf) }}
-  {%- endcall %}
+  {%- set response = adapter.apply_function(
+        target_relation, udf, existing, config.get('compute_pool_id'),
+        get_statement_name(), get_statement_name('-drop')) if execute else adapter.noop_response('Function not applied') -%}
+  {% do store_result('main', response=response, agate_table=none) %}
 
   {{ run_hooks(post_hooks, inside_transaction=True) }}
   {{ adapter.commit() }}
