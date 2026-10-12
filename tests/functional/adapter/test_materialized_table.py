@@ -1059,7 +1059,7 @@ class TestMaterializedTableStatementProperties(_MTFixtures):
         plain_marker = self.MT_PLAIN.replace("_", "-")
 
         [tuned_properties] = [
-            properties for name, properties in captured.items() if tuned_marker in name
+            statement["properties"] for statement in captured if tuned_marker in statement["name"]
         ]
         assert tuned_properties.get(IDLE_TIMEOUT_PROPERTY) == IDLE_TIMEOUT_VALUE, (
             f"Expected '{IDLE_TIMEOUT_PROPERTY}' on {self.MT_TUNED}'s DDL statement, "
@@ -1072,7 +1072,7 @@ class TestMaterializedTableStatementProperties(_MTFixtures):
         # idle-timeout ever happened to equal IDLE_TIMEOUT_VALUE, rather than
         # because our plumbing actually threaded the configured value through.
         [plain_properties] = [
-            properties for name, properties in captured.items() if plain_marker in name
+            statement["properties"] for statement in captured if plain_marker in statement["name"]
         ]
         assert plain_properties.get(IDLE_TIMEOUT_PROPERTY) != IDLE_TIMEOUT_VALUE, (
             f"{self.MT_PLAIN}'s DDL statement (no statement_properties configured) reports "
