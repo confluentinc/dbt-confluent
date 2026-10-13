@@ -93,14 +93,17 @@ class TestCheckColumnDrift:
         )
         assert violations == ["column type: 'a' existing='<1>', expected='<2>'"]
 
-    def test_matches_decides_type_changes(self):
-        """The dry-run path decides with types_match instead of ==."""
+    def test_fit_decides_and_spells_type_changes(self):
+        """The dry-run path fits the expected value with fitted_type, compares the result with
+        ==, and shows the result."""
         violations = ConfluentAdapter._check_column_drift(
             {"a": 1, "b": 2},
             {"a": 3, "b": 5},
-            matches=lambda existing, expected: existing % 2 == expected % 2,
+            fit=lambda existing, expected: (
+                existing if existing % 2 == expected % 2 else expected * 10
+            ),
         )
-        assert violations == ["column type: 'b' existing='2', expected='5'"]
+        assert violations == ["column type: 'b' existing='2', expected='50'"]
 
 
 # ---------------------------------------------------------------------------
@@ -1174,9 +1177,9 @@ class TestCheckSchemaDriftOrchestrator:
             "column type: 'm' existing='MAP<VARCHAR(5), INT>', expected='MAP<VARCHAR(10), INT>'"
         ) in str(excinfo.value)
 
-    def test_protobuf_map_value_change_spells_the_declared_types(self):
-        """The key fits but the value changed: drift, and the message spells each side as its
-        dry-run reports it, so the key reads differently too."""
+    def test_protobuf_map_value_change_keeps_the_tables_key(self):
+        """The key fits but the value changed: drift, and the message spells the table's key on
+        both sides, so only the value reads differently."""
         existing = self._protobuf_map({"type": "VARCHAR", "nullable": True, "length": 5})
         expected = self._protobuf_map({"type": "CHAR", "nullable": False, "length": 1}, "BIGINT")
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
@@ -1189,6 +1192,5 @@ class TestCheckSchemaDriftOrchestrator:
                 dry_run_columns=DryRunColumns(existing={"m": existing}, expected={"m": expected}),
             )
         assert (
-            "column type: 'm' existing='MAP<VARCHAR(5), INT>', "
-            "expected='MAP<CHAR(1) NOT NULL, BIGINT>'"
+            "column type: 'm' existing='MAP<VARCHAR(5), INT>', expected='MAP<VARCHAR(5), BIGINT>'"
         ) in str(excinfo.value)

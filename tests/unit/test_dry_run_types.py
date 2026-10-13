@@ -7,12 +7,13 @@ import copy
 import pytest
 from confluent_sql.types import ColumnTypeDefinition
 
-from dbt.adapters.confluent.dry_run_types import comparable_type, display_type, types_match
+from dbt.adapters.confluent.dry_run_types import display_type, fitted_type
 from dbt.adapters.confluent.impl import ConfluentAdapter
 
 # A string MAP key or MULTISET element as an Avro or JSON table stores it.
 STORED_KEY = {"type": "VARCHAR", "nullable": False, "length": 2147483647}
 INT = {"type": "INTEGER", "nullable": True}
+BIGINT = {"type": "BIGINT", "nullable": True}
 # Key and element types a Protobuf table keeps as declared.
 CHAR1 = {"type": "CHAR", "nullable": True, "length": 1}
 VARCHAR5 = {"type": "VARCHAR", "nullable": True, "length": 5}
@@ -20,6 +21,13 @@ VARCHAR5 = {"type": "VARCHAR", "nullable": True, "length": 5}
 
 def _type(data: dict) -> ColumnTypeDefinition:
     return ColumnTypeDefinition.from_response(data)
+
+
+def _matches(existing: dict, expected: dict) -> bool:
+    # What the drift check decides: the column passes if the model's type, fitted to the table's,
+    # equals the table's.
+    existing_type = _type(existing)
+    return fitted_type(existing_type, _type(expected)) == existing_type
 
 
 def _map(key: dict, value: dict = INT) -> dict:
@@ -56,37 +64,7 @@ def _raw(class_name: str) -> dict:
     return {"type": "RAW", "nullable": True, "class_name": class_name}
 
 
-class TestComparableType:
-    def test_top_level_nullability_is_dropped(self):
-        not_null = _type({"type": "BIGINT", "nullable": False})
-        nullable = _type({"type": "BIGINT", "nullable": True})
-        assert comparable_type(not_null) == comparable_type(nullable)
-
-    def test_nested_nullability_is_kept(self):
-        not_null = {"type": "ARRAY", "nullable": True, "element_type": {**INT, "nullable": False}}
-        nullable = {"type": "ARRAY", "nullable": True, "element_type": INT}
-        assert comparable_type(_type(not_null)) != comparable_type(_type(nullable))
-
-    def test_string_map_keys_are_kept(self):
-        """A table's string MAP key is compared as the table reports it (types_match decides
-        whether the model's fits in it)."""
-        char_keyed = comparable_type(_type(_map({"type": "CHAR", "nullable": False, "length": 1})))
-        assert char_keyed != comparable_type(_type(_map(STORED_KEY)))
-
-    def test_input_is_not_modified(self):
-        column_type = _type(
-            {
-                "type": "ARRAY",
-                "nullable": False,
-                "element_type": _map({"type": "CHAR", "nullable": False, "length": 1}),
-            }
-        )
-        before = copy.deepcopy(column_type)
-        comparable_type(column_type)
-        assert column_type == before
-
-
-class TestTypesMatch:
+class TestFittedType:
     @pytest.mark.parametrize("wrap", [_map, _multiset], ids=["map-key", "multiset-element"])
     @pytest.mark.parametrize(
         "expected_member",
@@ -100,7 +78,7 @@ class TestTypesMatch:
         ids=["char1", "nullable-char3", "varchar5", "nullable-string", "stored"],
     )
     def test_string_members_fit_an_avro_stored_type(self, wrap, expected_member):
-        assert types_match(_type(wrap(STORED_KEY)), _type(wrap(expected_member)))
+        assert _matches(wrap(STORED_KEY), wrap(expected_member))
 
     @pytest.mark.parametrize("wrap", [_map, _multiset], ids=["map-key", "multiset-element"])
     @pytest.mark.parametrize(
@@ -119,6 +97,7 @@ class TestTypesMatch:
             (INT, VARCHAR5, False),
             ({**INT, "nullable": False}, INT, False),
             (STORED_KEY, {"type": "VARCHAR", "nullable": True}, False),
+            ({"type": "VARCHAR", "nullable": True}, VARCHAR5, False),
         ],
         ids=[
             "same",
@@ -134,12 +113,13 @@ class TestTypesMatch:
             "string-into-int",
             "int-nullability",
             "no-length",
+            "no-table-length",
         ],
     )
     def test_fits_rule(self, wrap, existing_member, expected_member, fits):
         """A Protobuf table keeps the declared key or element type (GH-118 probe run b68104c4).
         A fitting one matches; any other must be equal, nullability included."""
-        assert types_match(_type(wrap(existing_member)), _type(wrap(expected_member))) is fits
+        assert _matches(wrap(existing_member), wrap(expected_member)) is fits
 
     @pytest.mark.parametrize("member", [_map, _multiset], ids=["map-key", "multiset-element"])
     @pytest.mark.parametrize(
@@ -154,9 +134,9 @@ class TestTypesMatch:
         ids=["array-element", "row-field", "map-value", "map-key", "multiset-element"],
     )
     def test_nested_members_fit(self, member, wrap):
-        existing = _type(wrap(member(VARCHAR5)))
-        assert types_match(existing, _type(wrap(member(CHAR1))))
-        assert not types_match(existing, _type(wrap(member({**VARCHAR5, "length": 10}))))
+        existing = wrap(member(VARCHAR5))
+        assert _matches(existing, wrap(member(CHAR1)))
+        assert not _matches(existing, wrap(member({**VARCHAR5, "length": 10})))
 
     @pytest.mark.parametrize(
         "wrap",
@@ -170,7 +150,7 @@ class TestTypesMatch:
     def test_other_string_positions_must_match(self, wrap):
         """Only MAP keys and MULTISET elements are fitted; a shorter string anywhere else still
         drifts."""
-        assert not types_match(_type(wrap(VARCHAR5)), _type(wrap({**VARCHAR5, "length": 3})))
+        assert not _matches(wrap(VARCHAR5), wrap({**VARCHAR5, "length": 3}))
 
     @pytest.mark.parametrize(
         "existing,expected",
@@ -179,17 +159,70 @@ class TestTypesMatch:
             (_map(STORED_KEY), _multiset(CHAR1)),
             (_row(("m", _multiset(STORED_KEY)), ("n", INT)), _row(("m", _multiset(CHAR1)))),
             (_row(("m", _multiset(STORED_KEY))), _row(("n", _multiset(CHAR1)))),
+            (
+                {"type": "ARRAY", "nullable": True},
+                {"type": "ARRAY", "nullable": True, "element_type": INT},
+            ),
         ],
-        ids=["multiset-to-array", "multiset-to-map", "row-field-count", "row-field-name"],
+        ids=[
+            "multiset-to-array",
+            "multiset-to-map",
+            "row-field-count",
+            "row-field-name",
+            "missing-element",
+        ],
     )
     def test_different_shapes_do_not_match(self, existing, expected):
-        assert not types_match(_type(existing), _type(expected))
+        assert not _matches(existing, expected)
 
-    def test_top_level_nullability_is_ignored(self):
-        assert types_match(
-            _type({"type": "BIGINT", "nullable": True}),
-            _type({"type": "BIGINT", "nullable": False}),
-        )
+    def test_field_descriptions_must_match(self):
+        field = {"name": "a", "field_type": INT}
+        existing = {"type": "ROW", "nullable": True, "fields": [{**field, "description": "old"}]}
+        expected = {"type": "ROW", "nullable": True, "fields": [{**field, "description": "new"}]}
+        assert not _matches(existing, expected)
+
+    def test_nested_nullability_must_match(self):
+        not_null = {"type": "ARRAY", "nullable": True, "element_type": {**INT, "nullable": False}}
+        assert not _matches(not_null, {"type": "ARRAY", "nullable": True, "element_type": INT})
+
+    @pytest.mark.parametrize("existing_nullable", [True, False], ids=["nullable", "not-null"])
+    def test_top_level_nullability_is_the_tables(self, existing_nullable):
+        existing = _type({**BIGINT, "nullable": existing_nullable})
+        expected = _type({**BIGINT, "nullable": not existing_nullable})
+        assert fitted_type(existing, expected) == existing
+
+    @pytest.mark.parametrize(
+        "existing,expected,fitted",
+        [
+            (_map(STORED_KEY), _map(CHAR1, BIGINT), _map(STORED_KEY, BIGINT)),
+            (
+                _row(("m", _map(STORED_KEY)), ("n", INT)),
+                _row(("m", _map(CHAR1)), ("n", BIGINT)),
+                _row(("m", _map(STORED_KEY)), ("n", BIGINT)),
+            ),
+            (
+                _row(("s", _multiset(STORED_KEY)), ("n", INT)),
+                _row(("s", _multiset(CHAR1)), ("n", BIGINT)),
+                _row(("s", _multiset(STORED_KEY)), ("n", BIGINT)),
+            ),
+        ],
+        ids=["map-value", "row-field-beside-map", "row-field-beside-multiset"],
+    )
+    def test_a_drifted_column_keeps_the_tables_fitting_members(self, existing, expected, fitted):
+        """When something else drifts, a member that fits still reads as the table's, so the
+        drift message only shows what changed."""
+        assert fitted_type(_type(existing), _type(expected)) == _type(fitted)
+
+    def test_a_member_that_does_not_fit_is_kept_as_declared(self):
+        longer = _map({**VARCHAR5, "length": 10}, BIGINT)
+        assert fitted_type(_type(_map(VARCHAR5)), _type(longer)) == _type(longer)
+
+    def test_inputs_are_not_modified(self):
+        existing = _type({"type": "ARRAY", "nullable": False, "element_type": _map(STORED_KEY)})
+        expected = _type({"type": "ARRAY", "nullable": True, "element_type": _map(CHAR1, BIGINT)})
+        before = copy.deepcopy((existing, expected))
+        fitted_type(existing, expected)
+        assert (existing, expected) == before
 
 
 class TestDisplayType:
@@ -309,16 +342,19 @@ class TestDisplayType:
     )
     def test_different_types_spell_differently(self, left, right):
         """Otherwise a drift message reads existing='X', expected='X'."""
-        left_type = comparable_type(_type(left))
-        right_type = comparable_type(_type(right))
+        left_type = _type(left)
+        right_type = _type(right)
         assert left_type != right_type
         assert display_type(left_type) != display_type(right_type)
 
     def test_drift_message_spells_the_difference(self):
         """End to end through the adapter's message builder."""
-        existing = {"d": comparable_type(_type(_interval("DAY_TO_SECOND", 3)))}
-        expected = {"d": comparable_type(_type(_interval("DAY_TO_SECOND", 6)))}
-        assert ConfluentAdapter._check_column_drift(existing, expected, display=display_type) == [
+        existing = {"d": _type(_interval("DAY_TO_SECOND", 3))}
+        expected = {"d": _type(_interval("DAY_TO_SECOND", 6))}
+        violations = ConfluentAdapter._check_column_drift(
+            existing, expected, display=display_type, fit=fitted_type
+        )
+        assert violations == [
             "column type: 'd' "
             "existing='INTERVAL_DAY_TIME(2, resolution=DAY_TO_SECOND, fractional_precision=3)', "
             "expected='INTERVAL_DAY_TIME(2, resolution=DAY_TO_SECOND, fractional_precision=6)'"
