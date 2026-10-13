@@ -34,13 +34,6 @@ logger = AdapterLogger("Confluent")
 # The value type of the two column maps _check_column_drift compares.
 _T = TypeVar("_T")
 
-
-def _as_declared(existing: _T, expected: _T) -> _T:
-    """`_check_column_drift`'s default `fit`: the expected value unchanged, so the two values are
-    compared and shown as they are."""
-    return expected
-
-
 # Every dbt-confluent-specific config key, keyed by which materializations
 # consume it. This is a closed set we own completely -- validate_materialization_config
 # only ever inspects keys listed here, so a user's own custom config (read by
@@ -1286,17 +1279,18 @@ class ConfluentAdapter(SQLAdapter):
         existing_map: dict[str, _T],
         expected_map: dict[str, _T],
         display: Callable[[_T], str] = str,
-        fit: Callable[[_T, _T], _T] = _as_declared,
+        fit: Callable[[_T, _T], _T] | None = None,
     ) -> list[str]:
         """Return one violation string per added/removed/type-changed column.
 
-        Both maps hold the same kind of type value, shown in messages with `display`. For a column
-        both have, `fit(existing, expected)` returns the expected value with any difference the
-        check allows taken from the existing one; the column has changed type if that isn't equal
-        to the existing value, and the message shows it as the expected value. On the temp-table
-        path the values are FULL_DATA_TYPE strings from INFORMATION_SCHEMA.COLUMNS, compared as
-        they are. On the dry-run path they're the two dry-runs' types, fitted with `fitted_type`
-        and shown with `display_type`. Sorted output keeps error messages stable across runs.
+        Both maps hold the same kind of type value, shown in messages with `display`. A column both
+        have has changed type if the expected value isn't equal to the existing one. If `fit` is
+        given, the expected value is `fit(existing, expected)` instead: the expected value with any
+        difference the check allows taken from the existing one, which the message then shows. On
+        the temp-table path the values are FULL_DATA_TYPE strings from INFORMATION_SCHEMA.COLUMNS,
+        compared as they are. On the dry-run path they're the two dry-runs' types, fitted with
+        `fitted_type` and shown with `display_type`. Sorted output keeps error messages stable
+        across runs.
         """
         violations: list[str] = []
         existing_names = set(existing_map)
@@ -1307,7 +1301,7 @@ class ConfluentAdapter(SQLAdapter):
             violations.append(f"column removed: '{removed}'")
         for col in sorted(existing_names & expected_names):
             existing = existing_map[col]
-            expected = fit(existing, expected_map[col])
+            expected = expected_map[col] if fit is None else fit(existing, expected_map[col])
             if expected != existing:
                 violations.append(
                     f"column type: '{col}' "
