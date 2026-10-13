@@ -93,6 +93,18 @@ class TestCheckColumnDrift:
         )
         assert violations == ["column type: 'a' existing='<1>', expected='<2>'"]
 
+    def test_fit_decides_and_spells_type_changes(self):
+        """`fit` decides each shared column: the result is compared with the existing value, and
+        the message shows the result."""
+        violations = ConfluentAdapter._check_column_drift(
+            {"a": 1, "b": 2},
+            {"a": 3, "b": 5},
+            fit=lambda existing, expected: (
+                existing if existing % 2 == expected % 2 else expected * 10
+            ),
+        )
+        assert violations == ["column type: 'b' existing='2', expected='50'"]
+
 
 # ---------------------------------------------------------------------------
 # _check_options_drift
@@ -1088,9 +1100,9 @@ class TestCheckSchemaDriftOrchestrator:
             "expected='ARRAY<VARCHAR(2147483647)>'"
         ) in str(excinfo.value)
 
-    def test_map_keys_compare_as_stored(self):
-        """map['a', 1] has a CHAR(1) key in the model's dry-run, which the table stores as
-        VARCHAR(2147483647) NOT NULL: no drift."""
+    def test_map_keys_fit_an_avro_stored_key(self):
+        """map['a', 1] has a CHAR(1) key in the model's dry-run, which fits in the
+        VARCHAR(2147483647) NOT NULL an Avro table stores: no drift."""
         value = {"type": "INTEGER", "nullable": False}
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         adapter.check_schema_drift(
@@ -1126,16 +1138,48 @@ class TestCheckSchemaDriftOrchestrator:
             ),
         )
 
-    def test_protobuf_map_keys_drift_as_before(self):
-        """A Protobuf table keeps a VARCHAR(5) key, but the model's side is compared as an Avro
-        table stores it, as the temp table did: drift, with the temp table's message."""
-        key = {"type": "VARCHAR", "nullable": True, "length": 5}
-        column = {
-            "type": "MAP",
-            "nullable": True,
-            "key_type": key,
-            "value_type": {"type": "INTEGER", "nullable": True},
-        }
+    @staticmethod
+    def _protobuf_map(key: dict, value_type: str = "INTEGER") -> ColumnTypeDefinition:
+        return _type(
+            {
+                "type": "MAP",
+                "nullable": True,
+                "key_type": key,
+                "value_type": {"type": value_type, "nullable": True},
+            }
+        )
+
+    def _check_protobuf_map_key(self, length: int) -> None:
+        # A Protobuf table keeps the declared key type, here VARCHAR(5).
+        existing = self._protobuf_map({"type": "VARCHAR", "nullable": True, "length": 5})
+        expected = self._protobuf_map({"type": "VARCHAR", "nullable": True, "length": length})
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            None,
+            self._existing_catalog(),
+            expected_with={},
+            dry_run_columns=DryRunColumns(existing={"m": existing}, expected={"m": expected}),
+        )
+
+    @pytest.mark.parametrize("length", [5, 3], ids=["same", "shorter"])
+    def test_protobuf_map_key_that_fits(self, length):
+        """A key that fits in the Protobuf table's declared key type isn't drift."""
+        self._check_protobuf_map_key(length)
+
+    def test_protobuf_longer_map_key_drifts(self):
+        """A key longer than the Protobuf table's declared key type is drift."""
+        with pytest.raises(CompilationError) as excinfo:
+            self._check_protobuf_map_key(10)
+        assert (
+            "column type: 'm' existing='MAP<VARCHAR(5), INT>', expected='MAP<VARCHAR(10), INT>'"
+        ) in str(excinfo.value)
+
+    def test_protobuf_map_value_change_keeps_the_tables_key(self):
+        """The key fits but the value changed: drift, and the message spells the table's key on
+        both sides, so only the value reads differently."""
+        existing = self._protobuf_map({"type": "VARCHAR", "nullable": True, "length": 5})
+        expected = self._protobuf_map({"type": "CHAR", "nullable": False, "length": 1}, "BIGINT")
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
@@ -1143,11 +1187,8 @@ class TestCheckSchemaDriftOrchestrator:
                 None,
                 self._existing_catalog(),
                 expected_with={},
-                dry_run_columns=DryRunColumns(
-                    existing={"m": _type(column)}, expected={"m": _type(column)}
-                ),
+                dry_run_columns=DryRunColumns(existing={"m": existing}, expected={"m": expected}),
             )
         assert (
-            "column type: 'm' existing='MAP<VARCHAR(5), INT>', "
-            "expected='MAP<VARCHAR(2147483647) NOT NULL, INT>'"
+            "column type: 'm' existing='MAP<VARCHAR(5), INT>', expected='MAP<VARCHAR(5), BIGINT>'"
         ) in str(excinfo.value)

@@ -4,13 +4,15 @@ The schema drift check dry-runs both the model's SELECT and `SELECT * FROM` the 
 and compares the two result schemas as confluent-sql `ColumnTypeDefinition`s. A stored table's
 dry-run schema matches the SELECT it was created from, except for two differences:
 
-- Top-level nullability, which `comparable_type` drops from both sides; its docstring says why.
+- Top-level nullability, which `fitted_type` takes from the table; its docstring says why.
   Nullability inside an ARRAY, MULTISET, MAP or ROW is kept.
-- String MAP keys and MULTISET elements, which `stored_type` applies to the model's side. An
-  Avro or JSON table, the default, stores a CHAR or VARCHAR key or element, at any depth, as
-  VARCHAR(2147483647) NOT NULL, regardless of its length/nullability in the query. Any other key
-  or element keeps its type and its own nullability. A Protobuf table keeps the declared type
-  instead, so a string key or element drifts there, as it did with the temp table.
+- String MAP keys and MULTISET elements. An Avro or JSON table, the default, stores a CHAR or
+  VARCHAR key or element, at any depth, as VARCHAR(2147483647) NOT NULL, regardless of its
+  length/nullability in the query. A Protobuf table keeps the declared type. So `fitted_type` takes
+  the table's key or element wherever the model's fits in it, whatever the table's format. Any
+  other key or element must match exactly, nullability included.
+
+`fitted_type` is what the drift check calls for each column; it allows for both differences.
 
 `display_type` spells a type for drift messages the way FULL_DATA_TYPE does, so messages read
 the same on the dry-run and temp-table paths.
@@ -18,12 +20,9 @@ the same on the dry-run and temp-table paths.
 
 from dataclasses import replace
 
-from confluent_sql.types import ColumnTypeDefinition
+from confluent_sql.types import ColumnTypeDefinition, RowColumn
 
-# VARCHAR(2147483647) is STRING.
-_MAX_LENGTH = 2147483647
-
-# MAP key and MULTISET element types an Avro or JSON table stores as VARCHAR(2147483647) NOT NULL.
+# MAP key and MULTISET element types a table may store wider than the query declares them.
 _STRING_KEY_TYPES = frozenset({"CHAR", "VARCHAR"})
 
 # Dry-run type name -> (FULL_DATA_TYPE name, suffix after the parameters). Any other name is
@@ -37,72 +36,109 @@ _DISPLAY_NAMES: dict[str, tuple[str, str]] = {
 }
 
 
-def comparable_type(column_type: ColumnTypeDefinition) -> ColumnTypeDefinition:
-    """Return a copy of a top-level column type to compare for drift, with top-level
-    nullability dropped. The input isn't modified.
+def fitted_type(
+    existing_type: ColumnTypeDefinition, expected_type: ColumnTypeDefinition
+) -> ColumnTypeDefinition:
+    """Return expected_type, the model's column type from its SELECT dry-run, with the parts the
+    drift check lets differ taken from existing_type, the existing table's type for the same
+    column. The column has drifted if the result isn't equal to existing_type, and the drift
+    message shows the result as the expected type, so it only shows differences that count. The
+    inputs aren't modified.
 
-    Top-level nullability can differ without the model changing, and the temp-table check never
-    compared it (FULL_DATA_TYPE leaves it out). A table built from yml columns (a
-    `streaming_table`, or a `table` with an enforced contract) takes it from the yml's `not_null`
-    and primary key constraints, not from the SELECT. So a nullable source column can feed a
-    `not_null` column, and an expression that can't be null, like `CAST(1 AS INT)`, can feed a
-    nullable one. Comparing it would report drift on every run, and `--full-refresh` wouldn't clear
-    it, since it rebuilds the table from the same yml.
+    Top-level nullability is taken from the table. It can differ without the model changing, and
+    the temp-table check never compared it (FULL_DATA_TYPE leaves it out). A table built from yml
+    columns (a `streaming_table`, or a `table` with an enforced contract) takes it from the yml's
+    `not_null` and primary key constraints, not from the SELECT. So a nullable source column can
+    feed a `not_null` column, and an expression that can't be null, like `CAST(1 AS INT)`, can feed
+    a nullable one. Comparing it would report drift on every run, and `--full-refresh` wouldn't
+    clear it, since it rebuilds the table from the same yml.
+
+    Any string MAP key or MULTISET element, at any depth, that fits in the table's is taken from
+    the table too. A key or element fits when it's a CHAR(n) or VARCHAR(n) and the table's is a
+    VARCHAR(m) with n <= m, or the same CHAR(n); nullability is ignored. Every one fits in the
+    VARCHAR(2147483647) NOT NULL an Avro or JSON table stores. On a Protobuf table, which keeps the
+    declared type, a longer VARCHAR, a different CHAR length or a VARCHAR into a CHAR is kept as
+    the model declares it, so it drifts. A shorter VARCHAR fits: the table still holds every value
+    the model can produce, and `--full-refresh` rebuilds it with the new type.
     """
-    return replace(column_type, nullable=True)
+    return replace(_fit(existing_type, expected_type), nullable=existing_type.nullable)
 
 
-def stored_type(column_type: ColumnTypeDefinition) -> ColumnTypeDefinition:
-    """Return a copy of a model's column type as an Avro or JSON table stores it: every string
-    MAP key and MULTISET element, at any depth, as VARCHAR(2147483647) NOT NULL. The input
-    isn't modified."""
-    return _with_stored_map_keys(column_type)
-
-
-def _with_stored_map_keys(column_type: ColumnTypeDefinition) -> ColumnTypeDefinition:
-    key_type = column_type.key_type
-    if key_type is not None:
-        if key_type.type in _STRING_KEY_TYPES:
-            key_type = _stored_string()
-        else:
-            key_type = _with_stored_map_keys(key_type)
-    element_type = column_type.element_type
-    if column_type.type == "MULTISET" and element_type is not None:
-        if element_type.type in _STRING_KEY_TYPES:
-            element_type = _stored_string()
-        else:
-            element_type = _with_stored_map_keys(element_type)
+def _fit(
+    existing_type: ColumnTypeDefinition, expected_type: ColumnTypeDefinition
+) -> ColumnTypeDefinition:
+    if existing_type.type == expected_type.type == "MULTISET":
+        element_type = _fit_member(existing_type.element_type, expected_type.element_type)
     else:
-        element_type = _optional(element_type)
-    fields = column_type.fields
-    if fields is not None:
-        fields = [
-            replace(field, field_type=_with_stored_map_keys(field.field_type)) for field in fields
-        ]
+        element_type = _fit_child(existing_type.element_type, expected_type.element_type)
     return replace(
-        column_type,
-        key_type=key_type,
-        value_type=_optional(column_type.value_type),
+        expected_type,
+        key_type=_fit_member(existing_type.key_type, expected_type.key_type),
+        value_type=_fit_child(existing_type.value_type, expected_type.value_type),
         element_type=element_type,
-        fields=fields,
+        fields=_fit_fields(existing_type.fields, expected_type.fields),
     )
 
 
-def _stored_string() -> ColumnTypeDefinition:
-    return ColumnTypeDefinition(type="VARCHAR", nullable=False, length=_MAX_LENGTH)
+def _fit_child(
+    existing_type: ColumnTypeDefinition | None, expected_type: ColumnTypeDefinition | None
+) -> ColumnTypeDefinition | None:
+    if existing_type is None or expected_type is None:
+        return expected_type
+    return _fit(existing_type, expected_type)
 
 
-def _optional(column_type: ColumnTypeDefinition | None) -> ColumnTypeDefinition | None:
-    return None if column_type is None else _with_stored_map_keys(column_type)
+def _fit_member(
+    existing_type: ColumnTypeDefinition | None, expected_type: ColumnTypeDefinition | None
+) -> ColumnTypeDefinition | None:
+    # A MAP key or MULTISET element: the table's if the model's fits in it, or else fitted like any
+    # other type.
+    if (
+        existing_type is not None
+        and expected_type is not None
+        and _fits(expected_type, existing_type)
+    ):
+        return existing_type
+    return _fit_child(existing_type, expected_type)
+
+
+def _fit_fields(
+    existing_fields: list[RowColumn] | None, expected_fields: list[RowColumn] | None
+) -> list[RowColumn] | None:
+    # Fields are fitted by position. A different number of fields is drift whatever their types, so
+    # they're kept as the model declares them.
+    if existing_fields is None or expected_fields is None:
+        return expected_fields
+    if len(existing_fields) != len(expected_fields):
+        return expected_fields
+    return [
+        replace(
+            expected_field, field_type=_fit(existing_field.field_type, expected_field.field_type)
+        )
+        for existing_field, expected_field in zip(existing_fields, expected_fields, strict=True)
+    ]
+
+
+def _fits(expected_type: ColumnTypeDefinition, existing_type: ColumnTypeDefinition) -> bool:
+    if expected_type.type not in _STRING_KEY_TYPES:
+        return False
+    if expected_type.length is None or existing_type.length is None:
+        return False
+    if existing_type.type == "VARCHAR":
+        return expected_type.length <= existing_type.length
+    return existing_type.type == expected_type.type == "CHAR" and (
+        expected_type.length == existing_type.length
+    )
 
 
 def display_type(column_type: ColumnTypeDefinition) -> str:
     """Spell a top-level column type for drift messages only, the way FULL_DATA_TYPE does.
 
-    Drift is only decided by comparing `comparable_type` results, never these strings, but two
-    types a dry run returns that compare differently always spell differently. A type without a
-    FULL_DATA_TYPE spelling here (INTERVAL, RAW, a structured type, anything newer) is spelled from
-    its name and every parameter it has, which keeps it distinct but doesn't match FULL_DATA_TYPE.
+    Drift is only decided by comparing a `fitted_type` result with the table's type, never these
+    strings, but the two always spell differently when they differ, since the result has the
+    table's top-level nullability. A type without a FULL_DATA_TYPE spelling here (INTERVAL, RAW, a
+    structured type, anything newer) is spelled from its name and every parameter it has, which
+    keeps it distinct but doesn't match FULL_DATA_TYPE.
     """
     return _display(column_type, nested=False)
 
