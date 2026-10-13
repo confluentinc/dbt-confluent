@@ -188,6 +188,16 @@ export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 # when either of these is unset.
 export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
+
+# Optional: two different, already-uploaded UDF artifacts that contain the same class, used only
+# by the function lifecycle test (skipped when any of the first three is unset or the two
+# artifact IDs are equal). CONFLUENT_TEST_UDF_LANGUAGE defaults to python.
+#
+# Note: These are temporary, and will be removed when artifact upload support is added.
+export CONFLUENT_TEST_UDF_ARTIFACT_ID=cfa-xxxxxx
+export CONFLUENT_TEST_UDF_ARTIFACT_ID_2=cfa-yyyyyy
+export CONFLUENT_TEST_UDF_CLASS=module.path.or.Class
+export CONFLUENT_TEST_UDF_LANGUAGE=python
 ```
 
 ```bash
