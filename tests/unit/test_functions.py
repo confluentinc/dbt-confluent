@@ -45,6 +45,7 @@ class TestValidateFunctionConfig:
         assert validate(java_config()) == {
             "language": "java",
             "artifact_id": ARTIFACT_ID,
+            "artifact_path": None,
             "class_name": CLASS_NAME,
             "connections": [],
             "connection_names": [],
@@ -57,6 +58,7 @@ class TestValidateFunctionConfig:
         assert validate(config) == {
             "language": "python",
             "artifact_id": ARTIFACT_ID,
+            "artifact_path": None,
             "class_name": "pkg.mod.fn",
             "connections": [conn("my_external_service")],
             "connection_names": ["`my_external_service`"],
@@ -74,9 +76,9 @@ class TestValidateFunctionConfig:
         [
             ({"language": None}, "'language' must be one of"),
             ({"language": "sql"}, "'language' must be one of"),
-            ({"artifact_id": None}, "'artifact_id' must be"),
-            ({"artifact_id": "abc123"}, "'artifact_id' must be"),
-            ({"artifact_id": "cfa-"}, "'artifact_id' must be"),
+            ({"artifact_id": None}, "one of 'artifact_id'"),
+            ({"artifact_id": "abc123"}, "one of 'artifact_id'"),
+            ({"artifact_id": "cfa-"}, "one of 'artifact_id'"),
             ({"class": None}, "'class' must be a non-empty string"),
             ({"class": "  "}, "'class' must be a non-empty string"),
             ({"connections": "my_external_service"}, "'connections' must be a list"),
@@ -105,6 +107,74 @@ class TestValidateFunctionConfig:
         assert "'language'" in message
         assert "'artifact_id'" in message
         assert "'class'" in message
+
+
+class TestValidateArtifactPath:
+    """`artifact_path` is the alternative to `artifact_id`: a local package dbt will upload."""
+
+    PACKAGE = "udf.zip"
+
+    @pytest.fixture
+    def project_root(self, tmp_path):
+        (tmp_path / self.PACKAGE).write_bytes(b"zip")
+        (tmp_path / "udf.jar").write_bytes(b"jar")
+        (tmp_path / "notes.txt").write_text("x")
+        return tmp_path
+
+    def validate_path(self, project_root, **overrides):
+        config = java_config(**{"language": "python", "artifact_id": None} | overrides)
+        return functions.validate_function_config(config, CATALOG, DATABASE, project_root)
+
+    def test_relative_path_resolves_against_the_project_root(self, project_root):
+        udf = self.validate_path(project_root, artifact_path=self.PACKAGE)
+        assert udf["artifact_path"] == str((project_root / self.PACKAGE).resolve())
+        assert udf["artifact_id"] is None
+
+    def test_java_takes_a_jar(self, project_root):
+        config = java_config(artifact_id=None, artifact_path="udf.jar")
+        udf = functions.validate_function_config(config, CATALOG, DATABASE, project_root)
+        assert udf["artifact_path"].endswith("udf.jar")
+
+    @pytest.mark.parametrize(
+        "overrides, expected_substring",
+        [
+            ({"artifact_id": ARTIFACT_ID, "artifact_path": "udf.zip"}, "mutually exclusive"),
+            ({"artifact_path": "missing.zip"}, "is not a file"),
+            ({"artifact_path": "notes.txt"}, "must be a .zip file for python"),
+            ({"artifact_path": "udf.jar"}, "must be a .zip file for python"),
+            ({"artifact_path": ""}, "'artifact_path' must be a non-empty string"),
+            ({"artifact_path": 7}, "'artifact_path' must be a non-empty string"),
+        ],
+    )
+    def test_invalid_paths_raise(self, project_root, overrides, expected_substring):
+        with pytest.raises(CompilationError, match=expected_substring):
+            self.validate_path(project_root, **overrides)
+
+
+class TestRenderCreateFunction:
+    RELATION = SimpleNamespace(render=lambda: "`env`.`db`.`is_smaller`")
+
+    def render(self, **overrides):
+        args = {
+            "class_name": CLASS_NAME,
+            "language": "java",
+            "artifact_id": ARTIFACT_ID,
+            "connection_names": [],
+        } | overrides
+        return functions.render_create_function(self.RELATION, **args)
+
+    def test_java_has_no_language_clause(self):
+        assert self.render() == (
+            f"create function `env`.`db`.`is_smaller` as '{CLASS_NAME}' "
+            f"using jar 'confluent-artifact://{ARTIFACT_ID}'"
+        )
+
+    def test_python_with_connections_and_an_escaped_class(self):
+        sql = self.render(
+            language="python", class_name="it's", connection_names=["`a`", "`b`.`c`"]
+        )
+        assert " as 'it''s' language python using jar " in sql
+        assert sql.endswith("using connections (`a`, `b`.`c`)")
 
 
 class TestRenderIdentifier:
@@ -228,6 +298,8 @@ def test_adapter_delegates_validation_to_functions_module():
     # bypass __init__ — the wrapper only needs the method dispatch
     adapter = ConfluentAdapter.__new__(ConfluentAdapter)
 
+    adapter.config = SimpleNamespace(project_root="/unused")  # type: ignore[assignment]
+
     class Relation:
         database, schema = CATALOG, DATABASE
 
@@ -244,28 +316,28 @@ def test_adapter_runs_the_function_lookup_on_the_configured_compute_pool():
         database=CATALOG, schema=DATABASE, identifier="is_smaller", render=lambda: "`is_smaller`"
     )
 
-    assert adapter.plan_function_change(relation, validate(java_config()), POOL_ID) is None
+    assert adapter.describe_function(relation, POOL_ID) is None
 
     adapter.execute.assert_called_once()
     assert adapter.execute.call_args.kwargs["compute_pool_id"] == POOL_ID
 
 
-class TestPlanFunctionChange:
-    """`plan_function_change` infers existence from DESCRIBE's outcome, not a catalog query."""
+class TestDescribeFunction:
+    """`describe_function` infers existence from DESCRIBE's outcome, not a catalog query."""
 
     FUNCTION_NAME = "is_smaller"
     RELATION = SimpleNamespace(
         database=CATALOG,
         schema=DATABASE,
         identifier=FUNCTION_NAME,
-        render=lambda: f"`{CATALOG}`.`{DATABASE}`.`{TestPlanFunctionChange.FUNCTION_NAME}`",
+        render=lambda: f"`{CATALOG}`.`{DATABASE}`.`{TestDescribeFunction.FUNCTION_NAME}`",
     )
 
     def execute_whose_describe(self, *, returns=None, raises=None) -> MagicMock:
         return MagicMock(side_effect=raises, return_value=(None, SimpleNamespace(rows=returns)))
 
     def plan(self, execute: MagicMock):
-        return functions.plan_function_change(execute, self.RELATION, validate(java_config()))
+        return functions.describe_function(execute, self.RELATION)
 
     def test_missing_function_is_none(self):
         error = DbtDatabaseError(
@@ -284,10 +356,23 @@ class TestPlanFunctionChange:
         with pytest.raises(DbtDatabaseError):
             self.plan(self.execute_whose_describe(raises=error))
 
-    def test_existing_function_returns_differences(self):
+    def test_existing_function_is_described_once(self):
         execute = self.execute_whose_describe(returns=describe_rows())
-        assert self.plan(execute) == []
+        assert self.plan(execute) == functions.parse_describe_function(
+            describe_rows(), CATALOG, DATABASE
+        )
         execute.assert_called_once()
+
+
+class TestPlanFunctionChange:
+    def test_absent_function_is_none(self):
+        assert functions.plan_function_change(None, validate(java_config())) is None
+
+    def test_returns_the_differences_and_empty_when_identical(self):
+        udf = validate(java_config())
+        assert functions.plan_function_change(functions.desired_function_state(udf), udf) == []
+        other = functions.FunctionState(CLASS_NAME, "java", "cfa-different", frozenset())
+        assert functions.plan_function_change(other, udf)
 
 
 CHANGES = ["artifact_id: 'cfa-old' -> 'cfa-new'"]
