@@ -1,4 +1,4 @@
-"""Artifact upload and journaling for the `function` materialization (#180).
+"""Artifact upload, journaling and cleanup for the `function` materialization (#180).
 
 A function can name a local package (`artifact_path`) instead of an already-uploaded artifact.
 The artifact is named after the package's content hash, so it is immutable and "same name" means
@@ -12,14 +12,15 @@ change completes. It records the old function to put back if the new one can't b
 
 The old artifact is never deleted as part of a replace: running and stopped statements stay
 bound to the artifact they were compiled against, and nothing tells us which statements those
-are, so removing old artifacts is left to the user.
+are. `find_unused_artifacts` finds the candidates for an explicit, manual cleanup instead.
 
 Every dbt-created artifact carries a `managed_by` marker naming the dbt project that uploaded
-it, which tells an artifact dbt created from one it didn't.
+it. An artifact without it, or from another project, is never deleted by dbt.
 """
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -180,3 +181,29 @@ def settle_journal(conn: Connection, artifact_id: str) -> None:
             artifact_id,
             description=encode_description(artifact_project(artifact.description), None),
         )
+
+
+def find_unused_artifacts(
+    conn: Connection, project: str, used_artifact_ids: Callable[[], set[str]]
+) -> tuple[list[FlinkArtifact], list[FlinkArtifact]]:
+    """This dbt `project`'s artifacts that no function uses: (orphans, unsettled).
+
+    *Unsettled* artifacts still carry a journal. That is a replacement that never finished, or
+    one running right now (its artifact exists before its function does), so they are reported
+    apart from the orphans. Artifacts dbt didn't upload for `project` are ignored.
+
+    Artifacts are listed *before* functions are looked up (`used_artifact_ids`), so a function
+    created in between can't be missed. Unused by a function doesn't mean unused: statements
+    may still be bound to an artifact, which is why deleting is left to the user.
+    """
+    ours = [
+        a
+        for a in conn.list_artifacts()
+        if decode_description(a.description)[0] and artifact_project(a.description) == project
+    ]
+    if not ours:
+        return [], []
+    used = used_artifact_ids()
+    unused = [a for a in ours if a.id not in used]
+    unsettled = [a for a in unused if decode_description(a.description)[1] is not None]
+    return [a for a in unused if a not in unsettled], unsettled
