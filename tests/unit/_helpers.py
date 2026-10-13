@@ -1,5 +1,6 @@
 """Shared helpers for unit tests."""
 
+import agate
 from confluent_sql.tableflow import TableflowTopic
 
 from dbt.adapters.confluent.impl import ConfluentRelation
@@ -51,3 +52,65 @@ def make_topic(
             "status": status,
         }
     )
+
+
+def drift_catalog_row(
+    *,
+    section,
+    table_name=None,
+    col_name=None,
+    data_type=None,
+    dist_position=None,
+    option_key=None,
+    option_value=None,
+    is_distributed=None,
+    dist_buckets=None,
+    is_materialized=None,
+):
+    """One row of `get_drift_catalog`'s result, for make_drift_catalog."""
+    return (
+        section,
+        table_name,
+        col_name,
+        data_type,
+        dist_position,
+        option_key,
+        option_value,
+        is_distributed,
+        dist_buckets,
+        is_materialized,
+    )
+
+
+_CATALOG_COLUMNS = [
+    "section",
+    "table_name",
+    "col_name",
+    "data_type",
+    "dist_position",
+    "option_key",
+    "option_value",
+    "is_distributed",
+    "dist_buckets",
+    "is_materialized",
+]
+
+# Pin types so agate's inference doesn't coerce "YES" to a boolean (Confluent
+# returns it as a string, and the partitioner compares against the literal "YES").
+_CATALOG_TYPES = [
+    agate.Text(),  # section
+    agate.Text(),  # table_name
+    agate.Text(),  # col_name
+    agate.Text(),  # data_type
+    agate.Number(),  # dist_position
+    agate.Text(),  # option_key
+    agate.Text(),  # option_value
+    agate.Text(),  # is_distributed
+    agate.Number(),  # dist_buckets
+    agate.Text(),  # is_materialized
+]
+
+
+def make_drift_catalog(rows) -> agate.Table:
+    """An agate.Table shaped like `get_drift_catalog`'s result, from drift_catalog_row rows."""
+    return agate.Table(rows, column_names=_CATALOG_COLUMNS, column_types=_CATALOG_TYPES)

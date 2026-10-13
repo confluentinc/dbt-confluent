@@ -179,14 +179,10 @@ wheels = [
 
 [[package]]
 name = "confluent-sql"
-version = "0.6.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.7.0rc0"
+source = { git = "https://github.com/confluentinc/confluent-sql?rev=15bbb927da91f262e1379fdfdcb9cd35568d9a26#15bbb927da91f262e1379fdfdcb9cd35568d9a26" }
 dependencies = [
     { name = "httpx" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/2a/cc/4b959bd2cf4fd7e96987d2434f810f7c4ffd197ec3fb889abaef5991524f/confluent_sql-0.6.0.tar.gz", hash = "sha256:14c5a5cca66a56758a4a46c086235ebad0f401114c39f587fdcaf934168370dd", size = 334772, upload-time = "2026-09-29T20:03:35.533Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/02/7f/2174bb6a7a7fb645cdd5289c51cc66f75a46758fdbd3502e450a8804b180/confluent_sql-0.6.0-py3-none-any.whl", hash = "sha256:be2ca782661af1462fd0e248bac6f3d94803bdeb3b0a1aef601ce822eb967e29", size = 124311, upload-time = "2026-09-29T20:03:34.328Z" },
 ]
 
 [[package]]
@@ -354,7 +350,7 @@ test = [
 [package.metadata]
 requires-dist = [
     { name = "agate", specifier = "~=1.0" },
-    { name = "confluent-sql", specifier = "~=0.6.0" },
+    { name = "confluent-sql", git = "https://github.com/confluentinc/confluent-sql?rev=15bbb927da91f262e1379fdfdcb9cd35568d9a26" },
     { name = "dbt-adapters", specifier = "~=1.16" },
     { name = "dbt-common", specifier = "~=1.12" },
     { name = "dbt-core", specifier = "~=1.11.0" },
