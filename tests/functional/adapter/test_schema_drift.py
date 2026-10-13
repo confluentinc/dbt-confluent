@@ -998,9 +998,9 @@ models:
 
 
 class TestProtobufMapKey(ConfluentFixtures):
-    """A Protobuf table keeps the declared MAP key type instead of storing VARCHAR(2147483647)
-    NOT NULL (GH-118 probe run b68104c4). An unchanged re-run must not drift, and a key that no
-    longer fits in the table's must."""
+    """A Protobuf table keeps the declared MAP key type instead of storing it as
+    VARCHAR(2147483647) NOT NULL. An unchanged re-run must not drift, and a key that no longer fits
+    in the table's must."""
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):

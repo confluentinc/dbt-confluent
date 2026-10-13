@@ -117,8 +117,8 @@ class TestFittedType:
         ],
     )
     def test_fits_rule(self, wrap, existing_member, expected_member, fits):
-        """A Protobuf table keeps the declared key or element type (GH-118 probe run b68104c4).
-        A fitting one matches; any other must be equal, nullability included."""
+        """A Protobuf table keeps the declared key or element type. A fitting one matches; any
+        other must be equal, nullability included."""
         assert _matches(wrap(existing_member), wrap(expected_member)) is fits
 
     @pytest.mark.parametrize("member", [_map, _multiset], ids=["map-key", "multiset-element"])

@@ -94,8 +94,8 @@ class TestCheckColumnDrift:
         assert violations == ["column type: 'a' existing='<1>', expected='<2>'"]
 
     def test_fit_decides_and_spells_type_changes(self):
-        """The dry-run path fits the expected value with fitted_type, compares the result with
-        ==, and shows the result."""
+        """`fit` decides each shared column: the result is compared with the existing value, and
+        the message shows the result."""
         violations = ConfluentAdapter._check_column_drift(
             {"a": 1, "b": 2},
             {"a": 3, "b": 5},
@@ -1149,30 +1149,28 @@ class TestCheckSchemaDriftOrchestrator:
             }
         )
 
-    @pytest.mark.parametrize(
-        "length,drifts", [(5, False), (3, False), (10, True)], ids=["same", "shorter", "longer"]
-    )
-    def test_protobuf_map_key_length(self, length, drifts):
-        """A Protobuf table keeps the declared key type (GH-118 probe run b68104c4): a key that
-        fits in it isn't drift, and a longer one is."""
+    def _check_protobuf_map_key(self, length: int) -> None:
+        # A Protobuf table keeps the declared key type, here VARCHAR(5).
         existing = self._protobuf_map({"type": "VARCHAR", "nullable": True, "length": 5})
         expected = self._protobuf_map({"type": "VARCHAR", "nullable": True, "length": length})
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            None,
+            self._existing_catalog(),
+            expected_with={},
+            dry_run_columns=DryRunColumns(existing={"m": existing}, expected={"m": expected}),
+        )
 
-        def check() -> None:
-            adapter.check_schema_drift(
-                _relation(self.EXISTING_ID),
-                None,
-                self._existing_catalog(),
-                expected_with={},
-                dry_run_columns=DryRunColumns(existing={"m": existing}, expected={"m": expected}),
-            )
+    @pytest.mark.parametrize("length", [5, 3], ids=["same", "shorter"])
+    def test_protobuf_map_key_that_fits(self, length):
+        """A key that fits in the Protobuf table's declared key type isn't drift."""
+        self._check_protobuf_map_key(length)
 
-        if not drifts:
-            check()
-            return
+    def test_protobuf_longer_map_key_drifts(self):
+        """A key longer than the Protobuf table's declared key type is drift."""
         with pytest.raises(CompilationError) as excinfo:
-            check()
+            self._check_protobuf_map_key(10)
         assert (
             "column type: 'm' existing='MAP<VARCHAR(5), INT>', expected='MAP<VARCHAR(10), INT>'"
         ) in str(excinfo.value)

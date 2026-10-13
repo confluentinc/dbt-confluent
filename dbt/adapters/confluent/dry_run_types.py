@@ -57,9 +57,9 @@ def fitted_type(
     the table too. A key or element fits when it's a CHAR(n) or VARCHAR(n) and the table's is a
     VARCHAR(m) with n <= m, or the same CHAR(n); nullability is ignored. Every one fits in the
     VARCHAR(2147483647) NOT NULL an Avro or JSON table stores. On a Protobuf table, which keeps the
-    declared type, a longer one or a VARCHAR into a CHAR is kept as the model declares it, so it
-    drifts. A shorter one fits: the table still holds every value the model can produce, and
-    `--full-refresh` rebuilds it with the new type.
+    declared type, a longer VARCHAR, a different CHAR length or a VARCHAR into a CHAR is kept as
+    the model declares it, so it drifts. A shorter VARCHAR fits: the table still holds every value
+    the model can produce, and `--full-refresh` rebuilds it with the new type.
     """
     return replace(_fit(existing_type, expected_type), nullable=existing_type.nullable)
 
