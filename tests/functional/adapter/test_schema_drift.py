@@ -754,8 +754,8 @@ class TestDistributedByDefaultIsNotChecked(ConfluentFixtures):
 # Shapes whose query type differs from the stored type only in what the drift check ignores:
 # an unchanged re-run must SKIP on the dry-run path. The literals and casts are NOT NULL in the
 # query (top-level, ignored). The string MAP keys (CHAR(1), VARCHAR(5), and a nullable CHAR(1)
-# from nullif) are all stored as VARCHAR(2147483647) NOT NULL, which dry_run_types.stored_type
-# applies; the INT key keeps its type.
+# from nullif) are all stored as VARCHAR(2147483647) NOT NULL, which they fit in
+# (dry_run_types); the INT key keeps its type.
 DRY_RUN_TYPES_MODEL = """
 {{ config(materialized='table') }}
 select
@@ -955,6 +955,91 @@ class TestYmlStreamingTableNullabilityAndTypes(ConfluentFixtures):
             set_model_file(
                 project, relation(project, "yml_streaming_table"), YML_STREAMING_TABLE_MODEL
             )
+
+
+# -- A Protobuf streaming_table with a string MAP key --
+
+PROTOBUF_MAP_KEY_MODEL = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert', 'value.format': 'proto-registry'},
+) }}
+select
+  order_id,
+  cast(map[cast(cast(order_id as string) as varchar(5)), 1] as map<varchar(5), int>) as m
+from {{ ref('source_for_drift') }}
+"""
+
+# The key is now longer than the one the table stores.
+PROTOBUF_MAP_KEY_MODEL_DRIFTED = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert', 'value.format': 'proto-registry'},
+) }}
+select
+  order_id,
+  cast(map[cast(cast(order_id as string) as varchar(10)), 1] as map<varchar(10), int>) as m
+from {{ ref('source_for_drift') }}
+"""
+
+PROTOBUF_MAP_KEY_YML = """
+models:
+  - name: protobuf_map_key
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+          - type: primary_key
+            expression: "not enforced"
+      - name: m
+        data_type: map<varchar(5), int>
+"""
+
+
+class TestProtobufMapKey(ConfluentFixtures):
+    """A Protobuf table keeps the declared MAP key type instead of storing
+    VARCHAR(2147483647) NOT NULL (GH-118 probe run b68104c4). An unchanged re-run must not
+    drift, and a key that no longer fits in the table's must."""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {"models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "protobuf_map_key.sql": PROTOBUF_MAP_KEY_MODEL,
+            "models.yml": PROTOBUF_MAP_KEY_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup_and_teardown(self, project):
+        run_dbt(["run", "--full-refresh"])
+        yield
+        project.run_sql("drop table if exists source_for_drift")
+        project.run_sql("drop table if exists protobuf_map_key")
+
+    def test_unchanged_rerun_does_not_drift(self, project):
+        results = run_dbt(["run"])
+        message = get_result_by_name(results, "protobuf_map_key").message
+        assert message == "SKIP", f"protobuf_map_key was not skipped (message: {message})"
+
+    def test_longer_key_drifts(self, project):
+        set_model_file(
+            project, relation(project, "protobuf_map_key"), PROTOBUF_MAP_KEY_MODEL_DRIFTED
+        )
+        try:
+            results = run_dbt(["run"], expect_pass=False)
+            assert_drift_error(results, "protobuf_map_key")
+            message = get_result_by_name(results, "protobuf_map_key").message
+            assert (
+                "column type: 'm' existing='MAP<VARCHAR(5), INT>', expected='MAP<VARCHAR(10), INT>'"
+            ) in message
+            assert "'order_id'" not in message
+        finally:
+            set_model_file(project, relation(project, "protobuf_map_key"), PROTOBUF_MAP_KEY_MODEL)
 
 
 # -- Nested nullability, with a table model --
