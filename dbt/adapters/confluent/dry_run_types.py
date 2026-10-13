@@ -6,11 +6,13 @@ dry-run schema matches the SELECT it was created from, except for two difference
 
 - Top-level nullability, which `comparable_type` drops from both sides; its docstring says why.
   Nullability inside an ARRAY, MULTISET, MAP or ROW is kept.
-- String MAP keys and MULTISET elements, which `stored_type` applies to the model's side. An
-  Avro or JSON table, the default, stores a CHAR or VARCHAR key or element, at any depth, as
-  VARCHAR(2147483647) NOT NULL, regardless of its length/nullability in the query. Any other key
-  or element keeps its type and its own nullability. A Protobuf table keeps the declared type
-  instead, so a string key or element drifts there, as it did with the temp table.
+- String MAP keys and MULTISET elements. An Avro or JSON table, the default, stores a CHAR or
+  VARCHAR key or element, at any depth, as VARCHAR(2147483647) NOT NULL, regardless of its
+  length/nullability in the query. A Protobuf table keeps the declared type. So `types_match`
+  lets a model's key or element pass if it fits in the table's, whatever the table's format.
+  Any other key or element must match exactly, nullability included.
+
+`types_match` is what the drift check calls for each column; it allows for both differences.
 
 `display_type` spells a type for drift messages the way FULL_DATA_TYPE does, so messages read
 the same on the dry-run and temp-table paths.
@@ -18,12 +20,9 @@ the same on the dry-run and temp-table paths.
 
 from dataclasses import replace
 
-from confluent_sql.types import ColumnTypeDefinition
+from confluent_sql.types import ColumnTypeDefinition, RowColumn
 
-# VARCHAR(2147483647) is STRING.
-_MAX_LENGTH = 2147483647
-
-# MAP key and MULTISET element types an Avro or JSON table stores as VARCHAR(2147483647) NOT NULL.
+# MAP key and MULTISET element types a table may store wider than the query declares them.
 _STRING_KEY_TYPES = frozenset({"CHAR", "VARCHAR"})
 
 # Dry-run type name -> (FULL_DATA_TYPE name, suffix after the parameters). Any other name is
@@ -52,48 +51,86 @@ def comparable_type(column_type: ColumnTypeDefinition) -> ColumnTypeDefinition:
     return replace(column_type, nullable=True)
 
 
-def stored_type(column_type: ColumnTypeDefinition) -> ColumnTypeDefinition:
-    """Return a copy of a model's column type as an Avro or JSON table stores it: every string
-    MAP key and MULTISET element, at any depth, as VARCHAR(2147483647) NOT NULL. The input
-    isn't modified."""
-    return _with_stored_map_keys(column_type)
+def types_match(existing_type: ColumnTypeDefinition, expected_type: ColumnTypeDefinition) -> bool:
+    """Return whether expected_type, the model's column type from its SELECT dry-run, matches
+    existing_type, the existing table's type for the same column, for the drift check.
+
+    They match when they're equal apart from top-level nullability (see `comparable_type`) and
+    any string MAP key or MULTISET element, at any depth, that fits in the table's. A key or
+    element fits when it's a CHAR(n) or VARCHAR(n) and the table's is a VARCHAR(m) with n <= m,
+    or the same CHAR(n); nullability is ignored. Every one fits in the VARCHAR(2147483647) NOT
+    NULL an Avro or JSON table stores. On a Protobuf table, which keeps the declared type, a
+    longer one or a VARCHAR into a CHAR doesn't match. A shorter one does: the table still holds
+    every value the model can produce, and `--full-refresh` rebuilds it with the new type.
+    """
+    return _match(comparable_type(existing_type), comparable_type(expected_type))
 
 
-def _with_stored_map_keys(column_type: ColumnTypeDefinition) -> ColumnTypeDefinition:
-    key_type = column_type.key_type
-    if key_type is not None:
-        if key_type.type in _STRING_KEY_TYPES:
-            key_type = _stored_string()
-        else:
-            key_type = _with_stored_map_keys(key_type)
-    element_type = column_type.element_type
-    if column_type.type == "MULTISET" and element_type is not None:
-        if element_type.type in _STRING_KEY_TYPES:
-            element_type = _stored_string()
-        else:
-            element_type = _with_stored_map_keys(element_type)
+def _match(existing_type: ColumnTypeDefinition, expected_type: ColumnTypeDefinition) -> bool:
+    if _without_children(existing_type) != _without_children(expected_type):
+        return False
+    if expected_type.type == "MULTISET":
+        elements_match = _member_match(existing_type.element_type, expected_type.element_type)
     else:
-        element_type = _optional(element_type)
-    fields = column_type.fields
-    if fields is not None:
-        fields = [
-            replace(field, field_type=_with_stored_map_keys(field.field_type)) for field in fields
-        ]
-    return replace(
-        column_type,
-        key_type=key_type,
-        value_type=_optional(column_type.value_type),
-        element_type=element_type,
-        fields=fields,
+        elements_match = _child_match(existing_type.element_type, expected_type.element_type)
+    return (
+        elements_match
+        and _member_match(existing_type.key_type, expected_type.key_type)
+        and _child_match(existing_type.value_type, expected_type.value_type)
+        and _fields_match(existing_type.fields, expected_type.fields)
     )
 
 
-def _stored_string() -> ColumnTypeDefinition:
-    return ColumnTypeDefinition(type="VARCHAR", nullable=False, length=_MAX_LENGTH)
+def _without_children(column_type: ColumnTypeDefinition) -> ColumnTypeDefinition:
+    # The type with the types inside it left out; _match compares those one by one.
+    return replace(column_type, key_type=None, value_type=None, element_type=None, fields=None)
 
 
-def _optional(column_type: ColumnTypeDefinition | None) -> ColumnTypeDefinition | None:
-    return None if column_type is None else _with_stored_map_keys(column_type)
+def _child_match(
+    existing_type: ColumnTypeDefinition | None, expected_type: ColumnTypeDefinition | None
+) -> bool:
+    if existing_type is None or expected_type is None:
+        return existing_type is expected_type
+    return _match(existing_type, expected_type)
+
+
+def _member_match(
+    existing_type: ColumnTypeDefinition | None, expected_type: ColumnTypeDefinition | None
+) -> bool:
+    # A MAP key or MULTISET element: it matches if the model's fits in the table's, or if the
+    # two match like any other type.
+    if (
+        existing_type is not None
+        and expected_type is not None
+        and _fits(expected_type, existing_type)
+    ):
+        return True
+    return _child_match(existing_type, expected_type)
+
+
+def _fields_match(
+    existing_fields: list[RowColumn] | None, expected_fields: list[RowColumn] | None
+) -> bool:
+    if existing_fields is None or expected_fields is None:
+        return existing_fields is expected_fields
+    return len(existing_fields) == len(expected_fields) and all(
+        existing_field.name == expected_field.name
+        and existing_field.description == expected_field.description
+        and _match(existing_field.field_type, expected_field.field_type)
+        for existing_field, expected_field in zip(existing_fields, expected_fields, strict=True)
+    )
+
+
+def _fits(expected_type: ColumnTypeDefinition, existing_type: ColumnTypeDefinition) -> bool:
+    if expected_type.type not in _STRING_KEY_TYPES:
+        return False
+    if expected_type.length is None or existing_type.length is None:
+        return False
+    if existing_type.type == "VARCHAR":
+        return expected_type.length <= existing_type.length
+    return existing_type.type == expected_type.type == "CHAR" and (
+        expected_type.length == existing_type.length
+    )
 
 
 def display_type(column_type: ColumnTypeDefinition) -> str:

@@ -93,6 +93,15 @@ class TestCheckColumnDrift:
         )
         assert violations == ["column type: 'a' existing='<1>', expected='<2>'"]
 
+    def test_matches_decides_type_changes(self):
+        """The dry-run path decides with types_match instead of ==."""
+        violations = ConfluentAdapter._check_column_drift(
+            {"a": 1, "b": 2},
+            {"a": 3, "b": 5},
+            matches=lambda existing, expected: existing % 2 == expected % 2,
+        )
+        assert violations == ["column type: 'b' existing='2', expected='5'"]
+
 
 # ---------------------------------------------------------------------------
 # _check_options_drift
@@ -1088,9 +1097,9 @@ class TestCheckSchemaDriftOrchestrator:
             "expected='ARRAY<VARCHAR(2147483647)>'"
         ) in str(excinfo.value)
 
-    def test_map_keys_compare_as_stored(self):
-        """map['a', 1] has a CHAR(1) key in the model's dry-run, which the table stores as
-        VARCHAR(2147483647) NOT NULL: no drift."""
+    def test_map_keys_fit_an_avro_stored_key(self):
+        """map['a', 1] has a CHAR(1) key in the model's dry-run, which fits in the
+        VARCHAR(2147483647) NOT NULL an Avro table stores: no drift."""
         value = {"type": "INTEGER", "nullable": False}
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         adapter.check_schema_drift(
@@ -1126,16 +1135,50 @@ class TestCheckSchemaDriftOrchestrator:
             ),
         )
 
-    def test_protobuf_map_keys_drift_as_before(self):
-        """A Protobuf table keeps a VARCHAR(5) key, but the model's side is compared as an Avro
-        table stores it, as the temp table did: drift, with the temp table's message."""
-        key = {"type": "VARCHAR", "nullable": True, "length": 5}
-        column = {
-            "type": "MAP",
-            "nullable": True,
-            "key_type": key,
-            "value_type": {"type": "INTEGER", "nullable": True},
-        }
+    @staticmethod
+    def _protobuf_map(key: dict, value_type: str = "INTEGER") -> ColumnTypeDefinition:
+        return _type(
+            {
+                "type": "MAP",
+                "nullable": True,
+                "key_type": key,
+                "value_type": {"type": value_type, "nullable": True},
+            }
+        )
+
+    @pytest.mark.parametrize(
+        "length,drifts", [(5, False), (3, False), (10, True)], ids=["same", "shorter", "longer"]
+    )
+    def test_protobuf_map_key_length(self, length, drifts):
+        """A Protobuf table keeps the declared key type (GH-118 probe run b68104c4): a key that
+        fits in it isn't drift, and a longer one is."""
+        existing = self._protobuf_map({"type": "VARCHAR", "nullable": True, "length": 5})
+        expected = self._protobuf_map({"type": "VARCHAR", "nullable": True, "length": length})
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+
+        def check() -> None:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                self._existing_catalog(),
+                expected_with={},
+                dry_run_columns=DryRunColumns(existing={"m": existing}, expected={"m": expected}),
+            )
+
+        if not drifts:
+            check()
+            return
+        with pytest.raises(CompilationError) as excinfo:
+            check()
+        assert (
+            "column type: 'm' existing='MAP<VARCHAR(5), INT>', expected='MAP<VARCHAR(10), INT>'"
+        ) in str(excinfo.value)
+
+    def test_protobuf_map_value_change_spells_the_declared_types(self):
+        """The key fits but the value changed: drift, and the message spells each side as its
+        dry-run reports it, so the key reads differently too."""
+        existing = self._protobuf_map({"type": "VARCHAR", "nullable": True, "length": 5})
+        expected = self._protobuf_map({"type": "CHAR", "nullable": False, "length": 1}, "BIGINT")
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
@@ -1143,11 +1186,9 @@ class TestCheckSchemaDriftOrchestrator:
                 None,
                 self._existing_catalog(),
                 expected_with={},
-                dry_run_columns=DryRunColumns(
-                    existing={"m": _type(column)}, expected={"m": _type(column)}
-                ),
+                dry_run_columns=DryRunColumns(existing={"m": existing}, expected={"m": expected}),
             )
         assert (
             "column type: 'm' existing='MAP<VARCHAR(5), INT>', "
-            "expected='MAP<VARCHAR(2147483647) NOT NULL, INT>'"
+            "expected='MAP<CHAR(1) NOT NULL, BIGINT>'"
         ) in str(excinfo.value)

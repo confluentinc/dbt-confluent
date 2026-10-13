@@ -7,12 +7,15 @@ import copy
 import pytest
 from confluent_sql.types import ColumnTypeDefinition
 
-from dbt.adapters.confluent.dry_run_types import comparable_type, display_type, stored_type
+from dbt.adapters.confluent.dry_run_types import comparable_type, display_type, types_match
 from dbt.adapters.confluent.impl import ConfluentAdapter
 
 # A string MAP key or MULTISET element as an Avro or JSON table stores it.
 STORED_KEY = {"type": "VARCHAR", "nullable": False, "length": 2147483647}
 INT = {"type": "INTEGER", "nullable": True}
+# Key and element types a Protobuf table keeps as declared.
+CHAR1 = {"type": "CHAR", "nullable": True, "length": 1}
+VARCHAR5 = {"type": "VARCHAR", "nullable": True, "length": 5}
 
 
 def _type(data: dict) -> ColumnTypeDefinition:
@@ -65,8 +68,8 @@ class TestComparableType:
         assert comparable_type(_type(not_null)) != comparable_type(_type(nullable))
 
     def test_string_map_keys_are_kept(self):
-        """A table's string MAP key is compared as the table reports it (stored_type widens only
-        the model's side)."""
+        """A table's string MAP key is compared as the table reports it (types_match decides
+        whether the model's fits in it)."""
         char_keyed = comparable_type(_type(_map({"type": "CHAR", "nullable": False, "length": 1})))
         assert char_keyed != comparable_type(_type(_map(STORED_KEY)))
 
@@ -83,9 +86,10 @@ class TestComparableType:
         assert column_type == before
 
 
-class TestStoredType:
+class TestTypesMatch:
+    @pytest.mark.parametrize("wrap", [_map, _multiset], ids=["map-key", "multiset-element"])
     @pytest.mark.parametrize(
-        "key",
+        "expected_member",
         [
             {"type": "CHAR", "nullable": False, "length": 1},
             {"type": "CHAR", "nullable": True, "length": 3},
@@ -95,82 +99,97 @@ class TestStoredType:
         ],
         ids=["char1", "nullable-char3", "varchar5", "nullable-string", "stored"],
     )
-    def test_string_map_keys_compare_as_stored(self, key):
-        assert stored_type(_type(_map(key))) == stored_type(_type(_map(STORED_KEY)))
+    def test_string_members_fit_an_avro_stored_type(self, wrap, expected_member):
+        assert types_match(_type(wrap(STORED_KEY)), _type(wrap(expected_member)))
 
-    def test_other_map_keys_keep_type_and_nullability(self):
-        nullable_int_key = stored_type(_type(_map(INT)))
-        assert nullable_int_key.key_type == _type(INT)
-        assert nullable_int_key.key_type != _type({**INT, "nullable": False})
-
+    @pytest.mark.parametrize("wrap", [_map, _multiset], ids=["map-key", "multiset-element"])
     @pytest.mark.parametrize(
-        "element",
+        "existing_member,expected_member,fits",
         [
-            {"type": "CHAR", "nullable": False, "length": 1},
-            {"type": "CHAR", "nullable": True, "length": 3},
-            {"type": "VARCHAR", "nullable": False, "length": 5},
-            {"type": "VARCHAR", "nullable": True, "length": 2147483647},
-            STORED_KEY,
+            (VARCHAR5, VARCHAR5, True),
+            (VARCHAR5, {**VARCHAR5, "length": 3}, True),
+            (VARCHAR5, {**VARCHAR5, "nullable": False}, True),
+            ({**VARCHAR5, "nullable": False}, VARCHAR5, True),
+            (VARCHAR5, CHAR1, True),
+            (CHAR1, CHAR1, True),
+            (VARCHAR5, {**VARCHAR5, "length": 10}, False),
+            (CHAR1, {**VARCHAR5, "length": 1}, False),
+            (CHAR1, {**CHAR1, "length": 3}, False),
+            ({**CHAR1, "length": 3}, CHAR1, False),
+            (INT, VARCHAR5, False),
+            ({**INT, "nullable": False}, INT, False),
+            (STORED_KEY, {"type": "VARCHAR", "nullable": True}, False),
         ],
-        ids=["char1", "nullable-char3", "varchar5", "nullable-string", "stored"],
+        ids=[
+            "same",
+            "shorter",
+            "not-null-into-nullable",
+            "nullable-into-not-null",
+            "char-into-varchar",
+            "same-char",
+            "longer",
+            "varchar-into-char",
+            "longer-char",
+            "shorter-char",
+            "string-into-int",
+            "int-nullability",
+            "no-length",
+        ],
     )
-    def test_string_multiset_elements_compare_as_stored(self, element):
-        assert stored_type(_type(_multiset(element))) == stored_type(_type(_multiset(STORED_KEY)))
+    def test_fits_rule(self, wrap, existing_member, expected_member, fits):
+        """A Protobuf table keeps the declared key or element type (GH-118 probe run b68104c4).
+        A fitting one matches; any other must be equal, nullability included."""
+        assert types_match(_type(wrap(existing_member)), _type(wrap(expected_member))) is fits
 
-    def test_other_multiset_elements_keep_type_and_nullability(self):
-        not_null_int = stored_type(_type(_multiset({**INT, "nullable": False})))
-        assert not_null_int.element_type == _type({**INT, "nullable": False})
-        assert not_null_int != stored_type(_type(_multiset(INT)))
+    @pytest.mark.parametrize("member", [_map, _multiset], ids=["map-key", "multiset-element"])
+    @pytest.mark.parametrize(
+        "wrap",
+        [
+            lambda inner: {"type": "ARRAY", "nullable": True, "element_type": inner},
+            lambda inner: _row(("m", inner)),
+            lambda inner: _map({**INT, "nullable": False}, inner),
+            lambda inner: _map(inner),
+            lambda inner: _multiset(inner),
+        ],
+        ids=["array-element", "row-field", "map-value", "map-key", "multiset-element"],
+    )
+    def test_nested_members_fit(self, member, wrap):
+        existing = _type(wrap(member(VARCHAR5)))
+        assert types_match(existing, _type(wrap(member(CHAR1))))
+        assert not types_match(existing, _type(wrap(member({**VARCHAR5, "length": 10}))))
 
     @pytest.mark.parametrize(
         "wrap",
         [
             lambda inner: {"type": "ARRAY", "nullable": True, "element_type": inner},
-            lambda inner: {
-                "type": "ROW",
-                "nullable": True,
-                "fields": [{"name": "m", "field_type": inner}],
-            },
-            lambda inner: _map({**INT, "nullable": False}, inner),
+            lambda inner: _map(INT, inner),
+            lambda inner: _row(("s", inner)),
         ],
-        ids=["array-element", "row-field", "map-value"],
+        ids=["array-element", "map-value", "row-field"],
     )
-    def test_nested_map_keys_compare_as_stored(self, wrap):
-        char_keyed = _map({"type": "CHAR", "nullable": False, "length": 1})
-        assert stored_type(_type(wrap(char_keyed))) == stored_type(_type(wrap(_map(STORED_KEY))))
+    def test_other_string_positions_must_match(self, wrap):
+        """Only MAP keys and MULTISET elements are fitted; a shorter string anywhere else still
+        drifts."""
+        assert not types_match(_type(wrap(VARCHAR5)), _type(wrap({**VARCHAR5, "length": 3})))
 
     @pytest.mark.parametrize(
-        "wrap",
+        "existing,expected",
         [
-            lambda inner: {"type": "ARRAY", "nullable": True, "element_type": inner},
-            lambda inner: {
-                "type": "ROW",
-                "nullable": True,
-                "fields": [{"name": "m", "field_type": inner}],
-            },
-            lambda inner: _map({**INT, "nullable": False}, inner),
+            ({"type": "ARRAY", "nullable": True, "element_type": STORED_KEY}, _multiset(CHAR1)),
+            (_map(STORED_KEY), _multiset(CHAR1)),
+            (_row(("m", _multiset(STORED_KEY)), ("n", INT)), _row(("m", _multiset(CHAR1)))),
+            (_row(("m", _multiset(STORED_KEY))), _row(("n", _multiset(CHAR1)))),
         ],
-        ids=["array-element", "row-field", "map-value"],
+        ids=["multiset-to-array", "multiset-to-map", "row-field-count", "row-field-name"],
     )
-    def test_nested_multiset_elements_compare_as_stored(self, wrap):
-        char_elements = _multiset({"type": "CHAR", "nullable": False, "length": 1})
-        stored_elements = _multiset(STORED_KEY)
-        assert stored_type(_type(wrap(char_elements))) == stored_type(_type(wrap(stored_elements)))
+    def test_different_shapes_do_not_match(self, existing, expected):
+        assert not types_match(_type(existing), _type(expected))
 
-    def test_top_level_nullability_is_kept(self):
-        assert stored_type(_type({"type": "BIGINT", "nullable": False})).nullable is False
-
-    def test_input_is_not_modified(self):
-        column_type = _type(
-            {
-                "type": "ARRAY",
-                "nullable": False,
-                "element_type": _map({"type": "CHAR", "nullable": False, "length": 1}),
-            }
+    def test_top_level_nullability_is_ignored(self):
+        assert types_match(
+            _type({"type": "BIGINT", "nullable": True}),
+            _type({"type": "BIGINT", "nullable": False}),
         )
-        before = copy.deepcopy(column_type)
-        stored_type(column_type)
-        assert column_type == before
 
 
 class TestDisplayType:
@@ -298,7 +317,7 @@ class TestDisplayType:
     def test_drift_message_spells_the_difference(self):
         """End to end through the adapter's message builder."""
         existing = {"d": comparable_type(_type(_interval("DAY_TO_SECOND", 3)))}
-        expected = {"d": comparable_type(stored_type(_type(_interval("DAY_TO_SECOND", 6))))}
+        expected = {"d": comparable_type(_type(_interval("DAY_TO_SECOND", 6)))}
         assert ConfluentAdapter._check_column_drift(existing, expected, display=display_type) == [
             "column type: 'd' "
             "existing='INTERVAL_DAY_TIME(2, resolution=DAY_TO_SECOND, fractional_precision=3)', "
