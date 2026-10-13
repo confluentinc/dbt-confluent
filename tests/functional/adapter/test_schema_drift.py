@@ -754,8 +754,8 @@ class TestDistributedByDefaultIsNotChecked(ConfluentFixtures):
 # Shapes whose query type differs from the stored type only in what the drift check ignores:
 # an unchanged re-run must SKIP on the dry-run path. The literals and casts are NOT NULL in the
 # query (top-level, ignored). The string MAP keys (CHAR(1), VARCHAR(5), and a nullable CHAR(1)
-# from nullif) are all stored as VARCHAR(2147483647) NOT NULL, which they fit in
-# (dry_run_types); the INT key keeps its type.
+# from nullif) are all stored as VARCHAR(2147483647) NOT NULL, which they fit in (dry_run_types);
+# the INT key keeps its type.
 DRY_RUN_TYPES_MODEL = """
 {{ config(materialized='table') }}
 select
@@ -998,9 +998,9 @@ models:
 
 
 class TestProtobufMapKey(ConfluentFixtures):
-    """A Protobuf table keeps the declared MAP key type instead of storing
-    VARCHAR(2147483647) NOT NULL (GH-118 probe run b68104c4). An unchanged re-run must not
-    drift, and a key that no longer fits in the table's must."""
+    """A Protobuf table keeps the declared MAP key type instead of storing VARCHAR(2147483647)
+    NOT NULL (GH-118 probe run b68104c4). An unchanged re-run must not drift, and a key that no
+    longer fits in the table's must."""
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -1035,7 +1035,8 @@ class TestProtobufMapKey(ConfluentFixtures):
             assert_drift_error(results, "protobuf_map_key")
             message = get_result_by_name(results, "protobuf_map_key").message
             assert (
-                "column type: 'm' existing='MAP<VARCHAR(5), INT>', expected='MAP<VARCHAR(10), INT>'"
+                "column type: 'm' existing='MAP<VARCHAR(5), INT>', "
+                "expected='MAP<VARCHAR(10), INT>'"
             ) in message
             assert "'order_id'" not in message
         finally:
