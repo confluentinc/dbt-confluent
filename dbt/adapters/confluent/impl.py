@@ -25,7 +25,7 @@ from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
 from . import tableflow
-from .dry_run_types import comparable_type, display_type, stored_type
+from .dry_run_types import display_type, fitted_type
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
@@ -33,6 +33,13 @@ logger = AdapterLogger("Confluent")
 
 # The value type of the two column maps _check_column_drift compares.
 _T = TypeVar("_T")
+
+
+def _as_declared(existing: _T, expected: _T) -> _T:
+    """`_check_column_drift`'s default `fit`: the expected value unchanged, so the two values are
+    compared and shown as they are."""
+    return expected
+
 
 # Every dbt-confluent-specific config key, keyed by which materializations
 # consume it. This is a closed set we own completely -- validate_materialization_config
@@ -957,11 +964,12 @@ class ConfluentAdapter(SQLAdapter):
             dry_run_columns  — from `get_columns_from_dry_run` (SELECT models): the model's SELECT
                                (expected) and the existing table (existing), each dry-run. Its
                                expected map must be non-empty. They're compared as Flink types,
-                               after `comparable_type` (no top-level nullability), the model's
-                               after `stored_type` (as an Avro table stores it). drift_catalog
-                               then holds only the existing relation, for options and distribution;
-                               get_columns_from_dry_run has already run the materialized-table and
-                               metadata-lag guards on it, which pass again here.
+                               with the model's fitted to the table's by `fitted_type` (the table's
+                               top-level nullability, and its string MAP keys and MULTISET elements
+                               where the model's fit). drift_catalog then holds only the existing
+                               relation, for options and distribution; get_columns_from_dry_run has
+                               already run the materialized-table and metadata-lag guards on it,
+                               which pass again here.
             temp_relation    — the temp-table fallback (streaming_source, or a SELECT the dry-runs
                                can't stand in for). Its columns are read from drift_catalog and
                                compared with the existing table's as FULL_DATA_TYPE strings.
@@ -1035,18 +1043,16 @@ class ConfluentAdapter(SQLAdapter):
 
         violations: list[str] = []
         if dry_run_columns is not None:
-            # Two dry-runs: compare Flink's own types, without top-level nullability, and with
-            # the model's side as an Avro or JSON table stores it, as the temp table did
-            # (dry_run_types). The catalog's existing_columns only fed the metadata-lag guard
-            # above.
+            # Two dry-runs: compare Flink's own types, with fitted_type taking the table's
+            # top-level nullability, and its string MAP keys and MULTISET elements where the
+            # model's fit (dry_run_types). The catalog's existing_columns only fed the metadata-lag
+            # guard above.
             violations.extend(
                 self._check_column_drift(
-                    {name: comparable_type(t) for name, t in dry_run_columns.existing.items()},
-                    {
-                        name: comparable_type(stored_type(t))
-                        for name, t in dry_run_columns.expected.items()
-                    },
+                    dry_run_columns.existing,
+                    dry_run_columns.expected,
                     display=display_type,
+                    fit=fitted_type,
                 )
             )
         else:
@@ -1280,13 +1286,17 @@ class ConfluentAdapter(SQLAdapter):
         existing_map: dict[str, _T],
         expected_map: dict[str, _T],
         display: Callable[[_T], str] = str,
+        fit: Callable[[_T, _T], _T] = _as_declared,
     ) -> list[str]:
         """Return one violation string per added/removed/type-changed column.
 
-        Both maps hold the same kind of type value, compared with `!=` and shown in messages
-        with `display`: FULL_DATA_TYPE strings from INFORMATION_SCHEMA.COLUMNS on the
-        temp-table path, or `comparable_type` results from the two dry-runs, shown with
-        `display_type`. Sorted output keeps error messages stable across runs.
+        Both maps hold the same kind of type value, shown in messages with `display`. For a column
+        both have, `fit(existing, expected)` returns the expected value with any difference the
+        check allows taken from the existing one; the column has changed type if that isn't equal
+        to the existing value, and the message shows it as the expected value. On the temp-table
+        path the values are FULL_DATA_TYPE strings from INFORMATION_SCHEMA.COLUMNS, compared as
+        they are. On the dry-run path they're the two dry-runs' types, fitted with `fitted_type`
+        and shown with `display_type`. Sorted output keeps error messages stable across runs.
         """
         violations: list[str] = []
         existing_names = set(existing_map)
@@ -1296,11 +1306,13 @@ class ConfluentAdapter(SQLAdapter):
         for removed in sorted(existing_names - expected_names):
             violations.append(f"column removed: '{removed}'")
         for col in sorted(existing_names & expected_names):
-            if existing_map[col] != expected_map[col]:
+            existing = existing_map[col]
+            expected = fit(existing, expected_map[col])
+            if expected != existing:
                 violations.append(
                     f"column type: '{col}' "
-                    f"existing='{display(existing_map[col])}', "
-                    f"expected='{display(expected_map[col])}'"
+                    f"existing='{display(existing)}', "
+                    f"expected='{display(expected)}'"
                 )
         return violations
 
