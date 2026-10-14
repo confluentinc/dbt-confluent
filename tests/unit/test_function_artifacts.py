@@ -70,6 +70,11 @@ class FakeDriver:
             raise ArtifactNotFoundError("gone", artifact_id=artifact_id)
         return self.artifacts[artifact_id]
 
+    def delete(self, artifact_id, **_):
+        self.get(artifact_id)
+        self.events.append(f"delete {artifact_id}")
+        del self.artifacts[artifact_id]
+
     def update(self, artifact_id, *, description):
         self.get(artifact_id).description = description
         return self.artifacts[artifact_id]
@@ -80,6 +85,7 @@ class FakeFlink:
 
     def __init__(self, events: list[str]):
         self.functions: dict[str, dict[str, str]] = {}
+        self.other_database_functions: dict[str, str] = {}  # name -> artifact id
         self.events = events
         self.fail_create_once = False
         self.fail_creates = 0  # fail this many of the next creates
@@ -99,6 +105,14 @@ class FakeFlink:
     def execute(self, sql: str, **kwargs):
         self.queries.append(sql)
         name = re.findall(r"`([^`]+)`", sql)[2]  # catalog, database, name
+        if "INFORMATION_SCHEMA" in sql:
+            rows = [
+                (f"confluent-artifact://{f['plugin']}/latest",) for f in self.functions.values()
+            ] + [
+                (f"confluent-artifact://{a}/latest",)
+                for a in self.other_database_functions.values()
+            ]
+            return None, SimpleNamespace(rows=rows)
         if sql.startswith("DESCRIBE FUNCTION"):
             if name not in self.functions:
                 raise DbtDatabaseError(f"Function with the identifier '`{name}`' doesn't exist.")
@@ -230,6 +244,20 @@ class TestDescription:
             "managed_by": "dbt-confluent",
             "project": "my_project",
         }
+
+    @pytest.mark.parametrize(
+        "description, project",
+        [
+            (managed("my_project"), "my_project"),
+            (None, None),
+            ("my udf", None),
+            ("[1]", None),
+            ('{"managed_by": "someone"}', None),
+            ('{"managed_by":"dbt-confluent"}', None),  # a marker without a project
+        ],
+    )
+    def test_the_project_of_an_artifact(self, description, project):
+        assert fa.artifact_project(description) == project
 
 
 class TestFileDigestAndName:
@@ -472,6 +500,7 @@ class TestReplaceWarning:
 
         (message,) = self.warnings(logger)
         assert old.id in message
+        assert "cleanup_function_artifacts" in message
 
     def test_creating_and_re_creating_on_the_same_artifact_do_not_warn(
         self, adapter, flink, tmp_path, logger
@@ -489,6 +518,96 @@ class TestDesiredStateForAnUnuploadedPackage:
         assert artifact_of(udf).name in desired.artifact_id
         live = functions.FunctionState(CLASS_NAME, "python", "cfa-123456", frozenset())
         assert functions.diff_function_state(live, desired)
+
+
+class TestCleanupFunctionArtifacts:
+    def names(self, results) -> list[str]:
+        return [r["artifact"] for r in results]
+
+    def test_lists_this_projects_artifacts_that_no_function_uses(self, adapter, driver, flink):
+        used = driver.add("used", managed())
+        flink.add(FUNCTION, used.id)
+        elsewhere = driver.add("elsewhere", managed())
+        flink.other_database_functions["other_fn"] = elsewhere.id
+        unused = driver.add("unused", managed())
+        driver.add("other project", managed(project="another"))
+        driver.add("theirs", "hand made")
+        driver.add("no description", None)
+        before = set(driver.artifacts)
+
+        found = adapter.cleanup_function_artifacts()
+
+        assert self.names(found) == [f"{unused.id} (unused)"]
+        assert set(driver.artifacts) == before  # nothing is deleted by default
+
+    def test_delete_removes_only_the_unused_artifacts_of_this_project(
+        self, adapter, driver, flink, events
+    ):
+        used = driver.add("used", managed())
+        flink.add(FUNCTION, used.id)
+        unused = driver.add("unused", managed())
+        theirs = driver.add("theirs", "hand made")
+        other = driver.add("other project", managed(project="another"))
+
+        found = adapter.cleanup_function_artifacts(delete=True)
+
+        assert [r["error"] for r in found] == [None]
+        assert set(driver.artifacts) == {used.id, theirs.id, other.id}
+        assert events == [f"delete {unused.id}"]
+
+    def test_checks_every_artifact(self, adapter, driver):
+        count = 250  # past any page size or the org's artifact limit
+        for i in range(count):
+            driver.add(f"unused-{i}", managed())
+        assert len(adapter.cleanup_function_artifacts()) == count
+
+    def test_a_failed_delete_does_not_stop_the_rest(self, adapter, driver, monkeypatch):
+        first, second, third = (driver.add(n, managed()) for n in ("a", "b", "c"))
+        real = driver.delete
+
+        def flaky(artifact_id, **kwargs):
+            if artifact_id == second.id:
+                raise OperationalError("denied")
+            real(artifact_id, **kwargs)
+
+        monkeypatch.setattr(driver, "delete", flaky)
+
+        results = adapter.cleanup_function_artifacts(delete=True)
+
+        assert [bool(r["error"]) for r in results] == [False, True, False]
+        assert set(driver.artifacts) == {second.id}
+
+    def test_functions_are_looked_up_after_artifacts_are_listed(self, adapter, driver, flink):
+        """So a function created in between can't leave its artifact looking unused."""
+        driver.add("unused", managed())
+        order: list[str] = []
+        real_list, real_execute = driver.list, flink.execute
+        driver.list = lambda **k: (order.append("list"), real_list(**k))[1]  # type: ignore[method-assign]
+        adapter.execute = lambda *a, **k: (order.append("functions"), real_execute(*a, **k))[1]  # type: ignore[method-assign]
+
+        adapter.cleanup_function_artifacts()
+
+        assert order == ["list", "functions"]
+
+    def test_a_marker_without_a_project_is_ignored(self, adapter, driver):
+        driver.add("legacy", '{"managed_by":"dbt-confluent"}')
+        assert adapter.cleanup_function_artifacts(delete=True) == []
+        assert len(driver.artifacts) == 1
+
+    def test_functions_are_read_from_the_environments_information_schema(
+        self, adapter, driver, flink
+    ):
+        driver.add("unused", managed())
+        adapter.cleanup_function_artifacts()
+        (query,) = flink.queries
+        assert f"`{CATALOG}`.`INFORMATION_SCHEMA`.`ROUTINES`" in query
+
+    def test_functions_are_not_queried_when_the_project_has_no_artifacts(
+        self, adapter, driver, flink
+    ):
+        driver.add("theirs", "hand made")
+        adapter.cleanup_function_artifacts()
+        assert flink.queries == []
 
 
 class TestAdapterValidateFunctionConfig:
