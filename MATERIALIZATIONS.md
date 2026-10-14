@@ -589,7 +589,16 @@ and so a new digest and a new artifact upload.
 dbt never deletes an artifact, including the one a replaced function used to run on. Managing the
 limit, and cleaning up artifacts nothing uses any more, is left to you. Take care not to delete an
 artifact still in use: running and stopped statements stay bound to the artifact they were compiled
-against, and dbt can't tell which statements those are.
+against.
+
+To find them, run `dbt run-operation cleanup_function_artifacts`. It lists this project's
+artifacts (the ones carrying its `managed_by` marker) that no function uses, according to
+`INFORMATION_SCHEMA.ROUTINES`, and prints the command that deletes them. Nothing is deleted
+unless you run it with `--args '{delete: true}'`. Artifacts that another project or you uploaded
+are never listed or deleted. Unused by a function doesn't mean unused: delete only once the
+statements that were running on an old artifact have been recreated, and not while a `dbt run`
+is in progress, since an artifact it has uploaded may not have its function yet. Every delete is
+attempted, and any failures are reported at the end.
 
 An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
 looked up, the run fails with the existing function untouched. The check only runs when replacing

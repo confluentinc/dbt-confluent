@@ -245,6 +245,12 @@ def _resolve_artifact_path(
     return path.resolve()
 
 
+def artifact_ids_in(external_artifacts: Any) -> set[str]:
+    """The artifact IDs in an `INFORMATION_SCHEMA.ROUTINES.EXTERNAL_ARTIFACTS` value, which looks
+    like `confluent-artifact://cfa-xxxxxx/latest`."""
+    return set(re.findall(r"confluent-artifact://(cfa-[A-Za-z0-9]+)", str(external_artifacts)))
+
+
 def parse_describe_function(rows: Any, catalog: str, database: str) -> FunctionState:
     """Build a FunctionState from the (name, value) rows of `DESCRIBE FUNCTION`.
 
