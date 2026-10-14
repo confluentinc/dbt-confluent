@@ -4,9 +4,11 @@ import time
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, NamedTuple, TypeVar, cast
 
 import agate
+from confluent_sql import ArtifactNotFoundError, Connection
 from confluent_sql.exceptions import (
     OperationalError,
     StatementNotFoundError,
@@ -26,7 +28,7 @@ from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import functions, tableflow
+from . import function_artifacts, functions, tableflow
 from .dry_run_types import display_type, fitted_type
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
@@ -58,7 +60,14 @@ MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "table": _UNIVERSAL_CONFIG_KEYS | _KAFKA_BACKED_CONFIG_KEYS | {"on_schema_drift"},
     "view": _UNIVERSAL_CONFIG_KEYS,
     # A function is pure metadata (like a view) with no Kafka topic or long-running statement.
-    "function": _UNIVERSAL_CONFIG_KEYS | {"language", "artifact_id", "class", "connections"},
+    "function": _UNIVERSAL_CONFIG_KEYS
+    | {
+        "language",
+        "artifact_id",
+        "artifact_path",
+        "class",
+        "connections",
+    },
     "streaming_source": _UNIVERSAL_CONFIG_KEYS
     | _KAFKA_BACKED_CONFIG_KEYS
     | {"connector", "with", "on_schema_drift"},
@@ -937,11 +946,27 @@ class ConfluentAdapter(SQLAdapter):
     ) -> dict[str, Any]:
         """Validate a `function` node's config; see `functions.validate_function_config`.
 
-        Unqualified connection names resolve against the function's own catalog and database.
+        Unqualified connection names resolve against the function's own catalog and database,
+        and a relative `artifact_path` against the dbt project root. For an `artifact_path`,
+        the result also has the `artifact_name` its artifact is (or will be) uploaded under,
+        which embeds a digest of the package's content (`artifact_digest`).
         """
-        return functions.validate_function_config(
-            model_config, cast(str, relation.database), cast(str, relation.schema)
+        udf = functions.validate_function_config(
+            model_config,
+            cast(str, relation.database),
+            cast(str, relation.schema),
+            Path(self.config.project_root),
         )
+        if udf["artifact_path"]:
+            udf["project"] = self.config.project_name
+            udf["artifact_digest"] = function_artifacts.file_digest(Path(udf["artifact_path"]))
+            udf["artifact_name"] = function_artifacts.artifact_display_name(
+                self.config.credentials.statement_name_prefix,
+                self.config.project_name,
+                cast(str, relation.identifier),
+                udf["artifact_digest"],
+            )
+        return udf
 
     @available
     def describe_function(
@@ -962,8 +987,14 @@ class ConfluentAdapter(SQLAdapter):
     ) -> list[str] | None:
         """Compare the live function (`describe_function`'s result) to the validated config `udf`.
 
-        See `functions.plan_function_change`.
+        See `functions.plan_function_change`. A function from an `artifact_path` is compared
+        against the artifact already uploaded for that content, if any.
         """
+        if udf["artifact_path"]:
+            artifact = function_artifacts.find_artifact(
+                self.connections.get_thread_handle(), udf["artifact_name"], udf["language"]
+            )
+            udf = {**udf, "artifact_id": artifact.id if artifact else None}
         return functions.plan_function_change(existing, udf)
 
     def _function_executor(self, compute_pool_id: str | None) -> functions.FunctionExecutor:
@@ -1009,17 +1040,24 @@ class ConfluentAdapter(SQLAdapter):
         """Create the function at `relation`, first dropping `existing` (its live state, from
         `describe_function`) if there is one.
 
-        If the create fails after the drop, the function that was dropped is re-created from `existing`,
-        which is held in memory only. A process that dies between the drop and the create leaves
-        no function behind and nothing to restore it from. Returns the create statement's response.
+        The artifact is sorted out *before* anything is dropped: an `artifact_path` is uploaded
+        (see `function_artifacts`) and a configured `artifact_id` is checked to exist, so a bad
+        artifact fails the run with the existing function untouched. If the create then fails
+        after the drop, the function that was dropped is re-created from `existing`, which is
+        held in memory only. A process that dies between the drop and the create leaves no
+        function behind and nothing to restore it from. The artifact the function replaced is
+        left in place, since statements may still be bound to it. Returns the create
+        statement's response.
         """
+        conn = self.connections.get_thread_handle()
         execute = self._function_executor(compute_pool_id)
+        if udf["artifact_path"]:
+            artifact_id = function_artifacts.ensure_artifact(conn, udf).id
+        else:
+            artifact_id = udf["artifact_id"]
+            self._require_artifact_exists(conn, artifact_id)
         create_sql = functions.render_create_function(
-            relation,
-            udf["class_name"],
-            udf["language"],
-            udf["artifact_id"],
-            udf["connection_names"],
+            relation, udf["class_name"], udf["language"], artifact_id, udf["connection_names"]
         )
         if existing is not None:
             # A failed drop leaves the function in place, so there is nothing to restore.
@@ -1030,7 +1068,28 @@ class ConfluentAdapter(SQLAdapter):
             if existing is not None:
                 self._restore_function(relation, existing, execute, create_statement_name)
             raise
+        if existing is not None and existing.artifact_id != artifact_id:
+            logger.warning(
+                warning_tag(
+                    f"Function {relation.render()} now uses artifact {artifact_id}. Statements "
+                    f"started before this change stay on the old artifact {existing.artifact_id} "
+                    "until they are recreated; it is not deleted."
+                )
+            )
         return response
+
+    def _require_artifact_exists(self, conn: Connection, artifact_id: str) -> None:
+        """Fail if the artifact doesn't exist, rather than dropping a function we can't recreate.
+
+        Any failure to look it up blocks too (e.g. a key that can't use the artifact API): a
+        config that names an artifact needs the credentials to check it.
+        """
+        try:
+            conn.get_artifacts_api().get(artifact_id)
+        except ArtifactNotFoundError as e:
+            raise CompilationError(
+                f"Artifact '{artifact_id}' doesn't exist in this environment, cloud and region."
+            ) from e
 
     def _restore_function(
         self,
