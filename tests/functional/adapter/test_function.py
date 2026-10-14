@@ -528,6 +528,11 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert before.keys() <= artifacts.keys()
         (new_artifact_id,) = artifacts.keys() - before.keys()
         assert "journal" in artifacts[new_artifact_id]  # the unfinished change is recorded
+        with project.adapter.connection_named("cleanup_artifacts_unsettled"):
+            found = project.adapter.cleanup_function_artifacts()
+        # reported apart from the orphans, and not deleted by default
+        assert [r["artifact"].split()[0] for r in found["unsettled"]] == [new_artifact_id]
+        assert new_artifact_id in self.artifacts(project)
 
     def test_5_the_next_run_rolls_forward_and_clears_the_journal(self, project):
         before = self.artifacts(project)
@@ -541,7 +546,22 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert "journal" not in artifacts[pending_artifact_id]
         assert artifacts.keys() == before.keys()  # no artifact was deleted
 
-    def test_6_continue_and_fail_upload_nothing(self, project, plan_actions):
+    def test_6_cleanup_lists_the_artifacts_no_function_uses(self, project):
+        """A dry run: the earlier artifacts are listed, the live one is not, nothing is deleted,
+        and the output says how to delete them."""
+        live_artifact_id = self.live_artifact_id(project)
+        before = self.artifacts(project)
+        unused = before.keys() - {live_artifact_id}
+
+        _, output = run_dbt_and_capture(["run-operation", "cleanup_function_artifacts"])
+
+        assert all(artifact_id in output for artifact_id in unused)
+        assert live_artifact_id not in output
+        assert "--args '{delete: true}'" in output
+        assert "delete_unsettled" not in output  # nothing is unsettled
+        assert self.artifacts(project) == before
+
+    def test_7_continue_and_fail_upload_nothing(self, project, plan_actions):
         """The plan is made before anything is uploaded, so neither touches artifacts."""
         before, live_artifact_id = self.artifacts(project), self.live_artifact_id(project)
         package_file = Path(project.project_root) / PACKAGE_FILE
@@ -559,7 +579,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.artifacts(project) == before
         assert self.live_artifact_id(project) == live_artifact_id
 
-    def test_7_full_refresh_re_creates_on_the_same_artifact(
+    def test_8_full_refresh_re_creates_on_the_same_artifact(
         self, project, plan_actions, submitted_sql
     ):
         """An unchanged package is replaced on --full-refresh, without a new upload."""
@@ -574,7 +594,29 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.artifacts(project) == before
         assert self.live_artifact_id(project) == live_artifact_id
 
+    def test_9_cleanup_deletes_orphans_and_unsettled_artifacts_separately(self, project):
+        """Cleanup is scoped to this project, so it is safe to delete for real here: only this
+        class's artifacts are candidates (unless the class runs twice at once on one environment)."""
+        live_artifact_id = self.live_artifact_id(project)
+        orphan_id, unsettled_id = sorted(self.artifacts(project).keys() - {live_artifact_id})[:2]
+        self.leave_journal(project, unsettled_id)
 
+        run_dbt(["run-operation", "cleanup_function_artifacts", "--args", "{delete: true}"])
+
+        remaining = self.artifacts(project).keys()
+        assert orphan_id not in remaining
+        assert unsettled_id in remaining  # `delete: true` leaves unsettled artifacts alone
+        assert live_artifact_id in remaining
+
+        run_dbt(
+            ["run-operation", "cleanup_function_artifacts", "--args", "{delete_unsettled: true}"]
+        )
+
+        assert self.artifacts(project).keys() == {live_artifact_id}
+        assert self.live_artifact_id(project) == live_artifact_id
+
+
+@requires_global_key
 class TestFunctionEmptyRun(FunctionFixtures):
     """`--empty` only limits the rows models read; a function is DDL, so it is still created
     (models that call it in an `--empty` run need it), uploading its package like any other run."""
