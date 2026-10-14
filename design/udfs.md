@@ -130,7 +130,7 @@ but nothing records an unfinished change.
 
 ```mermaid
 flowchart TD
-    apply["previous = the live function from the plan step<br/>(no second DESCRIBE)"] --> check["get_artifact<br/>any failure aborts; nothing dropped"]
+    apply["previous = the live function from the plan step<br/>(no second DESCRIBE)"] --> check["get artifact<br/>any failure aborts; nothing dropped"]
     check --> drop["DROP FUNCTION (replace only)"]
     drop --> create["CREATE FUNCTION on the artifact"]
     create -->|ok| ok(["done (nothing to settle)"])
@@ -175,7 +175,7 @@ When a change completes, the `journal` key is removed and the marker stays:
 
 ## Guarantees
 
-- **Nothing is dropped until the new artifact is confirmed**: uploaded, or `get_artifact` succeeded. A bad artifact fails with the function untouched.
+- **Nothing is dropped until the new artifact is confirmed**: uploaded, or `get` on the artifacts API succeeded. A bad artifact fails with the function untouched.
 - **An existing journal is never overwritten** (`artifact_path` only; an `artifact_id` has none). It is what lets a retry restore the original function after an earlier attempt dropped it and died.
 - **The journal's restore record is never stale when it is used.** A kept journal that differs from a live function is rewritten from that function before anything is dropped (a fresh `DESCRIBE`, after the journal was read). It is trusted as is only when no function exists.
 - **Rollback is best-effort**; the original error is always re-raised. With `artifact_id` it covers only a failure within the run: there is no journal to survive a crash or a retry.
