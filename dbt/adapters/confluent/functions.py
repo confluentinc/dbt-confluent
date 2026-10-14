@@ -1,7 +1,8 @@
 """Config validation and state comparison for the `function` materialization (#179).
 
-A Confluent UDF is registered from an artifact (a Java JAR or Python ZIP) that was already
-uploaded to Confluent Cloud, so a function's config must name the artifact and the class to bind.
+A Confluent UDF is registered from an artifact (a Java JAR or Python ZIP) in Confluent Cloud, so a
+function's config must name the artifact (an uploaded `artifact_id`, or a local `artifact_path`
+that dbt uploads, see function_artifacts.py) and the class to bind.
 Functions are immutable in Flink (no ALTER / CREATE OR REPLACE), so re-running the materialization
 compares the live function (via `DESCRIBE FUNCTION`) to the config: identical is a no-op, anything
 else is a drop and re-create.
@@ -9,6 +10,7 @@ else is a drop and re-create.
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, NamedTuple, cast
 
 import agate
@@ -16,6 +18,13 @@ from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.base import BaseRelation
 from dbt.adapters.contracts.connection import AdapterResponse
+
+from .function_artifacts import (
+    ARTIFACT_FORMATS,
+    ArtifactConfig,
+    artifact_display_name,
+    file_digest,
+)
 
 # The adapter's `execute` bound to a compute pool: `execute(sql, fetch=True, statement_name=...)`.
 FunctionExecutor = Callable[..., tuple[AdapterResponse, agate.Table]]
@@ -44,6 +53,22 @@ class FunctionState(NamedTuple):
     language: str
     artifact_id: str
     connections: frozenset[QualifiedName]
+
+
+class FunctionConfig(NamedTuple):
+    """A validated `function` config (see `validate_function_config`).
+
+    Exactly one of `artifact_id` (an artifact already uploaded) and `artifact_config` (a local
+    package dbt uploads) is set. `connections` are for comparison; `connection_names` are the
+    names as configured, rendered as identifiers, for the DDL.
+    """
+
+    language: str
+    class_name: str
+    connections: list[QualifiedName]
+    connection_names: list[str]
+    artifact_id: str | None
+    artifact_config: ArtifactConfig | None
 
 
 def _split_outside_backticks(text: str, sep: str) -> list[str]:
@@ -103,21 +128,41 @@ def render_identifier(text: str) -> str:
     return ".".join("`" + part.replace("`", "``") + "`" for part in parts)
 
 
-def validate_function_config(model_config: Any, catalog: str, database: str) -> dict[str, Any]:
+def validate_function_config(
+    model_config: dict[str, Any],
+    catalog: str | None,
+    database: str | None,
+    *,
+    project_root: Path | None = None,
+    project: str,
+    name_prefix: str,
+    function: str | None,
+) -> FunctionConfig:
     """Validate a `function` node's config and return the values the DDL needs.
 
-    The config must name the `language` (java/python), the `artifact_id` (`cfa-...`) and the
-    `class` to bind (a Python module path for python). `connections` is an optional list of
-    connection names; a name that isn't fully qualified is resolved against `catalog` and
-    `database` (the function's own). Only scalar functions are supported. Collects every
-    problem into one error. `model_config` is the Jinja config object (anything with `.get`).
+    The config must name the `language` (java/python), the `class` to bind (a Python module path
+    for python) and exactly one of `artifact_id` (`cfa-...`, already uploaded) or `artifact_path`
+    (a local .jar/.zip matching the language, relative to `project_root`, that dbt uploads).
+    `connections` is an optional list of connection names; a name that isn't fully qualified is
+    resolved against `catalog` and `database` (the function's own). Only scalar functions are
+    supported. Collects every problem into one error. `model_config` is the Jinja config object
+    (anything with `.get`).
 
-    Returns `language`, `artifact_id`, `class_name`, `connections` (a list of `QualifiedName`,
-    for comparison) and `connection_names` (the names as configured, rendered as identifiers, for the DDL).
+    An `artifact_path` becomes an `ArtifactConfig` naming the artifact it is (or will be) uploaded
+    under: `name_prefix`, the dbt `project` and the `function` name, plus a digest of the package's
+    content. `catalog`, `database` and `function` are the function relation's parts; a relation
+    missing any of them is an error.
     """
+    if catalog is None or database is None or function is None:
+        raise CompilationError(
+            "The 'function' materialization needs a fully qualified relation "
+            f"(got catalog={catalog!r}, database={database!r}, function={function!r})"
+        )
     language = str(model_config.get("language") or "").lower()
     artifact_id = model_config.get("artifact_id")
+    artifact_path = model_config.get("artifact_path")
     class_name = model_config.get("class")
+    class_name = class_name.strip() if isinstance(class_name, str) else ""
     raw_connections = model_config.get("connections")
     if raw_connections is None:
         raw_connections = []
@@ -130,11 +175,17 @@ def validate_function_config(model_config: Any, catalog: str, database: str) -> 
             f"'language' must be one of {', '.join(_FUNCTION_LANGUAGES)} "
             f"(got {model_config.get('language')!r})"
         )
-    if not isinstance(artifact_id, str) or not _ARTIFACT_ID_RE.fullmatch(artifact_id):
+    resolved_path: Path | None = None
+    if artifact_id is not None and artifact_path is not None:
+        problems.append("'artifact_id' and 'artifact_path' are mutually exclusive")
+    elif artifact_path is not None:
+        resolved_path = _resolve_artifact_path(artifact_path, language, project_root, problems)
+    elif not isinstance(artifact_id, str) or not _ARTIFACT_ID_RE.fullmatch(artifact_id):
         problems.append(
-            f"'artifact_id' must be an artifact ID of the form 'cfa-...' (got {artifact_id!r})"
+            "one of 'artifact_id' (an artifact ID of the form 'cfa-...') or 'artifact_path' "
+            f"(a local package to upload) is required (got artifact_id={artifact_id!r})"
         )
-    if not isinstance(class_name, str) or not class_name.strip():
+    if not class_name:
         problems.append("'class' must be a non-empty string")
     connections: list[QualifiedName] = []
     if not isinstance(raw_connections, list) or not all(
@@ -153,13 +204,43 @@ def validate_function_config(model_config: Any, catalog: str, database: str) -> 
         raise CompilationError(
             "Invalid config for the 'function' materialization:\n  - " + "\n  - ".join(problems)
         )
-    return {
-        "language": language,
-        "artifact_id": artifact_id,
-        "class_name": class_name.strip(),
-        "connections": connections,
-        "connection_names": [render_identifier(raw) for raw in raw_connections],
-    }
+    artifact_config = None
+    if resolved_path:
+        digest = file_digest(resolved_path)
+        artifact_config = ArtifactConfig(
+            path=resolved_path,
+            name=artifact_display_name(name_prefix, project, function, digest),
+            project=project,
+            language=language,
+        )
+    return FunctionConfig(
+        language=language,
+        class_name=class_name,
+        connections=connections,
+        connection_names=[render_identifier(raw) for raw in raw_connections],
+        artifact_id=artifact_id,
+        artifact_config=artifact_config,
+    )
+
+
+def _resolve_artifact_path(
+    artifact_path: Any, language: str, project_root: Path | None, problems: list[str]
+) -> Path | None:
+    """The absolute path of a configured `artifact_path`, or None after recording why not."""
+    if not isinstance(artifact_path, str) or not artifact_path:
+        problems.append(f"'artifact_path' must be a non-empty string (got {artifact_path!r})")
+        return None
+    path = (project_root or Path()) / artifact_path
+    if not path.is_file():
+        problems.append(f"'artifact_path' {str(path)!r} is not a file")
+        return None
+    expected = ARTIFACT_FORMATS[language][0] if language in ARTIFACT_FORMATS else None
+    if expected and path.suffix.lower() != expected:
+        problems.append(
+            f"'artifact_path' must be a {expected} file for {language} (got {path.name!r})"
+        )
+        return None
+    return path.resolve()
 
 
 def parse_describe_function(rows: Any, catalog: str, database: str) -> FunctionState:
@@ -185,13 +266,21 @@ def parse_describe_function(rows: Any, catalog: str, database: str) -> FunctionS
     )
 
 
-def desired_function_state(udf: dict[str, Any]) -> FunctionState:
-    """The FunctionState a validated config (see `validate_function_config`) asks for."""
+def desired_function_state(udf: FunctionConfig) -> FunctionState:
+    """The FunctionState a validated config (see `validate_function_config`) asks for.
+
+    A function from an `artifact_config` whose artifact doesn't exist yet has no artifact ID
+    (`udf.artifact_id` is None), which never equals a live one: it always needs creating.
+    """
+    artifact_id = udf.artifact_id
+    if not artifact_id:
+        assert udf.artifact_config  # validation guarantees one or the other
+        artifact_id = f"<new upload of {udf.artifact_config.name}>"
     return FunctionState(
-        class_name=udf["class_name"],
-        language=udf["language"],
-        artifact_id=udf["artifact_id"],
-        connections=frozenset(udf["connections"]),
+        class_name=udf.class_name,
+        language=udf.language,
+        artifact_id=artifact_id,
+        connections=frozenset(udf.connections),
     )
 
 
@@ -211,7 +300,7 @@ def diff_function_state(existing: FunctionState, desired: FunctionState) -> list
     return changes
 
 
-def plan_function_change(existing: FunctionState | None, udf: dict[str, Any]) -> list[str] | None:
+def plan_function_change(existing: FunctionState | None, udf: FunctionConfig) -> list[str] | None:
     """Compare the live function (`describe_function`'s result) to the validated config `udf`.
 
     Returns None when the function doesn't exist, otherwise the (possibly empty) list of
