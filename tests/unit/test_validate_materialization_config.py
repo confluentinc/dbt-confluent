@@ -34,6 +34,10 @@ class TestAllConfluentConfigKeys:
             "statement_properties",
             "start_mode",
             "tableflow",
+            "language",
+            "artifact_id",
+            "class",
+            "connections",
         ):
             assert expected in keys
 
@@ -53,6 +57,15 @@ class TestValidateMaterializationConfig:
             ("table", {"distributed_by": {"columns": ["id"]}}),
             ("table", {"on_schema_drift": "ignore"}),
             ("table", {"statement_name": "custom"}),
+            (
+                "function",
+                {
+                    "language": "java",
+                    "artifact_id": "cfa-abc123",
+                    "class": "com.example.Fn",
+                    "connections": ["svc"],
+                },
+            ),
             ("table", {"compute_pool_id": "lfcp-1"}),
             ("table", {"tableflow": {"formats": "ICEBERG", "storage": {"kind": "Managed"}}}),
             ("view", {"statement_name": "custom"}),
@@ -97,6 +110,13 @@ class TestValidateMaterializationConfig:
             ("materialized_table", {"on_schema_drift": "ignore"}),
             ("materialized_table", {"connector": "faker"}),
             ("view", {"tableflow": {"formats": "ICEBERG", "storage": {"kind": "Managed"}}}),
+            ("function", {"tableflow": {"formats": "ICEBERG", "storage": {"kind": "Managed"}}}),
+            ("function", {"statement_properties": {"x": "y"}}),
+            ("function", {"distributed_by": {"columns": ["id"]}}),
+            ("table", {"artifact_id": "cfa-abc123"}),
+            ("view", {"class": "com.example.Fn"}),
+            ("streaming_table", {"connections": ["svc"]}),
+            ("materialized_table", {"language": "java"}),
         ],
         ids=[
             "statement_properties_on_table",
@@ -109,6 +129,13 @@ class TestValidateMaterializationConfig:
             "on_schema_drift_on_materialized_table",
             "connector_on_materialized_table",
             "tableflow_on_view",
+            "tableflow_on_function",
+            "statement_properties_on_function",
+            "distributed_by_on_function",
+            "artifact_id_on_table",
+            "class_on_view",
+            "connections_on_streaming_table",
+            "language_on_materialized_table",
         ],
     )
     def test_unsupported_config_raises(self, adapter, materialization, observed_config):
