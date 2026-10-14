@@ -555,7 +555,21 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.live_artifact_id(project) == self.failed_run_artifact["id"]
         assert self.artifacts(project).keys() == before.keys()  # nothing was uploaded or deleted
 
-    def test_6_continue_and_fail_upload_nothing(self, project, plan_actions):
+    def test_6_cleanup_lists_the_artifacts_no_function_uses(self, project):
+        """A dry run: the earlier artifacts are listed, the live one is not, nothing is deleted,
+        and the output says how to delete them."""
+        live_artifact_id = self.live_artifact_id(project)
+        before = self.artifacts(project)
+        unused = before.keys() - {live_artifact_id}
+
+        _, output = run_dbt_and_capture(["run-operation", "cleanup_function_artifacts"])
+
+        assert all(artifact_id in output for artifact_id in unused)
+        assert live_artifact_id not in output
+        assert "--args '{delete: true}'" in output
+        assert self.artifacts(project) == before
+
+    def test_7_continue_and_fail_upload_nothing(self, project, plan_actions):
         """The plan is made before anything is uploaded, so neither touches artifacts."""
         before, live_artifact_id = self.artifacts(project), self.live_artifact_id(project)
         package_file = Path(project.project_root) / PACKAGE_FILE
@@ -573,7 +587,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.artifacts(project) == before
         assert self.live_artifact_id(project) == live_artifact_id
 
-    def test_7_full_refresh_re_creates_on_the_same_artifact(
+    def test_8_full_refresh_re_creates_on_the_same_artifact(
         self, project, plan_actions, submitted_sql
     ):
         """An unchanged package is replaced on --full-refresh, without a new upload."""
@@ -588,7 +602,19 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.artifacts(project) == before
         assert self.live_artifact_id(project) == live_artifact_id
 
+    def test_9_cleanup_deletes_the_unused_artifacts(self, project):
+        """Cleanup is scoped to this project, so it is safe to delete for real here: only this
+        class's artifacts are candidates (unless the class runs twice at once on one environment)."""
+        live_artifact_id = self.live_artifact_id(project)
+        assert self.artifacts(project).keys() - {live_artifact_id}  # something to delete
 
+        run_dbt(["run-operation", "cleanup_function_artifacts", "--args", "{delete: true}"])
+
+        assert self.artifacts(project).keys() == {live_artifact_id}
+        assert self.live_artifact_id(project) == live_artifact_id
+
+
+@requires_global_key
 class TestFunctionEmptyRun(FunctionFixtures):
     """`--empty` only limits the rows models read; a function is DDL, so it is still created
     (models that call it in an `--empty` run need it), uploading its package like any other run."""
