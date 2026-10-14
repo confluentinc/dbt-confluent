@@ -30,7 +30,7 @@ from dbt.adapters.contracts.relation import Policy, RelationConfig
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import functions, tableflow
+from . import function_artifacts, functions, tableflow
 from .catalog import query_catalog_rows
 from .dry_run_types import display_type, fitted_type
 from .function_artifacts_repo import FunctionArtifactsRepo
@@ -1083,8 +1083,8 @@ class ConfluentAdapter(SQLAdapter):
         after the drop, the function that was dropped is re-created from `existing`, which is
         held in memory only. A process that dies between the drop and the create leaves no
         function behind and nothing to restore it from. The artifact the function replaced is
-        left in place, since statements may still be bound to it. Returns the create
-        statement's response.
+        left in place, since statements may still be bound to it (see
+        `cleanup_function_artifacts`). Returns the create statement's response.
         """
         conn = self.connections.get_thread_handle()
         execute = self._function_executor(compute_pool_id)
@@ -1113,7 +1113,8 @@ class ConfluentAdapter(SQLAdapter):
                 warning_tag(
                     f"Function {relation.render()} now uses artifact {artifact_id}. Statements "
                     f"started before this change stay on the old artifact {existing.artifact_id} "
-                    "until they are recreated; it is not deleted."
+                    "until they are recreated; it is not deleted. Once they are, "
+                    "`dbt run-operation cleanup_function_artifacts` lists unused artifacts."
                 )
             )
         return response
@@ -1155,6 +1156,39 @@ class ConfluentAdapter(SQLAdapter):
             )
         except Exception as e:
             logger.error(f"Could not restore the previous function {relation.render()} ({e}).")
+
+    @available
+    def cleanup_function_artifacts(self, delete: bool = False) -> None:
+        """The `cleanup_function_artifacts` run-operation: report this project's unused
+        artifacts (see `scan_function_artifacts`), deleting them with `delete`, and fail at the
+        end if any could not be deleted."""
+        results = self.scan_function_artifacts(delete)
+        if not results:
+            logger.info("No unused artifacts of this project.")
+            return
+        for result in results:
+            if not result.error:
+                logger.info(f"{'Deleted' if delete else 'Unused'}: {result.label}")
+        if not delete:
+            logger.info(
+                "To delete the unused artifacts, once no statement depends on them: "
+                "dbt run-operation cleanup_function_artifacts --args '{delete: true}'"
+            )
+        if failed := [f"{r.label}: {r.error}" for r in results if r.error]:
+            raise CompilationError(f"Could not delete: {'; '.join(failed)}")
+
+    def scan_function_artifacts(
+        self, delete: bool = False
+    ) -> list[function_artifacts.UnusedArtifact]:
+        """List this project's artifacts that no function uses, and delete them with `delete`
+        (see `function_artifacts.scan_unused_artifacts`)."""
+        return function_artifacts.scan_unused_artifacts(
+            self.connections.get_thread_handle(),
+            self.config.project_name,
+            self.config.credentials.database,
+            lambda sql: self.execute(sql, fetch=True)[1].rows,
+            delete,
+        )
 
     @available
     def warn_function_change(self, message: str) -> None:
