@@ -12,6 +12,7 @@
   - [Table](#table)
   - [View](#view)
   - [Ephemeral](#ephemeral)
+  - [Function](#function)
 - [Model Configuration](#model-configuration)
   - [Validation](#validation)
   - [Tableflow](#tableflow)
@@ -72,6 +73,7 @@ The table below summarizes all materializations supported by the dbt-confluent a
 | [`table`](#table) | One-shot `CREATE TABLE ... AS SELECT` (CTAS). | Snapshot |
 | [`view`](#view) | A named query inlined into consumers, not a persisted result. | Inherited |
 | [`ephemeral`](#ephemeral) | Standard dbt CTE fragment. | Inherited |
+| [`function`](#function) | A scalar Java/Python UDF registered from an already-uploaded artifact. | n/a |
 
 _Note: [`view`](#view) & [`ephemeral`](#ephemeral) inherit their execution mode from any job that queries them, since they run inline in those jobs and not as independent Flink statements._
 
@@ -503,6 +505,202 @@ applies: setting `with`, `distributed_by`, `connector`, or any other dbt-conflue
 the same `ephemeral` model over a Kafka-backed source, each one inlines and re-plans that source
 independently. Flink scans the source once per consumer, not once shared across them.
 
+### Function
+
+A `function` registers a user-defined function (UDF) in Flink from an artifact (a Java JAR or
+Python ZIP) that has already been uploaded to Confluent Cloud, by issuing
+`CREATE FUNCTION ... USING JAR 'confluent-artifact://<artifact_id>'`. dbt orders it ahead of any
+model that calls it via `{{ function('name') }}`.
+
+Declare the function with a `config()` call in a file under `functions/` (dbt requires
+a function to have a body file, so the config call is all it contains):
+
+```sql
+-- functions/is_smaller.sql
+{{ config(
+    language='java',
+    artifact_id='cfa-xxxxxx',
+    class='com.example.my.TShirtSizingIsSmaller',
+) }}
+```
+
+#### Function: Config Options
+
+| Config | Description |
+|---|---|
+| `language` | `java` or `python`. Required. |
+| `class` | The Java class, or the Python module path, of the function. Required. |
+| `artifact_id` | An artifact already uploaded to this environment. Set exactly one of `artifact_id` and `artifact_path`. |
+| `artifact_path` | A local package for dbt to upload instead (see [Function: Uploading the Artifact](#function-uploading-the-artifact)): a `.jar` for `java`, a `.zip` for `python`, relative to the dbt project root. |
+| `connections` | Optional list of connection names the function may use. |
+| `on_configuration_change` | dbt's standard setting for what to do when the function differs from the config: `apply` (the default), `continue` or `fail`. See [Function: Changing an Existing Function](#function-changing-an-existing-function). |
+| `statement_name` | See [Deterministic Statement Names](#deterministic-statement-names). The create statement uses this name; the drop that precedes it on a replace appends `-drop`. |
+| `compute_pool_id` | See [Compute Pool](#compute-pool). |
+| `ignore_unsupported_config` | See [Validation](#validation). |
+
+Use the function from a model with `{{ function('name') }}`:
+
+```sql
+-- models/orders_scored.sql
+select {{ function('is_smaller') }}(requested_size, in_stock_size) as needs_upsize
+from {{ ref('orders') }}
+```
+
+Only scalar functions are supported. Flink takes the function's signature from the class itself, so `arguments` and `returns` properties are not used.
+
+#### Function: Experimental Behavior Flag
+
+The `function` materialization is experimental and fails with an error unless the
+`enable_experimental_function_materialization` behavior flag is enabled:
+
+```yaml
+# dbt_project.yml
+flags:
+  enable_experimental_function_materialization: true
+```
+
+#### Function: Uploading the Artifact
+
+With `artifact_path`, dbt uploads the package for you (it doesn't build it: pass the finished
+JAR, or the ZIP of a Python UDF's sdist, as described in
+[Confluent's UDF guide](https://docs.confluent.io/cloud/current/flink/how-to-guides/create-udf.html)):
+
+```sql
+-- functions/is_smaller.sql
+{{ config(
+    language='python',
+    artifact_path='udfs/example_udf.zip',
+    class='example_udf.tshirt_sizing.is_smaller',
+) }}
+```
+
+The artifact is named like a statement, `<statement_name_prefix><project>`, plus a hash
+of the package's content, so a given package is only ever uploaded once: re-running with an
+unchanged package reuses its artifact, and changing the package uploads a new one. (A Flink
+artifact can't be updated in place.) Functions defined over the same package share one artifact,
+and a build uploads it once even when those functions are built in parallel. It needs an API key that can use the artifact API, such as
+the Global key.
+
+When the package changes, the function is replaced in this order, so that a failure leaves you
+with a working function wherever possible:
+
+1. Upload the new artifact. If that fails, nothing has changed.
+2. Drop the function and create it from the new artifact. If that fails, the previous function
+   is put back.
+
+The previous function is kept in memory only, so that rollback covers a failed create within the
+run. If the dbt process is killed (or the run is cancelled) between the drop and the create, no function is
+left, and the next run creates it from the config rather than restoring the old one. The artifact's
+description holds a marker saying dbt uploaded it: don't edit it by hand.
+[design/udfs.md](design/udfs.md) walks through the sequence and what a crash leaves behind.
+
+The old artifact is **not deleted**. A running (or stopped) statement stays bound to the artifact
+it was compiled against, and fails to restart once that artifact is gone. dbt can't tell which
+statements those are, so after replacing a function, recreate the statements that use it (a
+`streaming_table` that calls the function isn't rebuilt just because the function changed).
+Once none of them depend on the old artifact, remove it with:
+
+```bash
+dbt run-operation cleanup_function_artifacts                          # list, and show how to delete
+dbt run-operation cleanup_function_artifacts --args '{delete: true}'  # delete the unused ones
+```
+
+It checks every artifact in the environment and lists those that this dbt project uploaded and
+that no function uses, and prints the command to delete them. It deletes nothing unless you pass
+`delete: true`. Artifacts of other projects and ones you uploaded yourself are never listed. Deleting
+tries every listed artifact, reports the ones that failed, and then fails the run. It is on your
+word that no statement still depends on them.
+
+A replacement uploads its artifact before it creates the function, so don't run the cleanup with
+`delete: true` while a `dbt build` that manages functions is running.
+
+Notes:
+
+- With `artifact_id`, dbt checks that the artifact exists before dropping an existing function
+  (so a mistyped ID no longer costs you the function, [#187](https://github.com/confluentinc/dbt-confluent/issues/187)),
+  but never uploads anything. The check needs credentials that can read artifacts
+  (such as the Global key), and the run fails if it can't be made.
+- Switching a function from `artifact_path` to `artifact_id` leaves its last dbt-created artifact in
+  place; `cleanup_function_artifacts` will list it once nothing uses it.
+
+#### Function: Changing an Existing Function
+
+Flink UDFs are immutable (no `ALTER` or `CREATE OR REPLACE`), so changing one means dropping and
+re-creating it. On each run the materialization compares the live function (via
+`DESCRIBE FUNCTION`) to the config (class, language, artifact and connections):
+
+- **Function doesn't exist:** it is created.
+- **Function matches the config:** nothing is submitted.
+- **Function differs from the config:** what happens is controlled by dbt's standard
+  [`on_configuration_change`](https://docs.getdbt.com/reference/resource-configs/on_configuration_change)
+  config, and every option names what differs:
+
+| `on_configuration_change` | Behavior when the config differs from the live function |
+|---|---|
+| `apply` (dbt's default) | Warns, drops the function, and creates it again |
+| `continue` | Warns and leaves the existing function in place |
+| `fail` | Fails the run without changing anything |
+
+`--full-refresh` always drops and re-creates an existing function, even if it matches the config,
+and `on_configuration_change` doesn't apply to it (that setting governs changes to an existing
+function, not a rebuild you asked for).
+
+Dropping a function can break statements that already use it. A running statement keeps the old
+function, and a healthy `streaming_table` won't be resubmitted on the next run unless you also
+`--full-refresh` it. Since `apply` is the default, set `on_configuration_change` to `fail` or
+`continue` wherever consumers can't be updated together with the function, for example for the
+whole folder:
+
+```yaml
+# dbt_project.yml
+functions:
+  +on_configuration_change: fail
+```
+
+A `connections` entry that isn't fully qualified (`name`, `database.name` or
+`catalog.database.name`) is resolved against the function's own catalog and database when
+comparing. Runs that replace the same function concurrently can interfere with each other.
+
+#### Function: Statements Emitted
+
+Every run starts by describing the live function (once; the result is reused for the plan and for
+a replace):
+
+```sql
+DESCRIBE FUNCTION <relation>
+```
+
+What follows depends on the plan:
+
+| Plan | Statements after `DESCRIBE FUNCTION` |
+|---|---|
+| Function doesn't exist | `CREATE FUNCTION` |
+| Function differs, `on_configuration_change: apply` (or `--full-refresh`) | `DROP FUNCTION`, then `CREATE FUNCTION` |
+| Function matches, or differs with `continue` or `fail` | None |
+
+The statement is:
+
+```sql
+CREATE FUNCTION <relation> AS '<class>'
+  [LANGUAGE PYTHON]
+  USING JAR 'confluent-artifact://<artifact_id>'
+  [USING CONNECTIONS (<connection>, ...)]
+```
+
+`LANGUAGE PYTHON` is present for `python` functions and omitted for `java`. `<artifact_id>` is the
+configured `artifact_id`, or, with `artifact_path`, the artifact dbt uploaded or found for that package.
+The `DROP FUNCTION <relation>` on a replace is submitted under the `statement_name` with a `-drop`
+suffix, and the `CREATE FUNCTION` under `statement_name` itself.
+
+If the `CREATE FUNCTION` of a replace fails, dbt submits a `CREATE FUNCTION` again from the function
+it described, so the previous function is put back. All of these are short-lived, completing statements.
+The artifact upload isn't a SQL statement: it is a call to Confluent's artifact API.
+
+See the [`CREATE FUNCTION`](https://docs.confluent.io/cloud/current/flink/reference/statements/create-function.html),
+[`DROP FUNCTION`](https://docs.confluent.io/cloud/current/flink/reference/statements/drop-function.html)
+and [`DESCRIBE`](https://docs.confluent.io/cloud/current/flink/reference/statements/describe.html)
+references.
+
 ---
 
 ## Model Configuration
@@ -514,7 +712,7 @@ Each per-materialization section links back to the specific subsections below th
 
 Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing. For example, `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
 
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `language`, `artifact_id`, `class`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
 
 If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
 
