@@ -565,7 +565,8 @@ the same package always maps to the same artifact:
 - Uploading happens when the function is created or replaced, not at parse or compile time.
 
 The artifact's description records that dbt manages it (`managed_by`) and the dbt project that
-uploaded it.
+uploaded it. While a function is being replaced it also holds a *journal*, described under
+[Recovering from a failed change](#recovering-from-a-failed-change).
 
 dbt never deletes an artifact on its own, including the one a replaced function used to run on.
 Running and stopped statements stay bound to the artifact they were compiled against, and dbt
@@ -575,13 +576,37 @@ To find them, run `dbt run-operation cleanup_function_artifacts`. It lists this 
 artifacts (the ones carrying its `managed_by` marker) that no function uses, according to
 `INFORMATION_SCHEMA.ROUTINES`, and prints the command that deletes them. Nothing is deleted
 unless you run it with `--args '{delete: true}'`. Artifacts that another project or you uploaded
-are never listed or deleted. Unused by a function doesn't mean unused: delete only once the
+are never listed or deleted. Artifacts that still carry a journal (an unfinished replacement, or
+one running right now) are listed apart as unsettled, and are only deleted with
+`--args '{delete_unsettled: true}'`. Unused by a function doesn't mean unused: delete only once the
 statements that were running on an old artifact have been recreated, and not while a `dbt run`
 is in progress, since an artifact it has uploaded may not have its function yet. Every delete is
 attempted, and any failures are reported at the end.
 
 An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
 looked up, the run fails with the existing function untouched.
+
+#### Recovering from a failed change
+
+Replacing a function with an `artifact_path` is several steps that can fail part way: upload the
+new artifact, drop the old function, create the new one. Before anything is dropped, dbt writes a
+*journal* to the new artifact's description: the class, language, artifact and connections of the
+function it is about to replace (or nothing, if there isn't one). The journal is removed once the
+new function exists.
+
+- If the create fails, dbt re-creates the previous function from the journal, on a best-effort
+  basis, and the original error is still reported. The journal stays on the new artifact, so the
+  next run knows the change wasn't finished.
+- If the run is killed between the drop and the create, the next run finds the journal on the
+  artifact. It carries on with the change, and if that fails too, restores the original function.
+- If the previous function is no longer the one in the journal (another run replaced it since),
+  dbt updates the journal to describe the function that is live before dropping anything.
+- If removing the journal fails after a successful change, the next run removes it, even when the
+  function is otherwise unchanged.
+
+A function with an `artifact_id` has no artifact of its own to carry a journal. Its previous
+function is restored if the create fails within the same run, from what dbt described before
+dropping it, but not after the process is killed.
 
 #### Changing an existing function
 
@@ -601,9 +626,8 @@ re-creating it. On each run the materialization compares the live function (via
 | `continue` | Warns and leaves the existing function in place |
 | `fail` | Fails the run without changing anything |
 
-If the re-create fails after the drop, dbt tries to create the previous function again from what
-it described before dropping. That is best-effort and held in memory only, so a run that is killed
-between the drop and the create leaves no function behind.
+If the re-create fails after the drop, dbt tries to create the previous function again. See
+[Recovering from a failed change](#recovering-from-a-failed-change).
 
 `--full-refresh` always drops and re-creates an existing function, even if it matches the config,
 and `on_configuration_change` doesn't apply to it (that setting governs changes to an existing

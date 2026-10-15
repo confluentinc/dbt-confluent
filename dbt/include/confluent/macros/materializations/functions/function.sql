@@ -24,6 +24,10 @@
     {# Nothing to submit, but dbt's function runner reads the 'main' result. #}
     {% if plan.message %}{% do adapter.warn_function_change(plan.message) %}{% endif %}
     {% do store_result('main', response=adapter.noop_response('Function unchanged'), agate_table=none) %}
+    {% if plan.action == 'unchanged' and execute %}
+      {#- Finish any interrupted replacement of its artifact (see function_artifacts.py). -#}
+      {% do adapter.settle_function(target_relation, udf, config.get('compute_pool_id')) %}
+    {% endif %}
     {{ run_hooks(post_hooks, inside_transaction=False) }}
     {{ return({'relations': [target_relation]}) }}
   {% endif %}
@@ -32,7 +36,8 @@
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   {#- Confluent UDFs are immutable (no ALTER / CREATE OR REPLACE), so a change is a drop + create.
-     The adapter puts the old function back if the new one can't be created. -#}
+     The adapter sorts out the artifact (upload / existence check) before dropping anything, and
+     puts the old function back if the new one can't be created. -#}
   {% if plan.action == 'replace' %}
     {% do adapter.warn_function_change(plan.message) %}
   {% endif %}

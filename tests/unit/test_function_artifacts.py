@@ -1,11 +1,10 @@
-"""Unit tests for uploading a function's artifact (#180).
+"""Unit tests for uploading and journaling a function's artifact (#180).
 
-The upload decides whether a function is re-created on a new artifact or left alone, and the
-`managed_by` marker is what tells an artifact dbt created from any other, so both are tested
+The journal is what lets a half-finished function replacement be completed or undone, and the
+`managed_by` marker is what stops dbt deleting an artifact it didn't create, so both are tested
 against in-memory fakes of the driver connection and of Flink.
 """
 
-import json
 import re
 from itertools import count
 from pathlib import Path
@@ -70,14 +69,14 @@ class FakeDriver:
             raise ArtifactNotFoundError("gone", artifact_id=artifact_id)
         return self.artifacts[artifact_id]
 
+    def update(self, artifact_id, *, description):
+        self.get(artifact_id).description = description
+        return self.artifacts[artifact_id]
+
     def delete(self, artifact_id, **_):
         self.get(artifact_id)
         self.events.append(f"delete {artifact_id}")
         del self.artifacts[artifact_id]
-
-    def update(self, artifact_id, *, description):
-        self.get(artifact_id).description = description
-        return self.artifacts[artifact_id]
 
 
 class FakeFlink:
@@ -221,24 +220,33 @@ ID_UDF = {
 }
 
 
-def managed(project: str = PROJECT) -> str:
-    return fa.encode_description(project)
+def managed(journal: fa.Journal | None = None, project: str = PROJECT) -> str:
+    return fa.encode_description(project, journal)
 
 
 class TestDescription:
-    def test_records_that_dbt_manages_the_artifact_and_for_which_project(self):
-        assert json.loads(fa.encode_description("my_project")) == {
-            "managed_by": "dbt-confluent",
-            "project": "my_project",
-        }
+    JOURNAL = fa.Journal(restore={"class_name": CLASS_NAME})
+
+    def test_journal_round_trips(self):
+        assert fa.decode_description(managed(self.JOURNAL)) == (True, self.JOURNAL)
+
+    @pytest.mark.parametrize("description", [managed(), '{"managed_by":"dbt-confluent"}'])
+    def test_managed_without_a_journal(self, description):
+        assert fa.decode_description(description) == (True, None)
+
+    @pytest.mark.parametrize(
+        "description", [None, "", "my udf", "[1]", '{"managed_by": "someone"}']
+    )
+    def test_anything_else_is_not_ours(self, description):
+        assert fa.decode_description(description) == (False, None)
 
     @pytest.mark.parametrize(
         "description, project",
         [
-            (managed("my_project"), "my_project"),
+            (managed(project="my_project"), "my_project"),
+            (managed(JOURNAL, project="my_project"), "my_project"),
             (None, None),
             ("my udf", None),
-            ("[1]", None),
             ('{"managed_by": "someone"}', None),
             ('{"managed_by":"dbt-confluent"}', None),  # a marker without a project
         ],
@@ -273,23 +281,39 @@ class TestFileDigestAndName:
 
 
 class TestEnsureArtifact:
-    def test_uploads_a_new_artifact_marked_as_managed_by_dbt(self, driver, tmp_path):
+    JOURNAL = fa.Journal(restore=None)
+
+    def test_uploads_a_new_artifact_with_the_journal(self, driver, tmp_path):
         udf = package(tmp_path, b"v1")
-        artifact = fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
+        artifact = fa.ensure_artifact(driver, udf, self.JOURNAL)  # type: ignore[arg-type]
         assert artifact.display_name == udf["artifact_name"]
-        assert artifact.description == managed()
+        assert fa.decode_description(artifact.description) == (True, self.JOURNAL)
 
     def test_reuses_an_artifact_for_the_same_content(self, driver, events, tmp_path):
         udf = package(tmp_path, b"v1")
-        first = fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
-        again = fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
+        first = fa.ensure_artifact(driver, udf, None)  # type: ignore[arg-type]
+        again = fa.ensure_artifact(driver, udf, None)  # type: ignore[arg-type]
         assert again.id == first.id
         assert events == [f"upload {udf['artifact_name']}"]
+
+    def test_gives_a_journal_to_a_reused_artifact_that_has_none(self, driver, tmp_path):
+        udf = package(tmp_path, b"v1")
+        first = fa.ensure_artifact(driver, udf, None)  # type: ignore[arg-type]
+        again = fa.ensure_artifact(driver, udf, self.JOURNAL)  # type: ignore[arg-type]
+        assert again.id == first.id
+        assert fa.decode_description(again.description)[1] == self.JOURNAL
+
+    def test_keeps_the_journal_of_an_interrupted_run(self, driver, tmp_path):
+        udf = package(tmp_path, b"v1")
+        original = fa.Journal(restore={"class_name": "x"})
+        driver.add(udf["artifact_name"], managed(original))
+        artifact = fa.ensure_artifact(driver, udf, self.JOURNAL)  # type: ignore[arg-type]
+        assert fa.decode_description(artifact.description)[1] == original
 
     def test_leaves_an_artifact_we_did_not_create_alone(self, driver, tmp_path):
         udf = package(tmp_path, b"v1")
         theirs = driver.add(udf["artifact_name"], "hand made")
-        assert fa.ensure_artifact(driver, udf).id == theirs.id  # type: ignore[arg-type]
+        fa.ensure_artifact(driver, udf, self.JOURNAL)  # type: ignore[arg-type]
         assert theirs.description == "hand made"
 
     @pytest.mark.parametrize(
@@ -303,7 +327,7 @@ class TestEnsureArtifact:
         self, driver, tmp_path, language, content_format, runtime_language
     ):
         udf = {**package(tmp_path, b"v1"), "language": language}
-        fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
+        fa.ensure_artifact(driver, udf, None)  # type: ignore[arg-type]
         (upload,) = driver.uploads
         assert upload["content_format"] == content_format
         assert upload["runtime_language"] == runtime_language
@@ -313,16 +337,18 @@ class TestEnsureArtifact:
         self, driver, tmp_path, monkeypatch
     ):
         udf = package(tmp_path, b"v1")
+        winner_journal = fa.Journal(restore={"class_name": "winner"})
 
         def lose_the_race(display_name, **_):
-            driver.add(display_name, managed())
+            driver.add(display_name, managed(winner_journal))
             raise ArtifactAlreadyExistsError("exists", display_name=display_name)
 
         monkeypatch.setattr(driver, "create", lose_the_race)
 
-        artifact = fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
+        artifact = fa.ensure_artifact(driver, udf, self.JOURNAL)  # type: ignore[arg-type]
 
         assert artifact.display_name == udf["artifact_name"]
+        assert fa.decode_description(artifact.description)[1] == winner_journal
 
     def test_an_already_exists_error_with_nothing_to_find_is_raised(
         self, driver, tmp_path, monkeypatch
@@ -332,46 +358,59 @@ class TestEnsureArtifact:
 
         monkeypatch.setattr(driver, "create", exists_but_invisible)
         with pytest.raises(ArtifactAlreadyExistsError):
-            fa.ensure_artifact(driver, package(tmp_path, b"v1"))  # type: ignore[arg-type]
+            fa.ensure_artifact(driver, package(tmp_path, b"v1"), None)  # type: ignore[arg-type]
 
 
 class TestApplyFunction:
     """The whole create/replace flow through `ConfluentAdapter.apply_function`."""
 
-    def old_function(self, driver, flink):
-        old = driver.add("old-artifact", managed())
+    def old_function(self, driver, flink, description: str | None):
+        old = driver.add("old-artifact", description)
         flink.add(FUNCTION, old.id)
         return old
 
     def test_creates_a_function_from_a_new_package(self, adapter, driver, flink, tmp_path):
-        apply(adapter, package(tmp_path, b"v1"), replace=False)
+        udf = package(tmp_path, b"v1")
+        apply(adapter, udf, replace=False)
         (artifact,) = driver.artifacts.values()
         assert flink.functions[FUNCTION]["plugin"] == artifact.id
+        # nothing is left to finish
+        assert fa.decode_description(artifact.description) == (True, None)
 
     def test_replace_uploads_before_dropping_and_keeps_the_old_artifact(
         self, adapter, driver, flink, events, tmp_path
     ):
-        old = self.old_function(driver, flink)
+        old = self.old_function(driver, flink, managed())
+        udf = package(tmp_path, b"v2")
         events.clear()
-        apply(adapter, package(tmp_path, b"v2"), replace=True)
+        apply(adapter, udf, replace=True)
         assert [e.split()[0] for e in events] == ["upload", "drop", "create"]
         assert old.id in driver.artifacts  # statements may still be bound to it
 
-    def test_a_rerun_after_a_failed_create_uses_the_artifact_already_uploaded(
+    def test_failed_create_puts_the_previous_function_back(
         self, adapter, driver, flink, events, tmp_path
     ):
-        old = self.old_function(driver, flink)
-        udf = package(tmp_path, b"v2")
+        old = self.old_function(driver, flink, managed())
         flink.fail_create_once = True
         with pytest.raises(DbtDatabaseError, match="create failed"):
+            apply(adapter, package(tmp_path, b"v2"), replace=True)
+        assert flink.functions[FUNCTION]["plugin"] == old.id
+        assert old.id in driver.artifacts
+        (journalled,) = (a for a in driver.artifacts.values() if a.id != old.id)
+        assert fa.decode_description(journalled.description)[1] is not None
+
+    def test_a_rerun_after_a_failure_rolls_forward_and_clears_the_journal(
+        self, adapter, driver, flink, tmp_path
+    ):
+        old = self.old_function(driver, flink, managed())
+        udf = package(tmp_path, b"v2")
+        flink.fail_create_once = True
+        with pytest.raises(DbtDatabaseError):
             apply(adapter, udf, replace=True)
-        assert flink.functions[FUNCTION]["plugin"] == old.id  # put back
-        events.clear()
-
         apply(adapter, udf, replace=True)
-
-        assert not any(e.startswith("upload") for e in events)
-        assert len(driver.artifacts) == 2  # the old one, and the new one, uploaded once
+        new = driver.artifacts[flink.functions[FUNCTION]["plugin"]]
+        assert fa.decode_description(new.description) == (True, None)
+        assert old.id in driver.artifacts
 
     @pytest.mark.parametrize(
         "lookup_error, raised, match",
@@ -384,7 +423,7 @@ class TestApplyFunction:
     def test_any_failure_to_check_an_artifact_id_blocks_the_drop(
         self, adapter, driver, flink, events, monkeypatch, lookup_error, raised, match
     ):
-        old = self.old_function(driver, flink)
+        old = self.old_function(driver, flink, managed())
         if lookup_error:
             monkeypatch.setattr(driver, "get", MagicMock(side_effect=lookup_error))
         udf = {**ID_UDF, "artifact_id": "cfa-wanted"}
@@ -441,6 +480,69 @@ class TestApplyFunctionFailures:
         assert f"confluent-artifact://{old.id}'" in restored
         assert "using connections (" in restored and "`conn`" in restored
 
+    def test_after_an_interrupted_run_the_original_function_is_restored(
+        self, adapter, driver, flink, tmp_path
+    ):
+        """The first run dropped the function and died. The journal on the new artifact is the
+        only record of it, so a second failing attempt restores *that*, not nothing."""
+        original = driver.add("original-artifact", managed())
+        udf = package(tmp_path, b"v2")
+        journal = fa.Journal(
+            restore=fa.function_state_to_restore(
+                functions.FunctionState(CLASS_NAME, "python", original.id, frozenset())
+            )
+        )
+        driver.add(udf["artifact_name"], managed(journal))  # and no function is live
+        flink.fail_create_once = True
+
+        with pytest.raises(DbtDatabaseError, match="create failed"):
+            apply(adapter, udf, replace=False)
+
+        assert flink.functions[FUNCTION]["plugin"] == original.id
+
+    def test_a_stale_journal_is_rewritten_from_the_live_function(
+        self, adapter, driver, flink, tmp_path
+    ):
+        """An interrupted run left a journal for the original function, but other runs have since
+        replaced it. When the artifact is used again, the journal is brought up to date, so the
+        function put back after a failure is the live one."""
+        original = driver.add("original-artifact", managed())
+        live = self.old_function(driver, flink)
+        udf = package(tmp_path, b"v2")
+        stale = fa.Journal(
+            restore=fa.function_state_to_restore(
+                functions.FunctionState(CLASS_NAME, "python", original.id, frozenset())
+            )
+        )
+        artifact = driver.add(udf["artifact_name"], managed(stale))
+        flink.fail_create_once = True
+
+        with pytest.raises(DbtDatabaseError, match="create failed"):
+            apply(adapter, udf, replace=True)
+
+        assert flink.functions[FUNCTION]["plugin"] == live.id
+        journal = fa.decode_description(artifact.description)[1]
+        assert journal.restore["artifact_id"] == live.id
+
+    def test_a_journal_that_matches_the_live_function_costs_no_extra_describe(
+        self, adapter, driver, flink, tmp_path
+    ):
+        live = self.old_function(driver, flink)
+        udf = package(tmp_path, b"v2")
+        matching = fa.Journal(
+            restore=fa.function_state_to_restore(
+                functions.FunctionState(CLASS_NAME, "python", live.id, frozenset())
+            )
+        )
+        driver.add(udf["artifact_name"], managed(matching))
+        flink.fail_create_once = True
+
+        with pytest.raises(DbtDatabaseError, match="create failed"):
+            apply(adapter, udf, replace=True)
+
+        describes = [q for q in flink.queries if q.startswith("DESCRIBE FUNCTION")]
+        assert len(describes) == 1  # the plan's: a matching journal isn't described again
+
     def test_a_first_ever_create_that_fails_has_nothing_to_restore(
         self, adapter, driver, flink, tmp_path
     ):
@@ -448,6 +550,19 @@ class TestApplyFunctionFailures:
         with pytest.raises(DbtDatabaseError, match="create failed"):
             apply(adapter, package(tmp_path, b"v1"), replace=False)
         assert FUNCTION not in flink.functions
+
+    def test_a_failed_restore_is_logged_and_does_not_hide_the_original_error(
+        self, adapter, driver, flink, tmp_path, logger
+    ):
+        self.old_function(driver, flink)
+        flink.fail_creates = 2  # the new function, then the restore
+
+        with pytest.raises(DbtDatabaseError, match="create failed"):
+            apply(adapter, package(tmp_path, b"v2"), replace=True)
+
+        assert FUNCTION not in flink.functions
+        logger.error.assert_called_once()
+        assert "Could not restore" in logger.error.call_args.args[0]
 
 
 class TestReplaceWarning:
@@ -477,6 +592,55 @@ class TestReplaceWarning:
         assert self.warnings(logger) == []
 
 
+class TestSettleFunction:
+    def test_finishes_an_interrupted_change(self, adapter, driver, flink, tmp_path):
+        """Clearing the journal failed after the function was swapped; the next (no-op) run does it."""
+        udf = package(tmp_path, b"v2")
+        old = driver.add("old-artifact", managed())
+        new = driver.add(udf["artifact_name"], managed(fa.Journal(restore=None)))
+        flink.add(FUNCTION, new.id)
+
+        adapter.settle_function(relation(), udf, None)
+
+        assert old.id in driver.artifacts
+        assert fa.decode_description(new.description) == (True, None)
+        assert fa.artifact_project(new.description) == PROJECT  # the marker stays ours
+
+    def test_does_nothing_without_an_artifact_path(self, adapter, driver):
+        adapter.settle_function(relation(), {"artifact_path": None}, None)
+        assert driver.artifacts == {}
+
+    def test_nothing_is_written_when_there_is_nothing_to_settle(self, driver, monkeypatch):
+        no_journal = driver.add("settled", managed())
+        not_ours = driver.add("theirs", '{"journal": {"restore": null}}')
+        update = MagicMock(wraps=driver.update)
+        monkeypatch.setattr(driver, "update", update)
+
+        for artifact_id in (no_journal.id, not_ours.id, "cfa-gone"):
+            fa.settle_journal(driver, artifact_id)  # type: ignore[arg-type]
+
+        update.assert_not_called()
+
+    def test_a_failure_to_clear_the_journal_is_a_warning_not_an_error(
+        self, adapter, driver, flink, tmp_path, monkeypatch, logger
+    ):
+        udf = package(tmp_path, b"v1")
+        monkeypatch.setattr(driver, "update", MagicMock(side_effect=OperationalError("flaky")))
+
+        response = apply(adapter, udf, replace=False)  # settles after creating
+
+        assert response is not None
+        (artifact,) = driver.artifacts.values()
+        assert flink.functions[FUNCTION]["plugin"] == artifact.id
+        assert fa.decode_description(artifact.description)[1] is not None  # left for the next run
+        logger.warning.assert_called_once()
+        assert "next run will retry" in logger.warning.call_args.args[0]
+
+    def test_does_nothing_when_the_package_was_never_uploaded(self, adapter, driver, tmp_path):
+        adapter.settle_function(relation(), package(tmp_path, b"v1"), None)
+        assert driver.artifacts == {}
+
+
 class TestDesiredStateForAnUnuploadedPackage:
     def test_never_matches_a_live_function(self, tmp_path):
         udf = package(tmp_path, b"v1")
@@ -487,45 +651,60 @@ class TestDesiredStateForAnUnuploadedPackage:
 
 
 class TestCleanupFunctionArtifacts:
+    UNFINISHED = fa.Journal(restore={"class_name": CLASS_NAME})
+
     def names(self, results) -> list[str]:
         return [r["artifact"] for r in results]
 
-    def test_lists_this_projects_artifacts_that_no_function_uses(self, adapter, driver, flink):
+    def test_lists_orphans_and_unsettled_artifacts_of_this_project(self, adapter, driver, flink):
         used = driver.add("used", managed())
         flink.add(FUNCTION, used.id)
         elsewhere = driver.add("elsewhere", managed())
         flink.other_database_functions["other_fn"] = elsewhere.id
         unused = driver.add("unused", managed())
+        unsettled = driver.add("unsettled", managed(self.UNFINISHED))
+        in_flight = driver.add("used and unsettled", managed(self.UNFINISHED))
+        flink.add("another_fn", in_flight.id)
         driver.add("other project", managed(project="another"))
         driver.add("theirs", "hand made")
         driver.add("no description", None)
+
         before = set(driver.artifacts)
 
         found = adapter.cleanup_function_artifacts()
 
-        assert self.names(found) == [f"{unused.id} (unused)"]
+        assert self.names(found["orphans"]) == [f"{unused.id} (unused)"]
+        assert self.names(found["unsettled"]) == [f"{unsettled.id} (unsettled)"]
         assert set(driver.artifacts) == before  # nothing is deleted by default
 
-    def test_delete_removes_only_the_unused_artifacts_of_this_project(
-        self, adapter, driver, flink, events
-    ):
+    def test_delete_removes_only_the_orphans(self, adapter, driver, flink, events):
         used = driver.add("used", managed())
         flink.add(FUNCTION, used.id)
         unused = driver.add("unused", managed())
+        unsettled = driver.add("unsettled", managed(self.UNFINISHED))
         theirs = driver.add("theirs", "hand made")
         other = driver.add("other project", managed(project="another"))
 
         found = adapter.cleanup_function_artifacts(delete=True)
 
-        assert [r["error"] for r in found] == [None]
-        assert set(driver.artifacts) == {used.id, theirs.id, other.id}
+        assert [r["error"] for r in found["orphans"]] == [None]
+        assert set(driver.artifacts) == {used.id, unsettled.id, theirs.id, other.id}
         assert events == [f"delete {unused.id}"]
+
+    def test_delete_unsettled_removes_only_the_unsettled(self, adapter, driver):
+        unused = driver.add("unused", managed())
+        unsettled = driver.add("unsettled", managed(self.UNFINISHED))
+
+        adapter.cleanup_function_artifacts(delete_unsettled=True)
+
+        assert set(driver.artifacts) == {unused.id}
+        assert unsettled.id not in driver.artifacts
 
     def test_checks_every_artifact(self, adapter, driver):
         count = 250  # past any page size or the org's artifact limit
         for i in range(count):
             driver.add(f"unused-{i}", managed())
-        assert len(adapter.cleanup_function_artifacts()) == count
+        assert len(adapter.cleanup_function_artifacts()["orphans"]) == count
 
     def test_a_failed_delete_does_not_stop_the_rest(self, adapter, driver, monkeypatch):
         first, second, third = (driver.add(n, managed()) for n in ("a", "b", "c"))
@@ -538,7 +717,7 @@ class TestCleanupFunctionArtifacts:
 
         monkeypatch.setattr(driver, "delete", flaky)
 
-        results = adapter.cleanup_function_artifacts(delete=True)
+        results = adapter.cleanup_function_artifacts(delete=True)["orphans"]
 
         assert [bool(r["error"]) for r in results] == [False, True, False]
         assert set(driver.artifacts) == {second.id}
@@ -557,7 +736,8 @@ class TestCleanupFunctionArtifacts:
 
     def test_a_marker_without_a_project_is_ignored(self, adapter, driver):
         driver.add("legacy", '{"managed_by":"dbt-confluent"}')
-        assert adapter.cleanup_function_artifacts(delete=True) == []
+        found = adapter.cleanup_function_artifacts(delete=True)
+        assert found == {"orphans": [], "unsettled": []}
         assert len(driver.artifacts) == 1
 
     def test_functions_are_read_from_the_environments_information_schema(

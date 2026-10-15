@@ -1042,20 +1042,34 @@ class ConfluentAdapter(SQLAdapter):
 
         The artifact is sorted out *before* anything is dropped: an `artifact_path` is uploaded
         (see `function_artifacts`) and a configured `artifact_id` is checked to exist, so a bad
-        artifact fails the run with the existing function untouched. If the create then fails
-        after the drop, the function that was dropped is re-created from `existing`, which is
-        held in memory only. A process that dies between the drop and the create leaves no
-        function behind and nothing to restore it from. The artifact the function replaced is
-        left in place, since statements may still be bound to it (see
-        `cleanup_function_artifacts`). Returns the create statement's response.
+        artifact fails the run with the existing function untouched. A journal in the new
+        artifact's description records the function to put back (see `function_artifacts`), and
+        is written before anything is dropped. If the create then fails after the drop, the
+        function that was dropped is re-created from the journal, which survives a process that
+        dies between the drop and the create: the next run finishes the change, or restores the
+        original again. The artifact the function replaced is left in place, since statements may
+        still be bound to it (see `cleanup_function_artifacts`). Returns the create statement's
+        response.
         """
         conn = self.connections.get_thread_handle()
         execute = self._function_executor(compute_pool_id)
+
+        # What to put back if this change fails: the function live now, or nothing on a first create.
+        journal = function_artifacts.Journal(
+            restore=function_artifacts.function_state_to_restore(existing) if existing else None
+        )
         if udf["artifact_path"]:
-            artifact_id = function_artifacts.ensure_artifact(conn, udf).id
+            artifact = function_artifacts.ensure_artifact(conn, udf, journal)
+            artifact_id = artifact.id
+            # An earlier, interrupted attempt's journal is kept as is, and may be stale.
+            kept = function_artifacts.decode_description(artifact.description)[1]
+            if kept is not None and kept != journal:
+                journal = self._reconcile_journal(conn, relation, udf, artifact_id, kept, execute)
         else:
             artifact_id = udf["artifact_id"]
             self._require_artifact_exists(conn, artifact_id)
+        restore = journal.restore
+
         create_sql = functions.render_create_function(
             relation, udf["class_name"], udf["language"], artifact_id, udf["connection_names"]
         )
@@ -1065,9 +1079,11 @@ class ConfluentAdapter(SQLAdapter):
         try:
             response, _ = execute(create_sql, statement_name=create_statement_name)
         except Exception:
-            if existing is not None:
-                self._restore_function(relation, existing, execute, create_statement_name)
+            if restore:
+                self._restore_function(relation, restore, execute, create_statement_name)
             raise
+        if udf["artifact_path"]:
+            self._settle_function_artifact(conn, relation, artifact_id)
         if existing is not None and existing.artifact_id != artifact_id:
             logger.warning(
                 warning_tag(
@@ -1078,6 +1094,22 @@ class ConfluentAdapter(SQLAdapter):
                 )
             )
         return response
+
+    @available
+    def settle_function(
+        self, relation: BaseRelation, udf: dict[str, Any], compute_pool_id: str | None
+    ) -> None:
+        """Finish an interrupted change to a function that is already what the config asks for.
+
+        See `function_artifacts.settle_journal`. A no-op unless the function has an
+        `artifact_path` whose artifact still carries a journal.
+        """
+        if not udf["artifact_path"]:
+            return
+        conn = self.connections.get_thread_handle()
+        artifact = function_artifacts.find_artifact(conn, udf["artifact_name"], udf["language"])
+        if artifact:
+            self._settle_function_artifact(conn, relation, artifact.id)
 
     def _require_artifact_exists(self, conn: Connection, artifact_id: str) -> None:
         """Fail if the artifact doesn't exist, rather than dropping a function we can't recreate.
@@ -1092,21 +1124,51 @@ class ConfluentAdapter(SQLAdapter):
                 f"Artifact '{artifact_id}' doesn't exist in this environment, cloud and region."
             ) from e
 
+    def _reconcile_journal(
+        self,
+        conn: Connection,
+        relation: BaseRelation,
+        udf: dict[str, Any],
+        artifact_id: str,
+        journal: function_artifacts.Journal,
+        execute: functions.FunctionExecutor,
+    ) -> function_artifacts.Journal:
+        """Bring a journal left by an interrupted attempt up to date, and return it.
+
+        Other runs may have replaced the function since, which makes its restore record stale. The
+        function is described again here, *after* the journal was read, so one that differs from
+        the record has certainly superseded it, and the journal is rewritten to describe it. If
+        there is no function, the journal is the only record of the original and is kept.
+        """
+        live = functions.describe_function(execute, relation)
+        if live is None:
+            return journal
+        current = function_artifacts.Journal(
+            restore=function_artifacts.function_state_to_restore(live)
+        )
+        if current != journal:
+            conn.get_artifacts_api().update(
+                artifact_id,
+                description=function_artifacts.encode_description(udf["project"], current),
+            )
+        return current
+
     def _restore_function(
         self,
         relation: BaseRelation,
-        previous: functions.FunctionState,
+        restore: dict[str, Any],
         execute: functions.FunctionExecutor,
         statement_name: str,
     ) -> None:
-        """Best-effort: re-create the previous function after a failed create."""
+        """Best-effort: re-create the previous function (the journal's `restore` record) after a
+        failed create."""
         try:
             sql = functions.render_create_function(
                 relation,
-                previous.class_name,
-                previous.language,
-                previous.artifact_id,
-                sorted(c.render() for c in previous.connections),
+                restore["class_name"],
+                restore["language"],
+                restore["artifact_id"],
+                restore["connections"],
             )
             execute(sql, statement_name=sanitize_statement_name(f"{statement_name}-restore"))
             logger.warning(
@@ -1115,17 +1177,37 @@ class ConfluentAdapter(SQLAdapter):
                 )
             )
         except Exception as e:
-            logger.error(f"Could not restore the previous function {relation.render()} ({e}).")
+            logger.error(
+                f"Could not restore the previous function {relation.render()} ({e}). The next "
+                "run will try again."
+            )
+
+    def _settle_function_artifact(
+        self, conn: Connection, relation: BaseRelation, artifact_id: str
+    ) -> None:
+        """Clear the journal after a completed change, leaving it for the next run on failure."""
+        try:
+            function_artifacts.settle_journal(conn, artifact_id)
+        except Exception as e:
+            logger.warning(
+                warning_tag(
+                    f"Function {relation.render()} was updated but finishing its journal "
+                    f"failed ({e}). The next run will retry."
+                )
+            )
 
     @available
-    def cleanup_function_artifacts(self, delete: bool = False) -> list[dict[str, str | None]]:
-        """List this project's artifacts that no function uses (see
-        `function_artifacts.find_unused_artifacts`), and delete them with `delete`.
+    def cleanup_function_artifacts(
+        self, delete: bool = False, delete_unsettled: bool = False
+    ) -> dict[str, list[dict[str, str | None]]]:
+        """List this project's artifacts that no function uses, deleting the orphans with
+        `delete` and the unsettled ones (see `function_artifacts.find_unused_artifacts`) with
+        `delete_unsettled`.
 
-        Each entry is `{artifact, error}`, with `artifact` being `id (name)`; `error` is set if
-        deleting it failed (every one is tried). Deleting is on the user's word that statements
-        using an old artifact were recreated: they stay bound to it, and fail to restart once it
-        is gone.
+        Returns `{"orphans": [...], "unsettled": [...]}`, each entry `{artifact, error}` with
+        `artifact` being `id (name)`; `error` is set if deleting it failed (every one is tried).
+        Deleting is on the user's word that statements using an old artifact were recreated:
+        they stay bound to it, and fail to restart once it is gone.
         """
         conn = self.connections.get_thread_handle()
 
@@ -1142,20 +1224,27 @@ class ConfluentAdapter(SQLAdapter):
                 for artifact_id in functions.artifact_ids_in(artifacts)
             }
 
-        results: list[dict[str, str | None]] = []
-        for artifact in function_artifacts.find_unused_artifacts(
+        def process(artifacts: list[Any], do_delete: bool) -> list[dict[str, str | None]]:
+            results: list[dict[str, str | None]] = []
+            for artifact in artifacts:
+                error = None
+                if do_delete:
+                    try:
+                        conn.get_artifacts_api().delete(artifact.id)
+                    except Exception as e:
+                        error = str(e)
+                results.append(
+                    {"artifact": f"{artifact.id} ({artifact.display_name})", "error": error}
+                )
+            return results
+
+        orphans, unsettled = function_artifacts.find_unused_artifacts(
             conn, self.config.project_name, used_artifact_ids
-        ):
-            error = None
-            if delete:
-                try:
-                    conn.get_artifacts_api().delete(artifact.id)
-                except Exception as e:
-                    error = str(e)
-            results.append(
-                {"artifact": f"{artifact.id} ({artifact.display_name})", "error": error}
-            )
-        return results
+        )
+        return {
+            "orphans": process(orphans, delete),
+            "unsettled": process(unsettled, delete_unsettled),
+        }
 
     @available
     def warn_function_change(self, message: str) -> None:

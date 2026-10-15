@@ -5,23 +5,31 @@
 
    Replacing a function never deletes its old artifact, because statements started before the
    change stay bound to it and can't restart once it is gone. Delete only once those statements
-   have been recreated, and not while a `dbt run` is in progress: an artifact a run has uploaded
-   but not yet created its function from looks unused. -#}
-{%- macro cleanup_function_artifacts(delete=false) -%}
-  {%- set unused = adapter.cleanup_function_artifacts(delete) -%}
+   have been recreated.
+
+   *Unsettled* artifacts still carry the journal of a replacement that never finished (or that is
+   running right now). They are listed apart, and `delete: true` leaves them alone; `delete_unsettled: true`
+   deletes them. -#}
+{%- macro cleanup_function_artifacts(delete=false, delete_unsettled=false) -%}
+  {%- set found = adapter.cleanup_function_artifacts(delete, delete_unsettled) -%}
   {%- set failed = [] -%}
-  {% for result in unused %}
-    {% if result.error %}
-      {% do failed.append(result.artifact ~ ': ' ~ result.error) %}
-    {% else %}
-      {{ log(('Deleted ' if delete else 'Unused: ') ~ result.artifact, info=true) }}
-    {% endif %}
+  {% for group, label, deleted in [(found.orphans, 'Unused', delete), (found.unsettled, 'Unsettled', delete_unsettled)] %}
+    {% for result in group %}
+      {% if result.error %}
+        {% do failed.append(result.artifact ~ ': ' ~ result.error) %}
+      {% else %}
+        {{ log(('Deleted ' if deleted else label ~ ': ') ~ result.artifact, info=true) }}
+      {% endif %}
+    {% endfor %}
   {% endfor %}
-  {% if not unused %}
+  {% if not found.orphans and not found.unsettled %}
     {{ log('No unused artifacts of this project.', info=true) }}
   {% endif %}
-  {% if unused and not delete %}
+  {% if found.orphans and not delete %}
     {{ log("To delete the unused artifacts, once no statement depends on them: dbt run-operation cleanup_function_artifacts --args '{delete: true}'", info=true) }}
+  {% endif %}
+  {% if found.unsettled and not delete_unsettled %}
+    {{ log("Unsettled artifacts have an unfinished replacement's journal (or one is running now). To delete them: dbt run-operation cleanup_function_artifacts --args '{delete_unsettled: true}'", info=true) }}
   {% endif %}
   {% if failed %}
     {% do exceptions.raise_compiler_error('Could not delete: ' ~ failed | join('; ')) %}

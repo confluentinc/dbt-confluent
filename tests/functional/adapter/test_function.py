@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from confluent_sql import ArtifactNotFoundError
 
-from dbt.adapters.confluent import functions
+from dbt.adapters.confluent import function_artifacts, functions
 from dbt.adapters.confluent.connections import ConfluentConnectionManager
 from dbt.tests.util import run_dbt, run_dbt_and_capture, write_file
 from tests.functional.adapter._helpers import get_result_by_name
@@ -408,8 +408,6 @@ class TestFunctionArtifactUpload(FunctionFixtures):
     # The package file the live function was created from. Rebuilding a package gives different
     # bytes each time (file timestamps), so a test that needs the *same* package puts these back.
     live_package: dict[str, bytes] = {}
-    # The artifact a failed run uploaded for its package and left behind, for the next run to use.
-    failed_run_artifact: dict[str, str] = {}
 
     @pytest.fixture(scope="class")
     def functions(self):
@@ -454,6 +452,16 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         with project.adapter.connection_named("list_artifacts"):
             return {a.id: a.description for a in self.our_artifacts(project)}
 
+    def leave_journal(self, project, artifact_id: str) -> None:
+        """Mark an artifact as having an unfinished change, as a run that died would."""
+        with project.adapter.connection_named("leave_journal"):
+            project.adapter.connections.get_thread_handle().get_artifacts_api().update(
+                artifact_id,
+                description=function_artifacts.encode_description(
+                    project.adapter.config.project_name, function_artifacts.Journal(restore=None)
+                ),
+            )
+
     def test_0_compile_does_not_upload_or_create_anything(self, project, submitted_sql):
         """Parsing and compiling never run a materialization, so there is no side effect."""
         run_dbt(["compile"])
@@ -467,12 +475,16 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.live_artifact_id(project) == artifact_id
 
     def test_2_unchanged_package_reuses_the_artifact(self, project, plan_actions, submitted_sql):
+        """And finishes a change a dead run left unfinished (a leftover journal)."""
         (artifact_id,) = self.artifacts(project)
+        self.leave_journal(project, artifact_id)
 
         run_dbt(["build"])
 
         assert plan_actions == ["unchanged"]
-        assert self.artifacts(project).keys() == {artifact_id}
+        artifacts = self.artifacts(project)
+        assert artifacts.keys() == {artifact_id}
+        assert "journal" not in artifacts[artifact_id]
         assert not any("create function" in sql.lower() for sql in submitted_sql)
 
     def test_3_changed_package_replaces_the_function_and_keeps_the_old_artifact(
@@ -486,8 +498,11 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert plan_actions == ["replace"]
         # the live function is described once, and the result reused to plan and to replace it
         assert sum("describe function" in sql.lower() for sql in submitted_sql) == 1
-        (second_artifact_id,) = self.artifacts(project).keys() - {first_artifact_id}
+        artifacts = self.artifacts(project)
+        (second_artifact_id,) = artifacts.keys() - {first_artifact_id}
         assert self.live_artifact_id(project) == second_artifact_id
+        # the journal was cleared: nothing is left half-done
+        assert "journal" not in artifacts[second_artifact_id]
 
     def configure(self, project, class_name: str = EXAMPLE_UDF_CLASS, **extra) -> None:
         write_file(
@@ -509,18 +524,27 @@ class TestFunctionArtifactUpload(FunctionFixtures):
 
         assert FUNCTION_NAME in errors
         assert self.live_artifact_id(project) == previous_artifact_id  # put back
-        # the new package's artifact was uploaded before the failure, and nothing was deleted
-        (uploaded_artifact_id,) = self.artifacts(project).keys() - before.keys()
-        self.failed_run_artifact["id"] = uploaded_artifact_id
+        artifacts = self.artifacts(project)
+        assert before.keys() <= artifacts.keys()
+        (new_artifact_id,) = artifacts.keys() - before.keys()
+        assert "journal" in artifacts[new_artifact_id]  # the unfinished change is recorded
+        with project.adapter.connection_named("cleanup_artifacts_unsettled"):
+            found = project.adapter.cleanup_function_artifacts()
+        # reported apart from the orphans, and not deleted by default
+        assert [r["artifact"].split()[0] for r in found["unsettled"]] == [new_artifact_id]
+        assert new_artifact_id in self.artifacts(project)
 
-    def test_5_the_next_run_uses_the_artifact_already_uploaded(self, project):
+    def test_5_the_next_run_rolls_forward_and_clears_the_journal(self, project):
         before = self.artifacts(project)
+        (pending_artifact_id,) = (a for a, d in before.items() if "journal" in d)
         self.configure(project, class_name=EXAMPLE_UDF_CLASS)
 
         run_dbt(["build"])
 
-        assert self.live_artifact_id(project) == self.failed_run_artifact["id"]
-        assert self.artifacts(project).keys() == before.keys()  # nothing was uploaded or deleted
+        assert self.live_artifact_id(project) == pending_artifact_id
+        artifacts = self.artifacts(project)
+        assert "journal" not in artifacts[pending_artifact_id]
+        assert artifacts.keys() == before.keys()  # no artifact was deleted
 
     def test_6_cleanup_lists_the_artifacts_no_function_uses(self, project):
         """A dry run: the earlier artifacts are listed, the live one is not, nothing is deleted,
@@ -534,6 +558,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert all(artifact_id in output for artifact_id in unused)
         assert live_artifact_id not in output
         assert "--args '{delete: true}'" in output
+        assert "delete_unsettled" not in output  # nothing is unsettled
         assert self.artifacts(project) == before
 
     def test_7_continue_and_fail_upload_nothing(self, project, plan_actions):
@@ -569,13 +594,23 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.artifacts(project) == before
         assert self.live_artifact_id(project) == live_artifact_id
 
-    def test_9_cleanup_deletes_the_unused_artifacts(self, project):
+    def test_9_cleanup_deletes_orphans_and_unsettled_artifacts_separately(self, project):
         """Cleanup is scoped to this project, so it is safe to delete for real here: only this
         class's artifacts are candidates (unless the class runs twice at once on one environment)."""
         live_artifact_id = self.live_artifact_id(project)
-        assert self.artifacts(project).keys() - {live_artifact_id}  # something to delete
+        orphan_id, unsettled_id = sorted(self.artifacts(project).keys() - {live_artifact_id})[:2]
+        self.leave_journal(project, unsettled_id)
 
         run_dbt(["run-operation", "cleanup_function_artifacts", "--args", "{delete: true}"])
+
+        remaining = self.artifacts(project).keys()
+        assert orphan_id not in remaining
+        assert unsettled_id in remaining  # `delete: true` leaves unsettled artifacts alone
+        assert live_artifact_id in remaining
+
+        run_dbt(
+            ["run-operation", "cleanup_function_artifacts", "--args", "{delete_unsettled: true}"]
+        )
 
         assert self.artifacts(project).keys() == {live_artifact_id}
         assert self.live_artifact_id(project) == live_artifact_id
