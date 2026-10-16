@@ -557,9 +557,11 @@ flags:
 
 With `artifact_path`, dbt uploads the package as the function's artifact, which needs a key that
 can use the artifact API (the [Global API key](#tableflow), as for Tableflow). The artifact is
-named after the package's content (`<statement prefix><project>-<function>-<digest>`), so
-the same package always maps to the same artifact:
+named after the package's content (`<statement prefix><project>-<digest>`), so the same
+package always maps to the same artifact:
 
+- Functions that point at the same package share one artifact: dbt hashes, looks up and uploads
+  it once per run, however many functions use it or how many threads build them.
 - An unchanged package reuses its artifact, and the function is left alone.
 - A changed package is uploaded as a new artifact, and the function is replaced to use it.
 - Uploading happens when the function is created or replaced, not at parse or compile time.
