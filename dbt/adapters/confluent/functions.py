@@ -16,7 +16,7 @@ from typing import Any, NamedTuple, cast
 import agate
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
-from dbt.adapters.base import BaseRelation
+from dbt.adapters.base.relation import BaseRelation
 from dbt.adapters.contracts.connection import AdapterResponse
 
 from .function_artifacts import (
@@ -209,7 +209,7 @@ def validate_function_config(
         digest = file_digest(resolved_path)
         artifact_config = ArtifactConfig(
             path=resolved_path,
-            name=artifact_display_name(name_prefix, project, function, digest),
+            name=artifact_display_name(name_prefix, project, digest),
             project=project,
             language=language,
         )
