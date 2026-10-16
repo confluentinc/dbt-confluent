@@ -562,6 +562,8 @@ the same package always maps to the same artifact. Artifact names are limited to
 so when the project and function names are too long to leave room for the digest, they are cut
 short and end in a hash of the full text; the digest is never cut:
 
+- Functions that point at the same package share one artifact: dbt hashes, looks up and uploads
+  it once per run, however many functions use it or how many threads build them.
 - An unchanged package reuses its artifact, and the function is left alone.
 - A changed package is uploaded as a new artifact, and the function is replaced to use it.
 - Uploading happens when the function is created or replaced, not at parse or compile time.
