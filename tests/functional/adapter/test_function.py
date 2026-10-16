@@ -24,7 +24,12 @@ from confluent_sql import ArtifactNotFoundError
 from dbt.adapters.confluent import functions
 from dbt.adapters.confluent.connections import ConfluentConnectionManager
 from dbt.tests.util import run_dbt, run_dbt_and_capture, write_file
-from tests.functional.adapter._helpers import get_result_by_name
+from tests.functional.adapter._helpers import (
+    TEST_PROJECT_PREFIX,
+    get_result_by_name,
+    sweep_stale_test_artifacts,
+    unique_test_project_name,
+)
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 FLAG = "enable_experimental_function_materialization"
@@ -101,13 +106,50 @@ def submitted_sql(monkeypatch):
     return submitted
 
 
+_artifacts_swept = False
+
+
+def our_artifacts(project) -> list:
+    """The artifacts dbt uploaded for this test class's project (see `FunctionFixtures`)."""
+    stem = f"{project.adapter.config.project_name}-"
+    handle = project.adapter.connections.get_thread_handle()
+    return [a for a in handle.get_artifacts_api().list() if a.display_name.startswith(stem)]
+
+
+def delete_our_artifacts(project) -> None:
+    with project.adapter.connection_named("delete_artifacts"):
+        handle = project.adapter.connections.get_thread_handle()
+        for artifact in our_artifacts(project):
+            try:
+                handle.get_artifacts_api().delete(artifact.id)
+            except ArtifactNotFoundError:
+                pass  # already gone
+
+
 class FunctionFixtures(ConfluentFixtures):
-    """Flag on by default (override `flags_enabled`), and the function dropped afterwards."""
+    """Flag on by default (override `flags_enabled`), and the function dropped afterwards.
+
+    Each class gets its own project name, so the artifacts it uploads (named after the project)
+    can't collide with, or be deleted by, another class or another developer's run of the same
+    one. Artifacts a failed cleanup leaves behind are swept, once per session, when they are old
+    enough that no live session can own them.
+    """
 
     flags_enabled = True
 
+    @pytest.fixture(scope="class", autouse=True)
+    def sweep_stale_artifacts(self, project):
+        global _artifacts_swept
+        if not _artifacts_swept:
+            _artifacts_swept = True
+            sweep_stale_test_artifacts(project)
+
     @pytest.fixture(scope="class")
     def project_config_update(self, project_config_update):
+        project_config_update = {
+            **project_config_update,
+            "name": unique_test_project_name(self.NAME),
+        }
         if self.flags_enabled:
             return {**project_config_update, "flags": {FLAG: True}}
         return project_config_update
@@ -247,7 +289,6 @@ def write_package(project, version: str) -> None:
 def udf_artifact_ids(project, tmp_path_factory) -> list[str]:
     """Two different, valid Python UDF artifacts (both contain `EXAMPLE_UDF_CLASS`), uploaded for
     the duration of the test class."""
-    prefix = project.adapter.config.credentials.statement_name_prefix
     ids: list[str] = []
     try:
         with project.adapter.connection_named("upload_udf_artifacts"):
@@ -256,7 +297,9 @@ def udf_artifact_ids(project, tmp_path_factory) -> list[str]:
                 path = tmp_path_factory.mktemp("udf") / "package.zip"
                 build_package(path, version)
                 artifact = handle.get_artifacts_api().create(
-                    f"{prefix}{uuid.uuid4().hex[:12]}", file=path, runtime_language="PYTHON"
+                    f"{TEST_PROJECT_PREFIX}{uuid.uuid4().hex[:12]}",
+                    file=path,
+                    runtime_language="PYTHON",
                 )
                 ids.append(artifact.id)
         yield ids
@@ -463,20 +506,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def delete_artifacts(self, project):
         yield
-        with project.adapter.connection_named("cleanup_artifacts"):
-            for artifact in self.our_artifacts(project):
-                try:
-                    project.adapter.connections.get_thread_handle().get_artifacts_api().delete(
-                        artifact.id
-                    )
-                except Exception:
-                    pass  # best effort
-
-    def our_artifacts(self, project) -> list:
-        prefix = project.adapter.config.credentials.statement_name_prefix
-        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
-        handle = project.adapter.connections.get_thread_handle()
-        return [a for a in handle.get_artifacts_api().list() if a.display_name.startswith(stem)]
+        delete_our_artifacts(project)
 
     def live_artifact_id(self, project) -> str:
         rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
@@ -485,7 +515,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
     def artifacts(self, project) -> dict[str, str]:
         """Our artifacts, id -> description."""
         with project.adapter.connection_named("list_artifacts"):
-            return {a.id: a.description for a in self.our_artifacts(project)}
+            return {a.id: a.description for a in our_artifacts(project)}
 
     def test_0_compile_does_not_upload_or_create_anything(self, project, submitted_sql):
         """Parsing and compiling never run a materialization, so there is no side effect."""
@@ -607,15 +637,44 @@ class TestFunctionEmptyRun(FunctionFixtures):
     def package(self, project):
         write_package(project, "empty-run")
         yield
-        prefix = project.adapter.config.credentials.statement_name_prefix
-        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
-        with project.adapter.connection_named("delete_artifacts"):
-            handle = project.adapter.connections.get_thread_handle()
-            for artifact in handle.get_artifacts_api().list():
-                if artifact.display_name.startswith(stem):
-                    handle.get_artifacts_api().delete(artifact.id)
+        delete_our_artifacts(project)
 
     def test_empty_run_uploads_and_creates_the_function(self, project):
         run_dbt(["build", "--empty"])
         rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
         assert {str(name): str(value) for name, value in rows}["plugin id"].startswith("cfa-")
+
+
+@requires_global_key
+class TestFunctionsSharingOnePackage(FunctionFixtures):
+    """Two functions from one package, built on separate threads: they share one artifact."""
+
+    NAME = "functionshared"
+    FUNCTIONS = ["udf_first", "udf_second"]
+    THREADS = 2
+
+    @pytest.fixture(scope="class")
+    def functions(self):
+        return {
+            f"{name}.sql": function_sql(
+                artifact_id=None, class_name=EXAMPLE_UDF_CLASS, language="python"
+            ).replace("artifact_id=None", f"artifact_path={PACKAGE_FILE!r}")
+            for name in self.FUNCTIONS
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def package(self, project):
+        write_package(project, "shared")
+        yield
+        delete_our_artifacts(project)
+
+    def live_artifact_id(self, project, function: str) -> str:
+        rows = project.run_sql(f"describe function `{function}`", fetch="all")
+        return {str(name): str(value) for name, value in rows}["plugin id"]
+
+    def test_both_functions_use_the_same_artifact(self, project):
+        run_dbt(["build", "--threads", str(self.THREADS)])
+
+        artifact_ids = {self.live_artifact_id(project, name) for name in self.FUNCTIONS}
+
+        assert len(artifact_ids) == 1

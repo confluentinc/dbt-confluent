@@ -16,12 +16,13 @@ from typing import Any, NamedTuple, cast
 import agate
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
-from dbt.adapters.base import BaseRelation
+from dbt.adapters.base.relation import BaseRelation
 from dbt.adapters.contracts.connection import AdapterResponse
 
 from .function_artifacts import (
     ARTIFACT_FORMATS,
     ArtifactConfig,
+    ArtifactDigest,
     artifact_display_name,
     file_digest,
 )
@@ -135,8 +136,8 @@ def validate_function_config(
     *,
     project_root: Path | None = None,
     project: str,
-    name_prefix: str,
     function: str | None,
+    digest: Callable[[Path], ArtifactDigest] = file_digest,
 ) -> FunctionConfig:
     """Validate a `function` node's config and return the values the DDL needs.
 
@@ -146,12 +147,13 @@ def validate_function_config(
     `connections` is an optional list of connection names; a name that isn't fully qualified is
     resolved against `catalog` and `database` (the function's own). Only scalar functions are
     supported. Collects every problem into one error. `model_config` is the Jinja config object
-    (anything with `.get`).
+    (anything with `.get`). `digest` hashes a package's content (a build passes a cached one, so a
+    package is read once).
 
     An `artifact_path` becomes an `ArtifactConfig` naming the artifact it is (or will be) uploaded
-    under: `name_prefix`, the dbt `project` and the `function` name, plus a digest of the package's
-    content. `catalog`, `database` and `function` are the function relation's parts; a relation
-    missing any of them is an error.
+    under: the dbt `project`, plus a digest of the package's content, so every function using
+    the same package shares one artifact. `catalog`, `database` and `function` are the function
+    relation's parts; a relation missing any of them is an error.
     """
     if catalog is None or database is None or function is None:
         raise CompilationError(
@@ -206,10 +208,10 @@ def validate_function_config(
         )
     artifact_config = None
     if resolved_path:
-        digest = file_digest(resolved_path)
+        package_digest = digest(resolved_path)
         artifact_config = ArtifactConfig(
             path=resolved_path,
-            name=artifact_display_name(name_prefix, project, function, digest),
+            name=artifact_display_name(project, package_digest),
             project=project,
             language=language,
         )
@@ -234,7 +236,7 @@ def _resolve_artifact_path(
     if not path.is_file():
         problems.append(f"'artifact_path' {str(path)!r} is not a file")
         return None
-    expected = ARTIFACT_FORMATS[language][0] if language in ARTIFACT_FORMATS else None
+    expected = ARTIFACT_FORMATS[language].file_suffix if language in ARTIFACT_FORMATS else None
     if expected and path.suffix.lower() != expected:
         problems.append(
             f"'artifact_path' must be a {expected} file for {language} (got {path.name!r})"
