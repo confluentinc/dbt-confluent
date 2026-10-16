@@ -6,6 +6,8 @@ the artifacts are listed once and a package is uploaded at most once, however ma
 `singleflight`); the find-or-upload code itself (`function_artifacts`) stays free of locks.
 """
 
+from os import getcwd
+
 from pathlib import Path
 
 from confluent_sql import Connection, FlinkArtifact
@@ -51,7 +53,7 @@ class PackageArtifacts:
 
         def hash_file() -> ArtifactDigest:
             # Logged only where the work happens, so one line per package however many callers.
-            logger.debug(f"Hashing package {path}")
+            logger.info(f"SingleShot: Hashing package {path.relative_to(getcwd())}")
             return function_artifacts.file_digest(path)
 
         return self._digests.get(path.resolve(), hash_file)
@@ -70,7 +72,7 @@ class PackageArtifacts:
         return None
 
     def _list_artifacts(self, conn: Connection) -> list[FlinkArtifact]:
-        logger.debug("Listing artifacts")
+        logger.info("SingleShot: Listing artifacts")
         return conn.get_artifacts_api().list()
 
     def ensure(self, conn: Connection, params: FlinkArtifactParams) -> FlinkArtifact:
@@ -78,7 +80,7 @@ class PackageArtifacts:
         return self._uploads.get(params.digest, lambda: self._ensure_and_record(conn, params))
 
     def _ensure_and_record(self, conn: Connection, params: FlinkArtifactParams) -> FlinkArtifact:
-        logger.debug(f"Finding or uploading artifact {params.name} for package {params.path}")
+        logger.info(f"SingleShot: Finding or uploading artifact with digest={params.digest} for package {params.path.relative_to(getcwd())}")
         artifact = function_artifacts.ensure_artifact(conn, params)
         self._uploaded[params.name] = artifact
         return artifact
