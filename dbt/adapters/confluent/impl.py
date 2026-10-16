@@ -31,6 +31,7 @@ from dbt.adapters.sql import SQLAdapter
 from . import function_artifacts, functions, tableflow
 from .dry_run_types import comparable_type, display_type, stored_type
 from .naming import sanitize_statement_name
+from .package_artifacts import PackageArtifacts
 from .utils import fetch_from_cursor
 
 logger = AdapterLogger("Confluent")
@@ -176,6 +177,9 @@ class ConfluentAdapter(SQLAdapter):
         # worker thread; _CleanupRegistry.__init__ gives each of those threads
         # its own empty list on first access.
         self._deferred_cleanups = _CleanupRegistry()
+        # Unlike the registry above, shared by every thread on purpose: it is how threads
+        # building functions from one package hash, list and upload it once between them.
+        self._package_artifacts = PackageArtifacts()
 
     @property
     def _behavior_flags(self) -> list[BehaviorFlag]:
@@ -959,11 +963,10 @@ class ConfluentAdapter(SQLAdapter):
         )
         if udf["artifact_path"]:
             udf["project"] = self.config.project_name
-            udf["artifact_digest"] = function_artifacts.file_digest(Path(udf["artifact_path"]))
+            udf["artifact_digest"] = self._package_artifacts.digest(Path(udf["artifact_path"]))
             udf["artifact_name"] = function_artifacts.artifact_display_name(
                 self.config.credentials.statement_name_prefix,
                 self.config.project_name,
-                cast(str, relation.identifier),
                 udf["artifact_digest"],
             )
         return udf
@@ -991,8 +994,8 @@ class ConfluentAdapter(SQLAdapter):
         against the artifact already uploaded for that content, if any.
         """
         if udf["artifact_path"]:
-            artifact = function_artifacts.find_artifact(
-                self.connections.get_thread_handle(), udf["artifact_name"], udf["language"]
+            artifact = self._package_artifacts.find(
+                self.connections.get_thread_handle(), udf["artifact_name"]
             )
             udf = {**udf, "artifact_id": artifact.id if artifact else None}
         return functions.plan_function_change(existing, udf)
@@ -1052,7 +1055,9 @@ class ConfluentAdapter(SQLAdapter):
         conn = self.connections.get_thread_handle()
         execute = self._function_executor(compute_pool_id)
         if udf["artifact_path"]:
-            artifact_id = function_artifacts.ensure_artifact(conn, udf).id
+            artifact_id = self._package_artifacts.ensure(
+                conn, function_artifacts.FlinkArtifactParams.from_udf(udf)
+            ).id
         else:
             artifact_id = udf["artifact_id"]
             self._require_artifact_exists(conn, artifact_id)

@@ -7,6 +7,8 @@ against in-memory fakes of the driver connection and of Flink.
 
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,14 +26,17 @@ from confluent_sql import (
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.confluent import function_artifacts as fa
-from dbt.adapters.confluent import functions, impl
+from dbt.adapters.confluent import functions, impl, package_artifacts
 from dbt.adapters.confluent.impl import ConfluentAdapter
+from dbt.adapters.confluent.package_artifacts import PackageArtifacts
+from dbt.adapters.confluent.singleflight import SharedComputeError
 
 CATALOG = "env-1"
 DATABASE = "cluster-a"
 FUNCTION = "is_smaller"
 CLASS_NAME = "pkg.mod.is_smaller"
 PREFIX, PROJECT = "dbt-", "proj"
+DIGEST = fa.ArtifactDigest("0123456789abcdef")
 
 
 class FakeDriver:
@@ -174,6 +179,7 @@ def flink(events) -> FakeFlink:
 def adapter(driver, flink) -> ConfluentAdapter:
     adapter = ConfluentAdapter.__new__(ConfluentAdapter)
     adapter.connections = SimpleNamespace(get_thread_handle=lambda: driver)  # type: ignore[assignment]
+    adapter._package_artifacts = PackageArtifacts()
     adapter.execute = flink.execute  # type: ignore[method-assign, assignment]
     adapter.config = SimpleNamespace(  # type: ignore[assignment]
         credentials=SimpleNamespace(database=CATALOG), project_name=PROJECT
@@ -200,11 +206,15 @@ def package(tmp_path: Path, content: bytes) -> dict[str, Any]:
         "artifact_path": str(path),
         "project": PROJECT,
         "artifact_digest": digest,
-        "artifact_name": fa.artifact_display_name(PREFIX, PROJECT, FUNCTION, digest),
+        "artifact_name": fa.artifact_display_name(PREFIX, PROJECT, digest),
         "class_name": CLASS_NAME,
         "connections": [],
         "connection_names": [],
     }
+
+
+def params(udf: dict[str, Any]) -> fa.FlinkArtifactParams:
+    return fa.FlinkArtifactParams.from_udf(udf)
 
 
 def apply(adapter, udf, replace: bool):
@@ -256,7 +266,7 @@ class TestFileDigestAndName:
         assert fa.file_digest(a) == fa.file_digest(b) != fa.file_digest(c)
 
     def test_name_follows_statement_naming_plus_digest(self):
-        assert fa.artifact_display_name("dbt-", "proj", "fn", "abc") == "dbt-proj-fn-abc"
+        assert fa.artifact_display_name("dbt-", "proj", DIGEST) == f"dbt-proj-{DIGEST}"
 
     def test_digest_is_16_hex_characters(self, tmp_path):
         path = tmp_path / "udf.zip"
@@ -266,30 +276,41 @@ class TestFileDigestAndName:
     @pytest.mark.parametrize("length", [1, 50, 200, 1000])
     def test_the_digest_is_never_cut_off_however_long_the_names(self, length):
         """The digest is what makes a name mean "this content", so it must survive any name."""
-        digest = "0123456789abcdef"
-        name = fa.artifact_display_name("p" * length, "j" * length, "f" * length, digest)
-        assert name.endswith("-" + digest)
-        assert len(name) == 3 * length + 2 + len(digest)
+        name = fa.artifact_display_name("p" * length, "j" * length, DIGEST)
+        assert name.endswith("-" + DIGEST)
+        assert len(name) == 2 * length + 1 + len(DIGEST)
+
+
+class TestFlinkArtifactParams:
+    def test_are_read_from_a_validated_function_config(self, tmp_path):
+        udf = package(tmp_path, b"v1")
+        assert params(udf) == fa.FlinkArtifactParams(
+            name=udf["artifact_name"],
+            digest=udf["artifact_digest"],
+            path=Path(udf["artifact_path"]),
+            language=udf["language"],
+            project=PROJECT,
+        )
 
 
 class TestEnsureArtifact:
     def test_uploads_a_new_artifact_marked_as_managed_by_dbt(self, driver, tmp_path):
         udf = package(tmp_path, b"v1")
-        artifact = fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
+        artifact = fa.ensure_artifact(driver, params(udf))  # type: ignore[arg-type]
         assert artifact.display_name == udf["artifact_name"]
         assert artifact.description == managed()
 
     def test_reuses_an_artifact_for_the_same_content(self, driver, events, tmp_path):
         udf = package(tmp_path, b"v1")
-        first = fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
-        again = fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
+        first = fa.ensure_artifact(driver, params(udf))  # type: ignore[arg-type]
+        again = fa.ensure_artifact(driver, params(udf))  # type: ignore[arg-type]
         assert again.id == first.id
         assert events == [f"upload {udf['artifact_name']}"]
 
     def test_leaves_an_artifact_we_did_not_create_alone(self, driver, tmp_path):
         udf = package(tmp_path, b"v1")
         theirs = driver.add(udf["artifact_name"], "hand made")
-        assert fa.ensure_artifact(driver, udf).id == theirs.id  # type: ignore[arg-type]
+        assert fa.ensure_artifact(driver, params(udf)).id == theirs.id  # type: ignore[arg-type]
         assert theirs.description == "hand made"
 
     @pytest.mark.parametrize(
@@ -303,7 +324,7 @@ class TestEnsureArtifact:
         self, driver, tmp_path, language, content_format, runtime_language
     ):
         udf = {**package(tmp_path, b"v1"), "language": language}
-        fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
+        fa.ensure_artifact(driver, params(udf))  # type: ignore[arg-type]
         (upload,) = driver.uploads
         assert upload["content_format"] == content_format
         assert upload["runtime_language"] == runtime_language
@@ -320,7 +341,7 @@ class TestEnsureArtifact:
 
         monkeypatch.setattr(driver, "create", lose_the_race)
 
-        artifact = fa.ensure_artifact(driver, udf)  # type: ignore[arg-type]
+        artifact = fa.ensure_artifact(driver, params(udf))  # type: ignore[arg-type]
 
         assert artifact.display_name == udf["artifact_name"]
 
@@ -332,7 +353,7 @@ class TestEnsureArtifact:
 
         monkeypatch.setattr(driver, "create", exists_but_invisible)
         with pytest.raises(ArtifactAlreadyExistsError):
-            fa.ensure_artifact(driver, package(tmp_path, b"v1"))  # type: ignore[arg-type]
+            fa.ensure_artifact(driver, params(package(tmp_path, b"v1")))  # type: ignore[arg-type]
 
 
 class TestApplyFunction:
@@ -582,6 +603,7 @@ class TestAdapterValidateFunctionConfig:
     def validate(self, tmp_path, **config):
         (tmp_path / "udf.zip").write_bytes(b"zip")
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter._package_artifacts = PackageArtifacts()
         adapter.config = SimpleNamespace(  # type: ignore[assignment]
             project_root=str(tmp_path),
             project_name=PROJECT,
@@ -590,12 +612,12 @@ class TestAdapterValidateFunctionConfig:
         base = {"language": "python", "class": CLASS_NAME}
         return adapter.validate_function_config(base | config, relation())
 
-    def test_an_artifact_path_is_named_after_its_project_function_and_digest(self, tmp_path):
+    def test_an_artifact_path_is_named_after_its_project_and_digest(self, tmp_path):
         udf = self.validate(tmp_path, artifact_path="udf.zip")
         digest = fa.file_digest(tmp_path / "udf.zip")
         assert udf["project"] == PROJECT
         assert udf["artifact_digest"] == digest
-        assert udf["artifact_name"] == fa.artifact_display_name(PREFIX, PROJECT, FUNCTION, digest)
+        assert udf["artifact_name"] == fa.artifact_display_name(PREFIX, PROJECT, digest)
 
     def test_an_artifact_id_has_no_upload_details(self, tmp_path):
         udf = self.validate(tmp_path, artifact_id="cfa-abc123")
@@ -627,3 +649,223 @@ class TestAdapterPlanFunctionChange:
 
     def test_an_absent_function_is_none(self, adapter, tmp_path):
         assert adapter.plan_function_change(None, package(tmp_path, b"v1")) is None
+
+
+THREADS = 6
+CHANGED_CONTENT = b"v2"
+
+
+def run_on_threads(call, threads: int = THREADS) -> list[Any]:
+    """Run `call` on `threads` threads released together; return each outcome (value or error)."""
+    barrier = threading.Barrier(threads)
+
+    def one():
+        barrier.wait(5)
+        try:
+            return call()
+        except Exception as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=threads) as pool:
+        return [f.result(5) for f in [pool.submit(one) for _ in range(threads)]]
+
+
+class TestPackageArtifacts:
+    """What threads building functions from one package do once between them."""
+
+    def test_a_package_is_hashed_once(self, tmp_path, monkeypatch):
+        udf = package(tmp_path, b"v1")
+        hashes = []
+        real = fa.file_digest
+        monkeypatch.setattr(fa, "file_digest", lambda p: (hashes.append(p), real(p))[1])
+        artifacts = PackageArtifacts()
+
+        digests = run_on_threads(lambda: artifacts.digest(Path(udf["artifact_path"])))
+
+        assert digests == [udf["artifact_digest"]] * THREADS
+        assert len(hashes) == 1
+
+    def test_the_artifact_listing_is_fetched_once(self, driver, tmp_path):
+        udf = package(tmp_path, b"v1")
+        existing = driver.add(udf["artifact_name"], managed())
+        artifacts = PackageArtifacts()
+
+        found = run_on_threads(lambda: artifacts.find(driver, udf["artifact_name"]))
+
+        assert [a.id for a in found] == [existing.id] * THREADS
+        assert len(driver.listed_languages) == 1
+
+    def test_a_failed_listing_fails_every_caller_after_one_attempt(self, driver, tmp_path):
+        listing_error = RuntimeError("list failed")
+        calls = []
+
+        def failing_list(runtime_language=None):
+            calls.append(runtime_language)
+            raise listing_error
+
+        driver.list = failing_list  # type: ignore[method-assign]
+        artifacts = PackageArtifacts()
+
+        outcomes = run_on_threads(lambda: artifacts.find(driver, "any-name"))
+
+        assert len(calls) == 1
+        assert all(isinstance(o, Exception) for o in outcomes)
+        assert outcomes.count(listing_error) == 1
+        assert sum(isinstance(o, SharedComputeError) for o in outcomes) == THREADS - 1
+
+    def test_a_package_is_uploaded_once_however_many_threads_ask(self, driver, events, tmp_path):
+        udf = package(tmp_path, b"v1")
+        artifacts = PackageArtifacts()
+
+        ids = [a.id for a in run_on_threads(lambda: artifacts.ensure(driver, params(udf)))]
+
+        assert len(set(ids)) == 1
+        assert events == [f"upload {udf['artifact_name']}"]
+
+    def test_copies_of_a_package_share_one_upload_and_each_is_hashed(
+        self, driver, events, tmp_path, monkeypatch
+    ):
+        copies = []
+        for folder in ("a", "b"):
+            (tmp_path / folder).mkdir()
+            copies.append(package(tmp_path / folder, b"v1"))
+        assert copies[0]["artifact_name"] == copies[1]["artifact_name"]
+        hashes = []
+        real = fa.file_digest
+        monkeypatch.setattr(fa, "file_digest", lambda p: (hashes.append(p), real(p))[1])
+        artifacts = PackageArtifacts()
+
+        for udf in copies:
+            artifacts.digest(Path(udf["artifact_path"]))
+            artifacts.digest(Path(udf["artifact_path"]))
+        for udf in copies:
+            artifacts.ensure(driver, params(udf))
+
+        assert len(hashes) == len(copies)
+        assert events == [f"upload {copies[0]['artifact_name']}"]
+
+    def test_the_upload_is_given_the_named_timeout(self, driver, tmp_path):
+        PackageArtifacts().ensure(driver, params(package(tmp_path, b"v1")))
+        (upload,) = driver.uploads
+        assert upload["upload_timeout"] == fa.UPLOAD_TIMEOUT_SECS
+
+    def test_what_a_build_uploads_is_visible_to_later_plans_without_a_new_listing(
+        self, driver, tmp_path
+    ):
+        udf = package(tmp_path, b"v1")
+        artifacts = PackageArtifacts()
+
+        uploaded = artifacts.ensure(driver, params(udf))
+
+        assert artifacts.find(driver, udf["artifact_name"]) is uploaded
+        assert driver.listed_languages == [ArtifactRuntimeLanguage.PYTHON]  # only ensure's lookup
+
+    def test_a_failed_upload_is_shared_not_retried(self, driver, tmp_path, monkeypatch):
+        udf = package(tmp_path, b"v1")
+        attempts = []
+
+        def failing_create(display_name, **_):
+            attempts.append(display_name)
+            raise OperationalError("upload failed")
+
+        monkeypatch.setattr(driver, "create", failing_create)
+        artifacts = PackageArtifacts()
+
+        outcomes = run_on_threads(lambda: artifacts.ensure(driver, params(udf)))
+
+        assert len(attempts) == 1
+        assert all(isinstance(o, Exception) for o in outcomes)
+        assert sum(isinstance(o, SharedComputeError) for o in outcomes) == THREADS - 1
+
+
+class TestPackageArtifactsLogging:
+    """The debug log has one line per piece of work done, however many callers shared it."""
+
+    @pytest.fixture
+    def messages(self, monkeypatch) -> list[str]:
+        logged: list[str] = []
+        monkeypatch.setattr(package_artifacts.logger, "debug", logged.append)
+        return logged
+
+    def test_a_package_is_logged_once_when_hashed(self, messages, tmp_path):
+        udf = package(tmp_path, b"v1")
+        artifacts = PackageArtifacts()
+
+        run_on_threads(lambda: artifacts.digest(Path(udf["artifact_path"])))
+
+        assert [m for m in messages if "Hashing" in m] == [
+            f"Hashing package {udf['artifact_path']}"
+        ]
+
+    def test_the_listing_is_logged_once(self, messages, driver):
+        artifacts = PackageArtifacts()
+
+        run_on_threads(lambda: artifacts.find(driver, "any-name"))
+
+        assert messages == ["Listing artifacts"]
+
+    def test_an_upload_is_logged_once(self, messages, driver, tmp_path):
+        udf = package(tmp_path, b"v1")
+        artifacts = PackageArtifacts()
+
+        run_on_threads(lambda: artifacts.ensure(driver, params(udf)))
+
+        assert len([m for m in messages if udf["artifact_name"] in m]) == 1
+
+
+class TestAdapterSharesPackageWork:
+    def test_functions_over_one_package_share_one_artifact(
+        self, adapter, driver, flink, events, tmp_path
+    ):
+        udf = package(tmp_path, b"v1")
+        names = ["first_function", "second_function"]
+
+        for name in names:
+            adapter.apply_function(relation(name), udf, None, None, "c", "d")
+
+        (artifact,) = driver.artifacts.values()
+        assert events == [
+            f"upload {udf['artifact_name']}",
+            *(f"create {name} on {artifact.id}" for name in names),
+        ]
+
+    def test_a_shared_upload_failure_leaves_every_function_untouched(
+        self, adapter, driver, flink, events, tmp_path, monkeypatch
+    ):
+        udf = package(tmp_path, b"v1")
+        previous = driver.add("previous", managed())
+        other = "other_function"
+        flink.add(FUNCTION, previous.id)
+        flink.add(other, previous.id)
+        monkeypatch.setattr(
+            driver, "create", lambda *a, **k: (_ for _ in ()).throw(OperationalError("no"))
+        )
+
+        for name in (FUNCTION, other):
+            existing = adapter.describe_function(relation(name))
+            with pytest.raises((OperationalError, SharedComputeError)):
+                adapter.apply_function(relation(name), udf, existing, None, "c", "d")
+
+        assert not [e for e in events if e.startswith(("drop", "create"))]
+        assert set(flink.functions) == {FUNCTION, other}
+
+    def test_an_unchanged_function_plans_without_uploading(self, adapter, driver, tmp_path):
+        udf = package(tmp_path, b"v1")
+        artifact = driver.add(udf["artifact_name"], managed())
+        live = functions.FunctionState(CLASS_NAME, "python", artifact.id, frozenset())
+
+        assert adapter.plan_function_change(live, udf) == []
+        assert driver.uploads == []
+
+    def test_each_adapter_starts_with_nothing_remembered(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(impl.SQLAdapter, "__init__", lambda self, config, mp_context: None)
+        path = tmp_path / "udf.zip"
+        path.write_bytes(b"v1")
+        first = ConfluentAdapter(None, None)
+        before = first._package_artifacts.digest(path)
+
+        path.write_bytes(CHANGED_CONTENT)
+        second = ConfluentAdapter(None, None)
+
+        assert first._package_artifacts.digest(path) == before
+        assert second._package_artifacts.digest(path) != before

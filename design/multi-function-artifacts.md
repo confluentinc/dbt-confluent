@@ -1,7 +1,7 @@
 # Design: several functions sharing one UDF artifact
 
 Source design: `design/udfs.md` (on branch `udf-design`) ("Sharing a package between functions").
-Status: **all questions answered; decisions recorded in [section 2](#2-decisions). Design committed; next is commit 1 (primitives), see [section 4](#4-implementation-steps-and-commits).**
+Status: **all questions answered; decisions recorded in [section 2](#2-decisions). Design and primitives (commit 1) committed; commit 2 (dbt functionality) is staged, see [section 4](#4-implementation-steps-and-commits).**
 
 ## Summary
 
@@ -98,8 +98,8 @@ classDiagram
     class PackageArtifacts {
         +PackageArtifacts(digest_timeout, listing_timeout, upload_timeout)
         +digest(path: Path) str
-        +find(conn, name, language) FlinkArtifact|None
-        +ensure(conn, udf: dict) FlinkArtifact
+        +find(conn, name) FlinkArtifact|None
+        +ensure(conn, params: FlinkArtifactParams) FlinkArtifact
     }
     class function_artifacts {
         <<module, existing, no locks>>
@@ -195,17 +195,17 @@ class PackageArtifacts:
         """Digest of the package file's content, computed once per real path."""
         return self._digests.get(path.resolve(), lambda: function_artifacts.file_digest(path))
 
-    def find(self, conn: Connection, name: str, language: str) -> FlinkArtifact | None:
+    def find(self, conn: Connection, name: str) -> FlinkArtifact | None:
         """Read-only lookup for the plan step: this build's once-fetched listing, plus anything this build uploaded."""
         ...
 
-    def ensure(self, conn: Connection, udf: dict[str, Any]) -> FlinkArtifact:
-        """The artifact for this package, found or uploaded once per artifact name; recorded for `find` on success."""
-        return self._uploads.get(udf["artifact_name"], lambda: self._ensure_and_record(conn, udf))
+    def ensure(self, conn: Connection, params: FlinkArtifactParams) -> FlinkArtifact:
+        """The artifact for this package, found or uploaded once per package content; recorded for `find` on success."""
+        return self._uploads.get(params.digest, lambda: self._ensure_and_record(conn, params))
 ```
 
 `find` lists **all** artifacts once (no runtime-language filter, as `cleanup_function_artifacts` already does) and matches by
-`display_name` and `runtime_language` locally, so a single cell serves both languages. Artifacts uploaded this build are held
+`display_name` alone: the server requires an artifact name to be unique per environment whatever its language. Artifacts uploaded this build are held
 in a small `dict[str, FlinkArtifact]` (written once per name, by the upload leader) and checked first. No locks in this class.
 
 ### 3.4 Changes to existing code
@@ -215,8 +215,8 @@ in a small `dict[str, FlinkArtifact]` (written once per name, by the upload lead
 | `function_artifacts.py` | `artifact_display_name(prefix, project, digest)`: drop the `function` parameter. New `UPLOAD_TIMEOUT_SECS`; `ensure_artifact` passes `upload_timeout=UPLOAD_TIMEOUT_SECS` to `create` (otherwise unchanged, still handles cross-process `ArtifactAlreadyExistsError` with a fresh lookup). Update module docstring. |
 | `impl.py` `__init__` | `self._package_artifacts = PackageArtifacts()` (shared across threads, with a comment saying why it differs from `_CleanupRegistry`). |
 | `impl.py` `validate_function_config` | `self._package_artifacts.digest(Path(udf["artifact_path"]))`; name no longer takes `relation.identifier`. |
-| `impl.py` `plan_function_change` | `self._package_artifacts.find(conn, name, language)` instead of `function_artifacts.find_artifact`. |
-| `impl.py` `apply_function` | `self._package_artifacts.ensure(conn, udf)` instead of `function_artifacts.ensure_artifact(conn, udf)`. |
+| `impl.py` `plan_function_change` | `self._package_artifacts.find(conn, name)` instead of `function_artifacts.find_artifact`. |
+| `impl.py` `apply_function` | `self._package_artifacts.ensure(conn, FlinkArtifactParams.from_udf(udf))` instead of `function_artifacts.ensure_artifact(conn, udf)`. |
 | `function.sql` | unchanged. |
 | Docs | Amend `changes/180.feature.md` (unreleased, so no migration note). `MATERIALIZATIONS.md` "Uploading the artifact": new name `<statement prefix><project>-<digest>`, plus one sentence that functions over the same package share one artifact. Dbt level only, no driver internals. `design/udfs.md` is not touched (separate PR track); this document is the only file added under `design/`. |
 
@@ -354,7 +354,7 @@ The listing is read once, so a plan lookup can miss an artifact that appeared af
 | Every caller has its own traceback | waiters raise a fresh wrapper, never the shared object | two waiters' `__traceback__` objects differ and neither contains the other thread's frames |
 | Waiters can't hang, even on `KeyboardInterrupt`/`SystemExit` in the leader | `except BaseException` + `finally: done.set()` | `compute` raises `KeyboardInterrupt` (leader thread); waiter returns promptly (join with timeout) |
 | A hung `compute` can't hang waiters forever | `done.wait(remaining)` against `started_at + compute_timeout` | `compute` blocks on an `Event`; waiter with a tiny timeout gets `ComputeTimeout`; the cell is unchanged, and releasing the leader later lets a new `get` return the value |
-| One file hashed once; copied packages share an upload | digests keyed by resolved path; uploads keyed by name | `PackageArtifacts` with fake driver: 2 paths, identical bytes, N threads → 1 `create`, 1 hash per path; `create` receives `upload_timeout=UPLOAD_TIMEOUT_SECS` |
+| One file hashed once; copied packages share an upload | digests keyed by resolved path; uploads keyed by `ArtifactDigest` (a `NewType` only `file_digest` makes) | `PackageArtifacts` with fake driver: 2 paths, identical bytes, N threads → 1 `create`, 1 hash per path; `create` receives `upload_timeout=UPLOAD_TIMEOUT_SECS` |
 | Artifacts are listed once per run, whatever the number of functions | listing is a `SingleFlightCell` | N threads call `find` → 1 `list` call; a failing `list` fails all N, with 1 call |
 | This build's own uploads are visible to later plans | `ensure` records before returning | `ensure` then `find` for the same name returns the uploaded artifact with no second `list` |
 | Nothing dropped before the shared artifact resolves | `apply_function` order: `ensure` → drop → create (unchanged) | existing ordering tests plus: shared upload failure → no `drop function` event for any thread |
@@ -379,17 +379,17 @@ step and hold the commit (and any push, which uses `git push-external`) until yo
    without the review discussion.
 1. **`Add SingleFlightCell and SingleFlightDict`**: `singleflight.py` + `tests/unit/test_singleflight.py` (invariants rows 1-6). Nothing else touched.
 2. **`Hash, list and upload function packages once per build`**: `package_artifacts.py` + `UPLOAD_TIMEOUT_SECS`, wired into
-   `impl.py` (`__init__`, `validate_function_config`, `plan_function_change`, `apply_function`); the artifact name still
-   includes the function at this point. Unit tests for the `PackageArtifacts` rows and ordering/per-invocation rows.
-3. **`Share one artifact between functions that use the same package`**: drop `function` from `artifact_display_name` (and fix
-   the tests that pass it: `test_name_follows_statement_naming_plus_digest`, the `package(...)` helper), the live functional test
-   (two models, one package), `MATERIALIZATIONS.md`, `changes/180.feature.md`.
+   `impl.py` (`__init__`, `validate_function_config`, `plan_function_change`, `apply_function`). The artifact name drops the
+   function in this commit too, since the upload table is keyed by `ArtifactDigest` and sharing needs one name per package
+   (functions over one package would otherwise plan a replace on every run). `ensure_artifact` takes a `FlinkArtifactParams`,
+   not the config dict. Unit tests for the `PackageArtifacts` rows and ordering/per-invocation rows; the live functional test
+   (two models, one package, `threads: 2`); `MATERIALIZATIONS.md`, `changes/180.feature.md`.
 
 **PR stacking.** The commits can ship as a stack of PRs, each based on the previous: design (commit 0) <- primitives (commit 1)
-<- dbt functionality (commits 2 and 3). Every PR needs a `changes/` fragment (CONTRIBUTING; CI blocks without one): the design
+<- dbt functionality (commit 2). Every PR needs a `changes/` fragment (CONTRIBUTING; CI blocks without one): the design
 one is committed; the primitives PR needs a `+singleflight.trivial.md`; the functionality PR amends `changes/180.feature.md`.
 Retarget each PR to `main` as its parent merges.
 
-Verify with `UV_NO_CONFIG=1 uv run ...` (unit tests, lint); live tests run with credentials once step 3 is staged.
+Verify with `UV_NO_CONFIG=1 uv run ...` (unit tests, lint); live tests run with credentials once step 2 is staged.
 
-Estimated size: ~150 lines primary code across commits 1-3; ~300 lines of tests; well within the PR limits.
+Estimated size: ~150 lines primary code across commits 1-2; ~300 lines of tests; well within the PR limits.

@@ -19,8 +19,9 @@ it. An artifact without it, or from another project, is never deleted by dbt.
 import hashlib
 import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NewType
 
 from confluent_sql import (
     ArtifactAlreadyExistsError,
@@ -40,6 +41,10 @@ ARTIFACT_FORMATS: dict[str, tuple[str, ArtifactContentFormat, ArtifactRuntimeLan
 
 _DIGEST_LENGTH = 16
 
+# Seconds the driver allows for transferring the package, passed explicitly so the timeouts
+# that wait on an upload (see `package_artifacts`) are sized from it rather than from a default.
+UPLOAD_TIMEOUT_SECS = 300
+
 
 def encode_description(project: str | None) -> str:
     """The description of an artifact dbt uploaded for `project`."""
@@ -57,18 +62,24 @@ def artifact_project(description: str | None) -> str | None:
     return body.get("project")
 
 
-def file_digest(path: Path) -> str:
+# The digest of a package file's content. Only `file_digest` makes one, so a value of this type
+# really is a content digest, and the places that key on "this content" accept nothing else.
+ArtifactDigest = NewType("ArtifactDigest", str)
+
+
+def file_digest(path: Path) -> ArtifactDigest:
     """A short, stable digest of a file's content."""
     sha = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             sha.update(chunk)
-    return sha.hexdigest()[:_DIGEST_LENGTH]
+    return ArtifactDigest(sha.hexdigest()[:_DIGEST_LENGTH])
 
 
-def artifact_display_name(prefix: str, project: str, function: str, digest: str) -> str:
-    """Name an artifact like a statement (`<prefix><project>-<function>`), plus the content digest."""
-    return f"{prefix}{project}-{function}-{digest}"
+def artifact_display_name(prefix: str, project: str, digest: ArtifactDigest) -> str:
+    """Name an artifact after its project and content (`<prefix><project>-<digest>`), not after a
+    function: every function that uses the same package shares the one artifact."""
+    return f"{prefix}{project}-{digest}"
 
 
 def find_artifact(conn: Connection, display_name: str, language: str) -> FlinkArtifact | None:
@@ -80,9 +91,32 @@ def find_artifact(conn: Connection, display_name: str, language: str) -> FlinkAr
     return None
 
 
-def ensure_artifact(conn: Connection, udf: dict[str, Any]) -> FlinkArtifact:
+@dataclass(frozen=True)
+class FlinkArtifactParams:
+    """What it takes to upload a function's package as an artifact."""
+
+    name: str  # the artifact's display name (see `artifact_display_name`)
+    digest: ArtifactDigest  # of the package, which `name` embeds
+    path: Path  # the package file
+    language: str  # the function's `language`, which decides the package's format
+    project: str | None  # the dbt project that uploads it, recorded as its `managed_by` marker
+
+    @classmethod
+    def from_udf(cls, udf: dict[str, Any]) -> "FlinkArtifactParams":
+        """The upload parameters in a validated `artifact_path` function config."""
+        return cls(
+            name=udf["artifact_name"],
+            # Set by `validate_function_config` from `file_digest`, so it is one.
+            digest=ArtifactDigest(udf["artifact_digest"]),
+            path=Path(udf["artifact_path"]),
+            language=udf["language"],
+            project=udf["project"],
+        )
+
+
+def ensure_artifact(conn: Connection, params: FlinkArtifactParams) -> FlinkArtifact:
     """Upload the package as a new artifact unless one for this content exists; return it."""
-    name, language = udf["artifact_name"], udf["language"]
+    name, language = params.name, params.language
     existing = find_artifact(conn, name, language)
     if existing is not None:
         return existing
@@ -90,10 +124,11 @@ def ensure_artifact(conn: Connection, udf: dict[str, Any]) -> FlinkArtifact:
     try:
         return conn.get_artifacts_api().create(
             name,
-            file=Path(udf["artifact_path"]),
+            file=params.path,
             content_format=content_format,
             runtime_language=runtime_language,
-            description=encode_description(udf["project"]),
+            description=encode_description(params.project),
+            upload_timeout=UPLOAD_TIMEOUT_SECS,
         )
     except ArtifactAlreadyExistsError:  # a concurrent run won the race
         existing = find_artifact(conn, name, language)
@@ -116,9 +151,7 @@ def find_unused_artifacts(
     may still be bound to an artifact, which is why deleting is left to the user.
     """
     ours = [
-        a
-        for a in conn.get_artifacts_api().list()
-        if artifact_project(a.description) == project
+        a for a in conn.get_artifacts_api().list() if artifact_project(a.description) == project
     ]
     if not ours:
         return []

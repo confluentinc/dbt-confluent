@@ -76,9 +76,9 @@ Repository = "https://github.com/confluentinc/dbt-confluent"
 confluent = "dbt.adapters.confluent"
 
 [tool.uv.sources]
-# Pinned to the confluent-sql#250 branch tip (Flink artifact API) so CI can resolve
-# create_artifact & friends -- remove once the needed confluent-sql release ships.
-confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "b4a49e56afe89e58c36c17daafd1dd677763a2f9" }
+# Pinned to a confluent-sql main commit (the Flink artifact API, #250, has merged) so CI can
+# resolve create_artifact & friends -- remove once the needed confluent-sql release ships.
+confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "436ca32c566cceaf0b876f917cc0522d872d3448" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
