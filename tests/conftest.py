@@ -15,6 +15,16 @@ from dbt.tests.fixtures.project import TestProjInfo
 pytest_plugins = ["dbt.tests.fixtures.project"]
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--keep-failed-resources",
+        action="store_true",
+        default=False,
+        help="Skip the end-of-class sweep of relations and statements for functional test "
+        "classes with a failed test, so the failure can be inspected on the cluster.",
+    )
+
+
 @pytest.fixture(scope="class")
 def unique_schema(request, prefix):
     """
