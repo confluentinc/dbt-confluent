@@ -14,23 +14,19 @@ whatever they upload.
 
 import os
 import tarfile
-import uuid
 import zipfile
 from pathlib import Path
 
 import pytest
-from confluent_sql import ArtifactNotFoundError
 
 from dbt.adapters.confluent import functions
 from dbt.adapters.confluent.connections import ConfluentConnectionManager
 from dbt.tests.util import run_dbt, run_dbt_and_capture, write_file
 from tests.functional.adapter._helpers import (
-    TEST_PROJECT_PREFIX,
     get_result_by_name,
-    sweep_stale_test_artifacts,
-    unique_test_project_name,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 FLAG = "enable_experimental_function_materialization"
 FUNCTION_NAME = "udf"
@@ -106,9 +102,6 @@ def submitted_sql(monkeypatch):
     return submitted
 
 
-_artifacts_swept = False
-
-
 def our_artifacts(project) -> list:
     """The artifacts dbt uploaded for this test class's project (see `FunctionFixtures`)."""
     stem = f"{project.adapter.config.project_name}-"
@@ -116,52 +109,25 @@ def our_artifacts(project) -> list:
     return [a for a in handle.get_artifacts_api().list() if a.display_name.startswith(stem)]
 
 
-def delete_our_artifacts(project) -> None:
-    with project.adapter.connection_named("delete_artifacts"):
-        handle = project.adapter.connections.get_thread_handle()
-        for artifact in our_artifacts(project):
-            try:
-                handle.get_artifacts_api().delete(artifact.id)
-            except ArtifactNotFoundError:
-                pass  # already gone
-
-
 class FunctionFixtures(ConfluentFixtures):
-    """Flag on by default (override `flags_enabled`), and the function dropped afterwards.
+    """Flag on by default (override `flags_enabled`).
 
-    Each class gets its own project name, so the artifacts it uploads (named after the project)
-    can't collide with, or be deleted by, another class or another developer's run of the same
-    one. Artifacts a failed cleanup leaves behind are swept, once per session, when they are old
-    enough that no live session can own them.
+    Artifacts are named after the dbt project, so each class's project name carries its isolation
+    namespace: the artifacts it uploads can't collide with another class's or another session's,
+    and the class sweep (see `sweep_test_resources`) deletes them along with its functions.
     """
 
     flags_enabled = True
 
-    @pytest.fixture(scope="class", autouse=True)
-    def sweep_stale_artifacts(self, project):
-        global _artifacts_swept
-        if not _artifacts_swept:
-            _artifacts_swept = True
-            sweep_stale_test_artifacts(project)
-
     @pytest.fixture(scope="class")
-    def project_config_update(self, project_config_update):
+    def project_config_update(self, project_config_update, relation_namespace):
         project_config_update = {
             **project_config_update,
-            "name": unique_test_project_name(self.NAME),
+            "name": f"{relation_namespace}{self.NAME}",
         }
         if self.flags_enabled:
             return {**project_config_update, "flags": {FLAG: True}}
         return project_config_update
-
-    @pytest.fixture(scope="class", autouse=True)
-    def drop_functions(self, project):
-        yield
-        for name in getattr(self, "FUNCTIONS", [FUNCTION_NAME]):
-            try:
-                project.run_sql(f"drop function if exists `{name}`")
-            except Exception:
-                pass  # best effort; nothing else to clean up for a function
 
 
 class TestFunctionRequiresBehaviorFlag(FunctionFixtures):
@@ -290,30 +256,20 @@ def write_package(project, version: str) -> None:
 @pytest.fixture(scope="class")
 def udf_artifact_ids(project, tmp_path_factory) -> list[str]:
     """Two different, valid Python UDF artifacts (both contain `EXAMPLE_UDF_CLASS`), uploaded for
-    the duration of the test class."""
+    the duration of the test class. Named in the class's namespace, so its sweep deletes them."""
     ids: list[str] = []
-    try:
-        with project.adapter.connection_named("upload_udf_artifacts"):
-            handle = project.adapter.connections.get_thread_handle()
-            for version in ("a", "b"):
-                path = tmp_path_factory.mktemp("udf") / "package.zip"
-                build_package(path, version)
-                artifact = handle.get_artifacts_api().create(
-                    f"{TEST_PROJECT_PREFIX}{uuid.uuid4().hex[:12]}",
-                    file=path,
-                    runtime_language="PYTHON",
-                )
-                ids.append(artifact.id)
-        yield ids
-    finally:
-        # A new connection: dbt closes the one above after each of its own invocations.
-        with project.adapter.connection_named("delete_udf_artifacts"):
-            handle = project.adapter.connections.get_thread_handle()
-            for artifact_id in ids:
-                try:
-                    handle.get_artifacts_api().delete(artifact_id)
-                except ArtifactNotFoundError:
-                    pass
+    with project.adapter.connection_named("upload_udf_artifacts"):
+        handle = project.adapter.connections.get_thread_handle()
+        for version in ("a", "b"):
+            path = tmp_path_factory.mktemp("udf") / "package.zip"
+            build_package(path, version)
+            artifact = handle.get_artifacts_api().create(
+                physical_name(f"udf_{version}"),
+                file=path,
+                runtime_language="PYTHON",
+            )
+            ids.append(artifact.id)
+    return ids
 
 
 @requires_global_key
@@ -345,7 +301,7 @@ class TestFunctionLifecycle(FunctionFixtures):
 
     @staticmethod
     def live_artifact_id(project) -> str:
-        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        rows = project.run_sql(f"describe function `{physical_name(FUNCTION_NAME)}`", fetch="all")
         return {str(name): str(value) for name, value in rows}["plugin id"]
 
     def test_1_create(self, project, plan_actions, udf_artifact_ids):
@@ -436,7 +392,7 @@ class TestFunctionRetryAfterFailedStatement(FunctionFixtures):
         self.configure(project, udf_artifact_ids[0], EXAMPLE_UDF_CLASS)
         run_dbt(["build"])
         assert plan_actions == ["create"]
-        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        rows = project.run_sql(f"describe function `{physical_name(FUNCTION_NAME)}`", fetch="all")
         assert {str(name): str(value) for name, value in rows}["plugin id"] == udf_artifact_ids[0]
 
 
@@ -505,13 +461,8 @@ class TestFunctionArtifactUpload(FunctionFixtures):
     def package(self, project):
         write_package(project, self.FIRST_VERSION)
 
-    @pytest.fixture(scope="class", autouse=True)
-    def delete_artifacts(self, project):
-        yield
-        delete_our_artifacts(project)
-
     def live_artifact_id(self, project) -> str:
-        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        rows = project.run_sql(f"describe function `{physical_name(FUNCTION_NAME)}`", fetch="all")
         return {str(name): str(value) for name, value in rows}["plugin id"]
 
     def artifacts(self, project) -> dict[str, str]:
@@ -638,12 +589,10 @@ class TestFunctionEmptyRun(FunctionFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def package(self, project):
         write_package(project, "empty-run")
-        yield
-        delete_our_artifacts(project)
 
     def test_empty_run_uploads_and_creates_the_function(self, project):
         run_dbt(["build", "--empty"])
-        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        rows = project.run_sql(f"describe function `{physical_name(FUNCTION_NAME)}`", fetch="all")
         assert {str(name): str(value) for name, value in rows}["plugin id"].startswith("cfa-")
 
 
@@ -671,8 +620,6 @@ class TestFunctionsSharingOnePackage(FunctionFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def package(self, project):
         write_package(project, "shared")
-        yield
-        delete_our_artifacts(project)
 
     def live_properties(self, project, function: str) -> dict[str, str]:
         rows = project.run_sql(f"describe function `{function}`", fetch="all")
