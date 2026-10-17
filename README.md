@@ -194,6 +194,22 @@ export CONFLUENT_GLOBAL_API_SECRET=xxx
 uv run pytest
 ```
 
+By default the functional tests run serially. They can run in parallel with
+[pytest-xdist](https://pytest-xdist.readthedocs.io/) (module-level: `--dist=loadfile` is already
+configured), since each test module namespaces its relations and statement names. A few tests
+(marked `serial`, e.g. those running `dbt docs generate`, which scans the whole environment)
+must not run in parallel and fail immediately if they are selected under `-n`:
+
+```bash
+# parallel-safe tests, in parallel
+uv run pytest tests/functional -n 4 -m "not serial"
+
+# the serial-only tests, on their own
+uv run pytest tests/functional -m serial
+```
+
+Parallel runs have been validated at `-n 4`.
+
 ## Versioning
 
 This adapter follows [semantic versioning](https://semver.org/) and is versioned independently from dbt Core. Compatibility with dbt Core is declared via dependencies (currently requires `dbt-core~=1.11`).

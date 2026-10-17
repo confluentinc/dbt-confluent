@@ -109,6 +109,9 @@ def sweep_leftovers_once():
 
 
 class _TableflowFixtures(ConfluentFixtures):
+    # Names are already globally unique (a per-session tag, swept below), so no namespacing.
+    NAMESPACE_RELATIONS = False
+
     @pytest.fixture(autouse=True)
     def clean_up(self, project, dbt_profile_data):
         # Suppress the per-test statement cleanup; class_clean_up below (each

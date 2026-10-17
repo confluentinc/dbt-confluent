@@ -34,6 +34,7 @@ from tests.functional.adapter._helpers import (
     delete_statements_by_label,
     drop_any_relation,
     get_result_by_name,
+    physical_name,
     relation,
     snapshot_query,
     sweep_stale_test_relations,
@@ -143,6 +144,9 @@ class _MTFixtures(ConfluentFixtures):
     establishing state), then deletes statements, then drops the source.
     """
 
+    # Names are already globally unique (a per-session tag, swept below), so no namespacing.
+    NAMESPACE_RELATIONS = False
+
     @pytest.fixture(autouse=True)
     def clean_up(self, project, dbt_profile_data):
         yield
@@ -181,6 +185,7 @@ class TestMaterializedTable(_MTFixtures):
     def models(self):
         yield _models(self.SRC, self.MT)
 
+    @pytest.mark.serial
     def test_materialized_table_created(self, project):
         results = run_dbt(["run"])
         names = {r.node.name for r in results}
@@ -955,7 +960,7 @@ class TestMaterializedTableInvalidConfig(ConfluentFixtures):
     def class_clean_up(self, project, dbt_profile_data):
         yield
         delete_statements_by_label(project, _statement_label(dbt_profile_data))
-        project.run_sql(f"drop table if exists {self.SRC}")
+        project.run_sql(f"drop table if exists {physical_name(self.SRC)}")
 
     def test_invalid_configs_error(self, project):
         results = run_dbt(["run"], expect_pass=False)

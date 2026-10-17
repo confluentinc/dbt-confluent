@@ -12,7 +12,10 @@ import pytest
 from confluent_sql.exceptions import StatementNotFoundError
 
 from dbt.tests.util import relation_from_name, run_dbt
-from tests.functional.adapter._helpers import get_result_by_name
+from tests.functional.adapter._helpers import (
+    get_result_by_name,
+    physical_name,
+)
 from tests.functional.adapter.fixtures import ClassScopedCleanup
 
 MY_STREAMING_SOURCE = """
@@ -127,7 +130,7 @@ class TestStatementProperties(ClassScopedCleanup):
             f"got properties: {stmt.properties}"
         )
 
-        relation = relation_from_name(project.adapter, "my_tuned_streaming_table")
+        relation = relation_from_name(project.adapter, physical_name("my_tuned_streaming_table"))
         result = project.run_sql(f"select * from {relation}", fetch="one")
         assert len(result[0]) == 2
 

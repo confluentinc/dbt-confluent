@@ -3,7 +3,11 @@ from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.tests.util import relation_from_name, run_dbt, run_dbt_and_capture
-from tests.functional.adapter._helpers import wait_for_absent, wait_for_terminal
+from tests.functional.adapter._helpers import (
+    physical_name,
+    wait_for_absent,
+    wait_for_terminal,
+)
 from tests.functional.adapter.fixtures import ClassScopedCleanup
 
 
@@ -95,6 +99,7 @@ class TestStreamingTable(ClassScopedCleanup):
             "models.yml": MODELS_YML,
         }
 
+    @pytest.mark.serial
     def test_materialized_source(self, project, run_dbt_results):
         result_names = {r.node.name for r in run_dbt_results}
         assert {
@@ -102,7 +107,7 @@ class TestStreamingTable(ClassScopedCleanup):
             "my_streaming_table",
             "my_custom_named_table",
         } == result_names
-        relation = relation_from_name(project.adapter, "my_streaming_table")
+        relation = relation_from_name(project.adapter, physical_name("my_streaming_table"))
         result = project.run_sql(f"select * from {relation}", fetch="one")
         assert len(result[0]) == 3
 

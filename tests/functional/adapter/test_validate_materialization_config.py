@@ -18,7 +18,10 @@ waiting on a CTAS statement to reach a terminal phase.
 import pytest
 
 from dbt.tests.util import run_dbt
-from tests.functional.adapter._helpers import get_result_by_name
+from tests.functional.adapter._helpers import (
+    get_result_by_name,
+    physical_name,
+)
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 BAD_CONFIG_TABLE = """
@@ -69,8 +72,8 @@ class TestValidateMaterializationConfig(ConfluentFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def setup_and_teardown(self, project):
         yield
-        project.run_sql("drop table if exists bad_config_table")
-        project.run_sql("drop view if exists overridden_config_view")
+        project.run_sql(f"drop table if exists {physical_name('bad_config_table')}")
+        project.run_sql(f"drop view if exists {physical_name('overridden_config_view')}")
 
     def test_unsupported_config_fails_the_run(self, project, run_dbt_results):
         result = get_result_by_name(run_dbt_results, "bad_config_table")

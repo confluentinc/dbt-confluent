@@ -3,6 +3,7 @@
 Underscore-prefixed so pytest does not treat it as a test module.
 """
 
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +16,9 @@ from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.adapters.confluent.utils import fetch_from_cursor
+
+# Env var carrying the per-module relation prefix; see fixtures.GENERATE_ALIAS_NAME_MACRO.
+ISOLATION_SLUG_ENV_VAR = "TEST_WORKER_ISOLATION_SLUG"
 
 # Leftovers younger than this may belong to a session still running on the
 # shared cluster (a full suite run takes minutes; two hours is a generous
@@ -89,6 +93,12 @@ def wait_for_running(adapter, name, timeout=60):
     raise AssertionError(
         f"Statement {name} never reached RUNNING in {timeout}s (last: {last_phase})"
     )
+
+
+def physical_name(name: str) -> str:
+    """The name of a model's relation in the shared schema: the model name plus the
+    current test module's namespace prefix (empty for classes that opt out)."""
+    return os.environ.get(ISOLATION_SLUG_ENV_VAR, "") + name
 
 
 def relation(project, name):
@@ -219,9 +229,10 @@ def assert_tables_absent(project, *names):
 
 def drop_tables(project, *names):
     """Drop each named table if it exists. Pairs with delete_statements_by_label
-    so teardown removes both the statements and the relations they created."""
+    so teardown removes both the statements and the relations they created. Names are model
+    names; each is resolved to its physical (namespaced) name."""
     for name in names:
-        project.run_sql(f"drop table if exists {name}")
+        project.run_sql(f"drop table if exists {physical_name(name)}")
 
 
 def drop_materialized_table(project, name, attempts=16, interval=10):

@@ -81,14 +81,23 @@ def check_relations_equal(adapter, relation_names, compare_snapshot_cols=False):
 
 
 class TestSingularTestsConfluent(ConfluentFixtures, BaseSingularTests):
+    # Relation names are fixed by the dbt-tests-adapter base class; no other module uses them.
+    NAMESPACE_RELATIONS = False
+
     NAME = "singular_tests"
 
 
 class TestEmptyConfluent(ConfluentFixtures, BaseEmpty):
+    # Relation names are fixed by the dbt-tests-adapter base class; no other module uses them.
+    NAMESPACE_RELATIONS = False
+
     pass
 
 
 class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEphemeral):
+    # Relation names are fixed by the dbt-tests-adapter base class; no other module uses them.
+    NAMESPACE_RELATIONS = False
+
     NAME = "singular_test_ephemeral"
 
     @pytest.fixture(scope="class")
@@ -112,6 +121,9 @@ class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEp
 
 
 class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
+    # Relation names are fixed by the dbt-tests-adapter base class; no other module uses them.
+    NAMESPACE_RELATIONS = False
+
     NAME = "ephemeral"
 
     @pytest.fixture(scope="class")
@@ -123,6 +135,7 @@ class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
             "schema.yml": schema_yml,
         }
 
+    @pytest.mark.serial
     def test_ephemeral(self, project):
         """This is overridden to use fetchall instead of fetchone, and a custom check for rels.
 
@@ -162,6 +175,9 @@ class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
 
 
 class TestGenericTestsConfluent(ConfluentFixtures, BaseGenericTests):
+    # Relation names are fixed by the dbt-tests-adapter base class; no other module uses them.
+    NAMESPACE_RELATIONS = False
+
     NAME = "generic_tests"
 
     @pytest.fixture(scope="class")
@@ -176,6 +192,9 @@ class TestGenericTestsConfluent(ConfluentFixtures, BaseGenericTests):
 
 
 class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMaterializations):
+    # Relation names are fixed by the dbt-tests-adapter base class; no other module uses them.
+    NAMESPACE_RELATIONS = False
+
     NAME = "base"
 
     @pytest.fixture(scope="class")
@@ -187,6 +206,7 @@ class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMateriali
             "schema.yml": schema_yml,
         }
 
+    @pytest.mark.serial
     def test_base(self, project):
         """Override the test to avoid incremental materialization.
 
