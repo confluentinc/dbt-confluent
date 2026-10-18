@@ -33,10 +33,10 @@ from tests.functional.adapter._helpers import (
     assert_tables_absent,
     capture_submitted_statement_properties,
     get_result_by_name,
-    physical_name,
     relation,
 )
-from tests.functional.adapter.fixtures import ClassScopedCleanup, ConfluentFixtures
+from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 # -- Reading the drift check's statements from capture_submitted_statement_properties --
 
@@ -131,8 +131,8 @@ def test_created_table_identifiers_rejects_an_unparseable_target():
 # which would turn a no-change second run into a restart and break
 # TestSchemaDriftDetection.test_second_run_skips. Keeping the source unbounded
 # keeps the INSERT RUNNING/healthy across re-runs, matching production, so the
-# second run skips. The autouse ConfluentFixtures.clean_up deletes every
-# statement by label after each test, so an unbounded source leaks no compute.
+# second run skips. ConfluentFixtures' class_clean_up deletes every
+# statement by label, so an unbounded source leaks no compute.
 SOURCE_FOR_DRIFT = """
 {{ config(
     materialized='streaming_source',
@@ -273,13 +273,8 @@ class TestSchemaDriftDetection(ConfluentFixtures):
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('source_for_drift')}")
-        project.run_sql(f"drop table if exists {physical_name('my_table')}")
-        project.run_sql(f"drop table if exists {physical_name('my_streaming_table')}")
-        project.run_sql(f"drop table if exists {physical_name('my_source')}")
 
     def test_second_run_skips(self, project, monkeypatch):
         """A second run with no changes must skip every model, not drift.
@@ -363,11 +358,8 @@ class TestTableFullRefreshFixesDrift(ConfluentFixtures):
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('source_for_drift')}")
-        project.run_sql(f"drop table if exists {physical_name('my_table')}")
 
     def test_full_refresh_fixes_drift(self, project):
         """After detecting drift, --full-refresh should succeed."""
@@ -423,11 +415,8 @@ class TestIgnoreSchemaDrift(ConfluentFixtures):
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('source_for_drift')}")
-        project.run_sql(f"drop table if exists {physical_name('my_table')}")
 
     def test_table_with_column_drift_ignored(self, project):
         """With on_schema_drift='ignore', column drift should not cause an error."""
@@ -463,7 +452,7 @@ select order_id, price from {{ ref('source_for_drift') }}
 """
 
 
-class TestStreamingRestartUnderIgnore(ClassScopedCleanup):
+class TestStreamingRestartUnderIgnore(ConfluentFixtures):
     """on_schema_drift='ignore' suppresses *benign* drift, not load-bearing
     column drift on the restart path.
 
@@ -476,8 +465,6 @@ class TestStreamingRestartUnderIgnore(ClassScopedCleanup):
     the restart path runs a columns-only drift check even under 'ignore' and
     surfaces a clear dbt drift error instead.
     """
-
-    TABLES = ["source_for_drift", "my_streaming_table"]
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -542,11 +529,8 @@ select order_id, price, order_time from {{ ref('source_for_drift') }}
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('source_for_drift')}")
-        project.run_sql(f"drop table if exists {physical_name('my_table')}")
 
     def test_invalid_on_schema_drift_value(self, project):
         """Invalid on_schema_drift value should raise an error."""
@@ -649,12 +633,8 @@ class TestDistributedBySchemaDrift(ConfluentFixtures):
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('source_for_drift')}")
-        project.run_sql(f"drop table if exists {physical_name('dist_drift_ctas')}")
-        project.run_sql(f"drop table if exists {physical_name('dist_drift_source')}")
 
     def test_second_run_skips(self, project):
         """Re-running with the same distribution must skip cleanly for both
@@ -734,11 +714,8 @@ class TestDistributedByDefaultIsNotChecked(ConfluentFixtures):
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('source_for_drift')}")
-        project.run_sql(f"drop table if exists {physical_name('no_dist_but_pk_table')}")
 
     def test_auto_assigned_distribution_does_not_drift(self, project):
         results = run_dbt(["run"])
@@ -824,12 +801,8 @@ class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('dry_run_types')}")
-        project.run_sql(f"drop table if exists {physical_name('dry_run_cte')}")
-        project.run_sql(f"drop table if exists {physical_name('forced_fallback')}")
 
     def test_unchanged_rerun_skips_on_both_paths(self, project, monkeypatch):
         monkeypatch.setattr(ConfluentAdapter, "get_columns_from_dry_run", _decline_forced_fallback)
@@ -921,11 +894,8 @@ class TestYmlStreamingTableNullabilityAndTypes(ConfluentFixtures):
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('source_for_drift')}")
-        project.run_sql(f"drop table if exists {physical_name('yml_streaming_table')}")
 
     def test_top_level_nullability_does_not_drift(self, project, monkeypatch):
         submitted = capture_submitted_statement_properties(monkeypatch)
@@ -1019,11 +989,8 @@ class TestProtobufMapKey(ConfluentFixtures):
         }
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('source_for_drift')}")
-        project.run_sql(f"drop table if exists {physical_name('protobuf_map_key')}")
 
     def test_unchanged_rerun_does_not_drift(self, project):
         results = run_dbt(["run"])
@@ -1074,10 +1041,8 @@ class TestNestedNullabilityDrifts(ConfluentFixtures):
         return {"nested_nullability.sql": NESTED_NULLABILITY_MODEL}
 
     @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
+    def setup(self, project):
         run_dbt(["run", "--full-refresh"])
-        yield
-        project.run_sql(f"drop table if exists {physical_name('nested_nullability')}")
 
     def test_dropping_a_nested_not_null_drifts(self, project):
         set_model_file(

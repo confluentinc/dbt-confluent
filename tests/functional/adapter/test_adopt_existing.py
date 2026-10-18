@@ -23,11 +23,11 @@ from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.tests.util import relation_from_name, run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
-    physical_name,
     wait_for_absent,
     wait_for_running,
 )
-from tests.functional.adapter.fixtures import ClassScopedCleanup
+from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 # Names a previously-deployed pipeline would already be using. They deliberately
 # differ from dbt's defaults (model name / `dbt-...-<project>-<model>`) so the
@@ -93,9 +93,8 @@ select order_id from {{ ref('my_streaming_source') }}
 """
 
 
-class TestAdoptExistingPipeline(ClassScopedCleanup):
+class TestAdoptExistingPipeline(ConfluentFixtures):
     NAME = "adoptpipe"
-    TABLES = [ALIAS, "my_streaming_source"]
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):

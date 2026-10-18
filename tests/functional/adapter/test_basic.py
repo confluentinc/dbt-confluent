@@ -91,8 +91,6 @@ class TestEmptyConfluent(ConfluentFixtures, BaseEmpty):
     # Relation names are fixed by the dbt-tests-adapter base class; no other module uses them.
     NAMESPACE_RELATIONS = False
 
-    pass
-
 
 class TestSingularTestsEphemeralConfluent(ConfluentFixtures, BaseSingularTestsEphemeral):
     # Relation names are fixed by the dbt-tests-adapter base class; no other module uses them.

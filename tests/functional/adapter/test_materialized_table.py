@@ -11,19 +11,16 @@ Notes:
 - ConfluentFixtures forces models +full_refresh=True, which would make every run a
   recreate. Classes that exercise the in-place evolution / no-op paths override
   project_config_update to drop that flag.
-- Each class uses unique relation names, suffixed with a per-session tag.
-- Because names are never reused, leftovers from failed teardowns or
-  hard-killed runs would accumulate forever. Every name therefore lives in a
-  reserved namespace (`dbttest_` prefix + fixed stem + hex epoch-seconds tag)
-  and the first class of each session sweeps stale matches — see
-  _MTFixtures.sweep_leftovers and _helpers.sweep_stale_test_relations.
+- Each class uses unique relation names, and isolation prefixes every relation
+  with a hash of the class and a per-session hex epoch-seconds tag.
+- Leftovers from failed teardowns or hard-killed runs are reclaimed by the stale-resource
+  sweep in isolation (sweep_test_resources).
 - Re-running within Flink's brief establishment window is transiently rejected
   ("being modified") and retried by the adapter (unit-tested in
   tests/unit/test_execute_query_with_retry.py); the back-to-back re-runs here
   don't hit that window in practice, so the tests run unquarantined.
 """
 
-import re
 import time
 
 import pytest
@@ -31,34 +28,13 @@ import pytest
 from dbt.tests.util import relation_from_name, run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
     capture_submitted_statement_properties,
-    delete_statements_by_label,
-    drop_any_relation,
     get_result_by_name,
-    physical_name,
     relation,
     snapshot_query,
-    sweep_stale_test_relations,
-    sweep_stale_test_statements,
     wait_for_snapshot_rows,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
-
-# Suffix for every relation name in this module, fresh per pytest session:
-# reusing a name across runs races Kafka's asynchronous topic deletion from
-# the previous run's teardown (see the module docstring). Hex epoch-seconds
-# rather than random hex so the leftover sweep can tell how old a stale name
-# is and leave concurrent sessions' relations alone.
-_RUN_TAG = format(int(time.time()), "08x")
-
-# The reserved name shape for every relation in this module. The sweeper
-# deletes ANY stale catalog object matching it, so it must never overlap a
-# name a human or another tool would plausibly pick: literal reserved prefix,
-# one of the fixed stems, and the hex session tag.
-_TEST_RELATION_RE = re.compile(
-    r"^dbttest_(?:mt|src)_(?:create|noop|alter|recreate|swguard|revswitch|contract"
-    r"|contractorder|contractnokey|stmtprops|stmtpropstuned|stmtpropsplain"
-    r"|typechange|frwipe)_(?P<tag>[0-9a-f]{8})$"
-)
+from tests.functional.adapter.isolation import physical_name
 
 # A bounded faker source (number-of-rows) so the MT refresh settles quickly.
 SOURCE = """
@@ -110,76 +86,21 @@ def _models(src, mt, mt_sql=MT):
     return {f"{src}.sql": SOURCE, f"{mt}.sql": mt_sql.replace("__SOURCE__", src)}
 
 
-def _statement_label(dbt_profile_data):
-    return dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-
-
-@pytest.fixture(scope="session")
-def sweep_leftovers_once():
-    """Session-lifetime one-shot gate for the leftover sweep.
-
-    The sweep needs dbt's `project` fixture, which is class-scoped, so it
-    can't run from a session fixture (or a pytest_sessionstart hook) directly.
-    Instead each class's sweep_leftovers fixture passes its project in, and
-    the closure ensures only the first call actually sweeps.
-    """
-    swept = False
-
-    def sweep(project):
-        nonlocal swept
-        if swept:
-            return
-        swept = True
-        sweep_stale_test_relations(project, _TEST_RELATION_RE, _RUN_TAG)
-        sweep_stale_test_statements(project)
-
-    return sweep
-
-
 class _MTFixtures(ConfluentFixtures):
     """Base for materialized_table test classes.
 
-    Overrides the per-test clean_up to do nothing: MT cleanup happens once, at
-    class teardown, which drops the MT first (waiting out the transient
-    establishing state), then deletes statements, then drops the source.
+    MT cleanup happens once, at class teardown (isolation's class_clean_up), which drops
+    the MT first (waiting out the transient establishing state), then deletes statements,
+    then drops the source.
     """
-
-    # Names are already globally unique (a per-session tag, swept below), so no namespacing.
-    NAMESPACE_RELATIONS = False
-
-    @pytest.fixture(autouse=True)
-    def clean_up(self, project, dbt_profile_data):
-        yield
-
-    @pytest.fixture(autouse=True, scope="class")
-    def sweep_leftovers(self, project, sweep_leftovers_once):
-        # Once per pytest session (this class fixture bridges the class-scoped
-        # `project` to the session-scoped one-shot gate): reclaim relations
-        # and statements leaked by previous sessions' failed teardowns or
-        # hard-killed runs. Old-tag names are never recreated, so sweeping
-        # them cannot race anything this session does.
-        sweep_leftovers_once(project)
-
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        # Only delete statements once the relation is confirmed gone; if the
-        # drop kept failing, leave the statements too as a debugging trail —
-        # a later session's sweep_leftovers reclaims the lot once it ages
-        # past the concurrency gate. drop_any_relation rather than the MT
-        # drop because a class can end with the name held by a regular table
-        # (e.g. the switch-guard error path).
-        if drop_any_relation(project, self.MT):
-            delete_statements_by_label(project, _statement_label(dbt_profile_data))
-        project.run_sql(f"drop table if exists {self.SRC}")
 
 
 class TestMaterializedTable(_MTFixtures):
     """Happy path: the MT is created and is queryable."""
 
     NAME = "mattable"
-    SRC = f"dbttest_src_create_{_RUN_TAG}"
-    MT = f"dbttest_mt_create_{_RUN_TAG}"
+    SRC = "src_create"
+    MT = "mt_create"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -193,7 +114,7 @@ class TestMaterializedTable(_MTFixtures):
         for r in results:
             assert r.status.name == "Success"
 
-        rel = relation_from_name(project.adapter, self.MT)
+        rel = relation_from_name(project.adapter, physical_name(self.MT))
         project.run_sql(f"select order_id, price from {rel} limit 1", fetch="one")
 
         catalog = run_dbt(["docs", "generate"])
@@ -277,9 +198,9 @@ class TestMaterializedTableWithContract(_MTFixtures):
     keyless, non-grouping source, which must not get a PRIMARY KEY at all."""
 
     NAME = "matcontract"
-    SRC = f"dbttest_src_contractnokey_{_RUN_TAG}"
-    MT = f"dbttest_mt_contract_{_RUN_TAG}"
-    MT_NO_CONTRACT = f"dbttest_mt_contractnokey_{_RUN_TAG}"
+    SRC = "src_contractnokey"
+    MT = "mt_contract"
+    MT_NO_CONTRACT = "mt_contractnokey"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -294,32 +215,22 @@ class TestMaterializedTableWithContract(_MTFixtures):
             ),
         }
 
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        # Only delete statements once the contract MT is confirmed gone; see
-        # _MTFixtures.class_clean_up. MT_NO_CONTRACT is additional to that
-        # base cleanup, dropped unconditionally; both MTs share self.SRC, so
-        # it's dropped once, after both.
-        if drop_any_relation(project, self.MT):
-            delete_statements_by_label(project, _statement_label(dbt_profile_data))
-        drop_any_relation(project, self.MT_NO_CONTRACT)
-        project.run_sql(f"drop table if exists {self.SRC}")
-
     def test_contract_renders_primary_key(self, project):
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results), (
             "dbt run failed for a materialized_table with an enforced contract"
         )
 
-        ddl_rows = project.run_sql(f"SHOW CREATE MATERIALIZED TABLE {self.MT}", fetch="all")
+        ddl_rows = project.run_sql(
+            f"SHOW CREATE MATERIALIZED TABLE {physical_name(self.MT)}", fetch="all"
+        )
         ddl = ddl_rows[0][0]
         assert f"PRIMARY KEY (`{MT_CONTRACT_PK_COLUMN}`) NOT ENFORCED" in ddl, (
             f"Expected primary key constraint not found in materialized table DDL:\n{ddl}"
         )
 
         no_contract_ddl_rows = project.run_sql(
-            f"SHOW CREATE MATERIALIZED TABLE {self.MT_NO_CONTRACT}", fetch="all"
+            f"SHOW CREATE MATERIALIZED TABLE {physical_name(self.MT_NO_CONTRACT)}", fetch="all"
         )
         no_contract_ddl = no_contract_ddl_rows[0][0]
         assert "PRIMARY KEY" not in no_contract_ddl.upper(), (
@@ -374,8 +285,8 @@ class TestMaterializedTableContractColumnReorder(_MTFixtures):
     definitions."""
 
     NAME = "matcontractorder"
-    SRC = f"dbttest_src_contractorder_{_RUN_TAG}"
-    MT = f"dbttest_mt_contractorder_{_RUN_TAG}"
+    SRC = "src_contractorder"
+    MT = "mt_contractorder"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -395,7 +306,7 @@ class TestMaterializedTableContractColumnReorder(_MTFixtures):
             "is likely being bound positionally instead of by declared name"
         )
 
-        rel = relation_from_name(project.adapter, self.MT)
+        rel = relation_from_name(project.adapter, physical_name(self.MT))
         rows = project.run_sql(
             f"select order_id, price, order_time from {rel} limit 1", fetch="one"
         )
@@ -457,8 +368,8 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
     NAME = "matnoop"
     # No streaming source -- the MT's own literal AS SELECT is bounded and
     # self-contained.
-    SRC = f"dbttest_src_noop_{_RUN_TAG}"
-    MT = f"dbttest_mt_noop_{_RUN_TAG}"
+    SRC = "src_noop"
+    MT = "mt_noop"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -473,7 +384,7 @@ class TestMaterializedTableUnchangedRerunNoop(_MTFixtures):
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results)
 
-        rel = relation_from_name(project.adapter, self.MT)
+        rel = relation_from_name(project.adapter, physical_name(self.MT))
 
         def row_count():
             # SNAPSHOT, not project.run_sql's default STREAMING_QUERY: a
@@ -564,8 +475,8 @@ class TestMaterializedTableEvolvesInPlace(_MTFixtures):
     query-logic changes go through the identical path.)"""
 
     NAME = "matevolve"
-    SRC = f"dbttest_src_alter_{_RUN_TAG}"
-    MT = f"dbttest_mt_alter_{_RUN_TAG}"
+    SRC = "src_alter"
+    MT = "mt_alter"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -589,7 +500,7 @@ class TestMaterializedTableEvolvesInPlace(_MTFixtures):
         assert all(r.status.name == "Success" for r in results)
 
         # The added column is present -> the table evolved.
-        rel = relation_from_name(project.adapter, self.MT)
+        rel = relation_from_name(project.adapter, physical_name(self.MT))
         project.run_sql(f"select order_id, price, order_time from {rel} limit 1", fetch="one")
 
 
@@ -598,8 +509,8 @@ class TestMaterializedTableFullRefreshRecreates(_MTFixtures):
     distribution, which can't be altered in place)."""
 
     NAME = "matfr"
-    SRC = f"dbttest_src_recreate_{_RUN_TAG}"
-    MT = f"dbttest_mt_recreate_{_RUN_TAG}"
+    SRC = "src_recreate"
+    MT = "mt_recreate"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -649,8 +560,8 @@ class TestMaterializedTableFullRefreshWipesOldData(_MTFixtures):
     # No streaming source is involved -- both datasets are literal SELECTs,
     # so nothing but the MT's own AS SELECT can supply the batch marker that
     # distinguishes "old" data from "new".
-    SRC = f"dbttest_src_frwipe_{_RUN_TAG}"
-    MT = f"dbttest_mt_frwipe_{_RUN_TAG}"
+    SRC = "src_frwipe"
+    MT = "mt_frwipe"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -660,7 +571,7 @@ class TestMaterializedTableFullRefreshWipesOldData(_MTFixtures):
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results)
 
-        rel = relation_from_name(project.adapter, self.MT)
+        rel = relation_from_name(project.adapter, physical_name(self.MT))
         # A successful CREATE OR ALTER only means the DDL was accepted, not
         # that the (bounded, literal) query has finished landing its row yet
         # -- wait for it, in SNAPSHOT mode so we never see a preliminary
@@ -721,8 +632,8 @@ class TestMaterializedTableBreakingTypeChangeRequiresFullRefresh(_MTFixtures):
     --full-refresh must drop and recreate the table with the new type."""
 
     NAME = "mttypechange"
-    SRC = f"dbttest_src_typechange_{_RUN_TAG}"
-    MT = f"dbttest_mt_typechange_{_RUN_TAG}"
+    SRC = "src_typechange"
+    MT = "mt_typechange"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -762,7 +673,7 @@ class TestMaterializedTableBreakingTypeChangeRequiresFullRefresh(_MTFixtures):
         results = run_dbt(["run", "--full-refresh", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
 
-        rel = relation_from_name(project.adapter, self.MT)
+        rel = relation_from_name(project.adapter, physical_name(self.MT))
         # Wait for the recreated table to actually produce a row before
         # reading it -- see the note in TestMaterializedTableFullRefreshWipesOldData.
         rows = wait_for_snapshot_rows(project, f"select order_id, price from {rel} limit 1")
@@ -799,8 +710,8 @@ class TestMaterializedTableSwitchGuard(_MTFixtures):
     its statements) through the regular drop path and creates the MT."""
 
     NAME = "matswitch"
-    SRC = f"dbttest_src_swguard_{_RUN_TAG}"
-    MT = f"dbttest_mt_swguard_{_RUN_TAG}"
+    SRC = "src_swguard"
+    MT = "mt_swguard"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -834,7 +745,7 @@ class TestMaterializedTableSwitchGuard(_MTFixtures):
         assert all(r.status.name == "Success" for r in results)
         row = project.run_sql(
             "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "
-            f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{self.MT}'",
+            f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{physical_name(self.MT)}'",
             fetch="one",
         )
         assert row is not None and row[0][0] == "YES"
@@ -858,8 +769,8 @@ class TestMaterializedTableReverseSwitch(_MTFixtures):
     so the recreate now succeeds outright."""
 
     NAME = "matrevswitch"
-    SRC = f"dbttest_src_revswitch_{_RUN_TAG}"
-    MT = f"dbttest_mt_revswitch_{_RUN_TAG}"
+    SRC = "src_revswitch"
+    MT = "mt_revswitch"
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -899,7 +810,7 @@ class TestMaterializedTableReverseSwitch(_MTFixtures):
         # The MT is gone and a regular table now exists under the same name.
         row = project.run_sql(
             "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "
-            f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{self.MT}'",
+            f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{physical_name(self.MT)}'",
             fetch="one",
         )
         assert row is not None and row[0][0] == "NO"
@@ -955,12 +866,6 @@ class TestMaterializedTableInvalidConfig(ConfluentFixtures):
             "mt_dist.sql": MT_INVALID_DISTRIBUTED_BY,
             "mt_unsupported_key.sql": MT_INVALID_UNSUPPORTED_KEY,
         }
-
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        delete_statements_by_label(project, _statement_label(dbt_profile_data))
-        project.run_sql(f"drop table if exists {physical_name(self.SRC)}")
 
     def test_invalid_configs_error(self, project):
         results = run_dbt(["run"], expect_pass=False)
@@ -1031,9 +936,9 @@ class TestMaterializedTableStatementProperties(_MTFixtures):
     """
 
     NAME = "mtstmtprops"
-    SRC = f"dbttest_src_stmtprops_{_RUN_TAG}"
-    MT_TUNED = f"dbttest_mt_stmtpropstuned_{_RUN_TAG}"
-    MT_PLAIN = f"dbttest_mt_stmtpropsplain_{_RUN_TAG}"
+    SRC = "src_stmtprops"
+    MT_TUNED = "mt_stmtpropstuned"
+    MT_PLAIN = "mt_stmtpropsplain"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -1042,14 +947,6 @@ class TestMaterializedTableStatementProperties(_MTFixtures):
             f"{self.MT_TUNED}.sql": MT_TUNED_STATEMENT_PROPERTIES.replace("__SOURCE__", self.SRC),
             f"{self.MT_PLAIN}.sql": MT_PLAIN_STATEMENT_PROPERTIES.replace("__SOURCE__", self.SRC),
         }
-
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        for mt in (self.MT_TUNED, self.MT_PLAIN):
-            drop_any_relation(project, mt)
-        delete_statements_by_label(project, _statement_label(dbt_profile_data))
-        project.run_sql(f"drop table if exists {self.SRC}")
 
     def test_statement_properties_land_on_the_ddl_statement(self, project, monkeypatch):
         captured = capture_submitted_statement_properties(monkeypatch)

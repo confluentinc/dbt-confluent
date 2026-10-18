@@ -4,11 +4,11 @@ from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.tests.util import relation_from_name, run_dbt, run_dbt_and_capture
 from tests.functional.adapter._helpers import (
-    physical_name,
     wait_for_absent,
     wait_for_terminal,
 )
-from tests.functional.adapter.fixtures import ClassScopedCleanup
+from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 
 # The shared ConfluentFixtures sets +full_refresh: True so the inherited dbt
@@ -82,9 +82,8 @@ models:
 """
 
 
-class TestStreamingTable(ClassScopedCleanup):
+class TestStreamingTable(ConfluentFixtures):
     NAME = "streaming"
-    TABLES = ["my_custom_named_table", "my_streaming_table", "my_streaming_source"]
 
     @pytest.fixture(scope="class")
     def run_dbt_results(self, project):
@@ -178,14 +177,13 @@ models:
 """
 
 
-class TestFullRefreshRecreatesStatement(ClassScopedCleanup):
+class TestFullRefreshRecreatesStatement(ConfluentFixtures):
     """A second `dbt run --full-refresh` must succeed against an existing
     deterministic statement: the old statement is deleted and a new one is
     submitted under the same name. Without delete-on-full-refresh the
     second run would fail with a name conflict."""
 
     NAME = "frrecreate"
-    TABLES = ["my_streaming_table", "my_streaming_source"]
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -217,14 +215,13 @@ class TestFullRefreshRecreatesStatement(ClassScopedCleanup):
         assert second.statement_id != first.statement_id
 
 
-class TestOrphanStatementCleanup(ClassScopedCleanup):
+class TestOrphanStatementCleanup(ConfluentFixtures):
     """If a statement already exists under the deterministic name but the
     backing table doesn't (e.g. table dropped externally), `dbt run` must
     delete the orphaned statement before submitting its own. Without orphan
     cleanup the run would fail with a name conflict."""
 
     NAME = "orphancl"
-    TABLES = ["my_streaming_table", "my_streaming_source"]
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -265,7 +262,7 @@ class TestOrphanStatementCleanup(ClassScopedCleanup):
         assert current.statement_id != planted_id
 
 
-class TestCrashRecoveryRestart(ClassScopedCleanup):
+class TestCrashRecoveryRestart(ConfluentFixtures):
     """Crash recovery (#33): if the table exists but the long-running
     INSERT statement is gone (e.g. dbt was killed between DDL and DML, or
     the statement was deleted externally), `dbt run` without --full-refresh
@@ -273,7 +270,6 @@ class TestCrashRecoveryRestart(ClassScopedCleanup):
     is preserved (no topic state lost)."""
 
     NAME = "crashrec"
-    TABLES = ["my_streaming_table", "my_streaming_source"]
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -362,7 +358,7 @@ class TestCrashRecoveryRestart(ClassScopedCleanup):
 TERMINAL_PLANT_SQL = "SHOW TABLES"
 
 
-class TestDeadStatementRestart(ClassScopedCleanup):
+class TestDeadStatementRestart(ConfluentFixtures):
     """Dead-statement recovery (half of #32): if the long-running INSERT
     statement is in a terminal phase (FAILED, STOPPED, COMPLETED, DELETED),
     `dbt run` without --full-refresh must replace it. The classifier doesn't
@@ -372,7 +368,6 @@ class TestDeadStatementRestart(ClassScopedCleanup):
     is rejected at validation time, before it can be persisted as FAILED)."""
 
     NAME = "deadstmt"
-    TABLES = ["my_streaming_table", "my_streaming_source"]
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):

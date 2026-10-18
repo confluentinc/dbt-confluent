@@ -195,10 +195,10 @@ uv run pytest
 ```
 
 By default the functional tests run serially. They can run in parallel with
-[pytest-xdist](https://pytest-xdist.readthedocs.io/) (module-level: `--dist=loadfile` is already
-configured), since each test module namespaces its relations and statement names. A few tests
-(marked `serial`, e.g. those running `dbt docs generate`, which scans the whole environment)
-must not run in parallel and fail immediately if they are selected under `-n`:
+[pytest-xdist](https://pytest-xdist.readthedocs.io/) (class-level: `--dist=loadscope` is already
+configured), since each test class namespaces its relations and statement names. A few tests
+(marked `serial`, e.g. those running `dbt docs generate`, which scans the whole environment, or
+classes that opt out of relation namespacing with `NAMESPACE_RELATIONS = False`) must not run in parallel and fail immediately if they are selected under `-n`:
 
 ```bash
 # parallel-safe tests, in parallel

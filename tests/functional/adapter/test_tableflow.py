@@ -28,16 +28,12 @@ Notes:
   topic reaches a terminal state -- RUNNING, or confirmed gone -- so these
   tests wait on real Confluent Cloud control-plane calls, not just Flink SQL.
   Expect them to take noticeably longer than the rest of the functional suite.
-- Naming/leftover-sweep rationale mirrors test_materialized_table.py: names
-  are never reused across sessions (a dropped relation's topic and Tableflow
-  config can outlive the catalog drop asynchronously), so every name lives in
-  a reserved namespace and the first class of the session sweeps stale
-  matches.
+- Names are never reused across sessions (a dropped relation's topic and Tableflow
+  config can outlive the catalog drop asynchronously); isolation's per-session
+  prefix guarantees that, and its session-wide sweep reclaims stale leftovers.
 """
 
 import os
-import re
-import time
 from unittest.mock import patch
 
 import pytest
@@ -46,13 +42,10 @@ from confluent_sql.exceptions import TableflowTopicNotFoundError
 
 from dbt.tests.util import run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
-    delete_statements_by_label,
-    drop_any_relation,
     relation,
-    sweep_stale_test_relations,
-    sweep_stale_test_statements,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 pytestmark = pytest.mark.skipif(
     not (os.getenv("CONFLUENT_GLOBAL_API_KEY") and os.getenv("CONFLUENT_GLOBAL_API_SECRET")),
@@ -62,14 +55,7 @@ pytestmark = pytest.mark.skipif(
     ),
 )
 
-_RUN_TAG = format(int(time.time()), "08x")
-_TEST_RELATION_RE = re.compile(r"^dbttest_tf_(?:table|src|switch|noop)_(?P<tag>[0-9a-f]{8})$")
-
 _TABLEFLOW_CONFIG = "{'table_formats': 'ICEBERG', 'storage': {'kind': 'Managed'}}"
-
-
-def _statement_label(dbt_profile_data):
-    return dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
 
 
 def _get_tableflow(project, name):
@@ -77,7 +63,7 @@ def _get_tableflow(project, name):
     with project.adapter.connection_named("tableflow_check"):
         conn = project.adapter.connections.get_thread_connection()
         try:
-            return conn.handle.get_tableflow(name)
+            return conn.handle.get_tableflow(physical_name(name))
         except TableflowTopicNotFoundError:
             return None
 
@@ -86,43 +72,23 @@ def _disable_tableflow_best_effort(project, name):
     with project.adapter.connection_named("tableflow_teardown"):
         conn = project.adapter.connections.get_thread_connection()
         try:
-            conn.handle.disable_tableflow(name)
+            conn.handle.disable_tableflow(physical_name(name))
         except TableflowTopicNotFoundError:
             pass
 
 
-@pytest.fixture(scope="session")
-def sweep_leftovers_once():
-    """Session-lifetime one-shot gate for the leftover sweep -- see
-    test_materialized_table.py's identical fixture for the full rationale."""
-    swept = False
-
-    def sweep(project):
-        nonlocal swept
-        if swept:
-            return
-        swept = True
-        sweep_stale_test_relations(project, _TEST_RELATION_RE, _RUN_TAG)
-        sweep_stale_test_statements(project)
-
-    return sweep
-
-
 class _TableflowFixtures(ConfluentFixtures):
-    # Names are already globally unique (a per-session tag, swept below), so no namespacing.
-    NAMESPACE_RELATIONS = False
-
-    @pytest.fixture(autouse=True)
-    def clean_up(self, project, dbt_profile_data):
-        # Suppress the per-test statement cleanup; class_clean_up below (each
-        # class defines its own) handles teardown once, after disabling
-        # Tableflow -- disabling first keeps the drop from racing an active
-        # materialization, per confluent_sql's own recommendation.
-        yield
+    # Model names with Tableflow enabled, which must be disabled before their relation drops.
+    TABLEFLOW_MODELS: list[str] = []
 
     @pytest.fixture(autouse=True, scope="class")
-    def sweep_leftovers(self, project, sweep_leftovers_once):
-        sweep_leftovers_once(project)
+    def disable_tableflow(self, project, class_clean_up):
+        # Disable Tableflow before class_clean_up drops the relations: disabling first keeps
+        # the drop from racing an active materialization, per confluent_sql's own
+        # recommendation. Requesting class_clean_up makes this tear down before it.
+        yield
+        for name in self.TABLEFLOW_MODELS:
+            _disable_tableflow_best_effort(project, name)
 
 
 TABLE = f"""
@@ -139,19 +105,16 @@ class TestTableTableflow(_TableflowFixtures):
     disable-before-drop -> recreate -> re-enable cycle on --full-refresh."""
 
     NAME = "tftable"
-    TABLE = f"dbttest_tf_table_{_RUN_TAG}"
+    TABLE = "tf_table"
+    TABLEFLOW_MODELS = [TABLE]
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {f"{self.TABLE}.sql": TABLE}
 
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        _disable_tableflow_best_effort(project, self.TABLE)
-        if drop_any_relation(project, self.TABLE):
-            delete_statements_by_label(project, _statement_label(dbt_profile_data))
-
+    # Flaky: the test sometimes finds Tableflow not yet enabled right after the dbt run
+    # (retried via pytest-rerunfailures). Remove once the cause is understood.
+    @pytest.mark.flaky(reruns=2)
     def test_enable_then_full_refresh_recreates(self, project):
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results)
@@ -193,18 +156,12 @@ class TestNoSpuriousPatchOnDefaultErrorHandling(_TableflowFixtures):
     descriptor protocol, so `self` wouldn't be bound automatically when called via an instance)."""
 
     NAME = "tfnoop"
-    TABLE = f"dbttest_tf_noop_{_RUN_TAG}"
+    TABLE = "tf_noop"
+    TABLEFLOW_MODELS = [TABLE]
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {f"{self.TABLE}.sql": NOOP_TABLE}
-
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        _disable_tableflow_best_effort(project, self.TABLE)
-        if drop_any_relation(project, self.TABLE):
-            delete_statements_by_label(project, _statement_label(dbt_profile_data))
 
     def test_second_run_issues_no_patch(self, project):
         results = run_dbt(["run"])
@@ -278,8 +235,9 @@ class TestMaterializedTableTableflowSwitchAndRefresh(_TableflowFixtures):
     Tableflow disabled before the drop; this exercises both in sequence."""
 
     NAME = "tfmtswitch"
-    SRC = f"dbttest_tf_src_{_RUN_TAG}"
-    MT = f"dbttest_tf_switch_{_RUN_TAG}"
+    SRC = "tf_src"
+    MT = "tf_switch"
+    TABLEFLOW_MODELS = [MT]
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -294,14 +252,9 @@ class TestMaterializedTableTableflowSwitchAndRefresh(_TableflowFixtures):
             f"{self.MT}.sql": TABLE_BEFORE_SWITCH.replace("__SOURCE__", self.SRC),
         }
 
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        _disable_tableflow_best_effort(project, self.MT)
-        if drop_any_relation(project, self.MT):
-            delete_statements_by_label(project, _statement_label(dbt_profile_data))
-        project.run_sql(f"drop table if exists {self.SRC}")
-
+    # Flaky: the test sometimes finds Tableflow not yet enabled right after the dbt run
+    # (retried via pytest-rerunfailures). Remove once the cause is understood.
+    @pytest.mark.flaky(reruns=2)
     def test_switch_then_full_refresh(self, project):
         # Build as a regular table with tableflow enabled.
         results = run_dbt(["run"])

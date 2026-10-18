@@ -3,10 +3,8 @@
 import pytest
 
 from dbt.tests.util import run_dbt
-from tests.functional.adapter._helpers import (
-    physical_name,
-)
 from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 # Test for issue with window functions producing NOT NULL constraints
 # in FULL_DATA_TYPE which break CAST expressions in get_empty_schema_sql
@@ -92,12 +90,6 @@ class TestWindowFunctionConstraintsInDataType(ConfluentFixtures):
             "window_table.sql": STREAMING_TABLE_WITH_WINDOW_FUNCTIONS,
             "models.yml": WINDOW_TABLE_MODELS_YML,
         }
-
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        yield
-        project.run_sql(f"drop table if exists {physical_name('source_for_window_test')}")
-        project.run_sql(f"drop table if exists {physical_name('window_table')}")
 
     def test_constraint_in_data_type_error(self, project):
         """Should error with clear message when constraints are in data_type field."""
@@ -185,12 +177,6 @@ class TestModelLevelPrimaryKey(ConfluentFixtures):
             "models.yml": PK_MODELS_YML,
         }
 
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        yield
-        project.run_sql(f"drop table if exists {physical_name('pk_streaming_table')}")
-        project.run_sql(f"drop table if exists {physical_name('pk_source')}")
-
     def test_model_level_primary_key_renders_correctly(self, project):
         results = run_dbt(["run"])
         assert all(r.status == "success" for r in results), (
@@ -255,12 +241,6 @@ class TestDistributedByHash(ConfluentFixtures):
             "dist_streaming_table.sql": DIST_STREAMING_TABLE,
             "models.yml": DIST_MODELS_YML,
         }
-
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        yield
-        project.run_sql(f"drop table if exists {physical_name('dist_streaming_table')}")
-        project.run_sql(f"drop table if exists {physical_name('dist_source')}")
 
     def test_distributed_by_hash_clause_in_ddl(self, project):
         results = run_dbt(["run"])
