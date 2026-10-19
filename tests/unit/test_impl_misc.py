@@ -190,13 +190,6 @@ class TestGetStatementName:
         adapter = self._adapter_with_credentials(mocker, "eng-a-")
         assert adapter.get_statement_name("model", "proj", suffix="-ddl") == "eng-a-proj-model-ddl"
 
-    def test_resource_name_prefix_with_underscore_is_sanitized(self, mocker):
-        adapter = self._adapter_with_credentials(mocker, "eng_a_")
-        name = adapter.get_statement_name("model", "proj")
-        # '_' is illegal in statement names: replaced with '-' plus a hash suffix
-        assert name.startswith("eng-a-proj-model-")
-        assert len(name) == len("eng-a-proj-model-") + 6
-
     def test_builds_name_from_project_and_model(self, mocker):
         adapter = self._adapter_with_credentials(mocker, "dbt-")
         name = adapter.get_statement_name("my_model", "my_project")
@@ -244,8 +237,8 @@ class TestGetTestedModelRelation:
         [
             ("model.proj.orders", "", "orders"),
             ("model.proj.orders.v2", "", "orders_v2"),
-            ("model.proj.orders", "eng_a_", "eng_a_orders"),
-            ("model.proj.orders.v2", "eng_a_", "eng_a_orders_v2"),
+            ("model.proj.orders", "eng-a-", "eng-a-orders"),
+            ("model.proj.orders.v2", "eng-a-", "eng-a-orders_v2"),
         ],
     )
     def test_identifier_lookup(self, mocker, unique_id, resource_name_prefix, expected_identifier):
@@ -254,9 +247,9 @@ class TestGetTestedModelRelation:
         adapter.get_relation.assert_called_once_with("env", "cluster", expected_identifier)
 
     def test_missing_relation_raises(self, mocker):
-        adapter = self._adapter(mocker, "eng_a_")
+        adapter = self._adapter(mocker, "eng-a-")
         adapter.get_relation.return_value = None
-        with pytest.raises(DbtDatabaseError, match="'eng_a_orders'"):
+        with pytest.raises(DbtDatabaseError, match="'eng-a-orders'"):
             adapter.get_tested_model_relation("model.proj.orders", "env", "cluster")
 
 

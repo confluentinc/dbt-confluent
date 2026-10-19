@@ -94,7 +94,7 @@ my_project:
       resource_name_prefix: alice-
 ```
 
-The prefix is prepended to every topic and Flink statement name the project creates, including explicit `alias` and `statement_name` configs. It is empty by default, and sources are never prefixed. Leave it unset on the production target so existing and [adopted](MATERIALIZATIONS.md#streaming-table-adopting-existing-resources) names stay unchanged.
+The prefix is prepended to every topic and Flink statement name the project creates, including explicit `alias` and `statement_name` configs. It is empty by default, and sources are never prefixed. Because the same prefix must be valid in both topic and statement names, it may only contain lowercase letters, digits and hyphens, must start with a letter or digit, and can be at most 64 characters, anything else fails when the profile loads. Leave it unset on the production target so existing and [adopted](MATERIALIZATIONS.md#streaming-table-adopting-existing-resources) names stay unchanged.
 
 > [!WARNING]
 > Topic names get the prefix through the adapter's `generate_alias_name` macro. Overriding `generate_alias_name` in your project replaces it, so topics lose the prefix while statements keep it, and isolation silently breaks. We recommend not overriding it; if you must, prepend `target.resource_name_prefix` to the alias yourself.

@@ -39,6 +39,11 @@ from dbt.adapters.events.types import (
 from dbt.adapters.sql import SQLConnectionManager
 
 from .__version__ import version
+from .naming import (
+    MAX_RESOURCE_NAME_PREFIX_LENGTH,
+    is_resource_name_prefix_valid,
+    sanitize_statement_name,
+)
 from .utils import fetch_from_cursor
 
 if TYPE_CHECKING:
@@ -114,13 +119,21 @@ class ConfluentCredentials(Credentials):
     def __pre_deserialize__(cls, data):
         """
         Overridden to reject the removed `statement_name_prefix` key instead of
-        silently ignoring it.
+        silently ignoring it, and to reject a `resource_name_prefix` that isn't
+        valid in both statement and topic names.
         """
         data = super().__pre_deserialize__(data)
         if "statement_name_prefix" in data:
             raise DbtRuntimeError(
                 "`statement_name_prefix` has been removed; use `resource_name_prefix` instead. "
                 "Note that the new prefix applies to both statement and topic names."
+            )
+        prefix = data.get("resource_name_prefix", "")
+        if not is_resource_name_prefix_valid(prefix):
+            raise DbtRuntimeError(
+                f"Invalid resource_name_prefix '{prefix}': it may only contain lowercase "
+                "letters, digits and hyphens, must start with a letter or digit, and can be "
+                f"at most {MAX_RESOURCE_NAME_PREFIX_LENGTH} characters."
             )
         return data
 
@@ -494,7 +507,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
             # Use deterministic name if provided, otherwise fall back to UUID
             if statement_name is None:
                 prefix = connection.credentials.resource_name_prefix
-                statement_name = f"{prefix}{uuid.uuid4()}"
+                statement_name = sanitize_statement_name(f"{prefix}{uuid.uuid4()}")
 
             cursor = connection.handle.cursor(mode=resolved_mode)
             _execute_query_with_retry(
