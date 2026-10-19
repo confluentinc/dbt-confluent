@@ -409,10 +409,10 @@ class ConfluentAdapter(SQLAdapter):
         Called from Jinja macros via adapter.get_statement_name().
         Returns the final name ready for the Flink API.
         """
+        prefix = self.config.credentials.resource_name_prefix
         if statement_name_override:
-            name = f"{statement_name_override}{suffix}"
+            name = f"{prefix}{statement_name_override}{suffix}"
         else:
-            prefix = self.config.credentials.resource_name_prefix
             name = f"{prefix}{project_name}-{model_name}{suffix}"
         return sanitize_statement_name(name)
 

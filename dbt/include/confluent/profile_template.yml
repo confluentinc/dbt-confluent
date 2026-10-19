@@ -46,9 +46,9 @@ prompts:
     type: "string"
     default: 'streaming_query'
   resource_name_prefix:
-    hint: "Prefix for topic and statement names (project name is appended to statement names automatically)"
+    hint: "Optional prefix for topic and statement names (project name is appended to statement names automatically)"
     type: "string"
-    default: "dbt-"
+    default: ""
   statement_label:
     hint: "A user label applied to all statements"
     type: "string"

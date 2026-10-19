@@ -9,9 +9,9 @@ BASE_PROFILE = {"database": "env-123", "schema": "lkc-123", "organization_id": "
 
 
 class TestResourceNamePrefix:
-    def test_defaults_to_dbt(self):
+    def test_defaults_to_empty(self):
         credentials = ConfluentCredentials.from_dict(BASE_PROFILE)
-        assert credentials.resource_name_prefix == "dbt-"
+        assert credentials.resource_name_prefix == ""
 
     def test_custom_value(self):
         credentials = ConfluentCredentials.from_dict(

@@ -78,8 +78,9 @@ class ConfluentCredentials(Credentials):
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
     statement_label: str = "dbt-confluent"
     # Prepended to every relation (Kafka topic) name and Flink statement name,
-    # so several developers or CI runs can share one cluster without clashing.
-    resource_name_prefix: str = "dbt-"
+    # including explicit `alias` / `statement_name` configs, so several developers
+    # or CI runs can share one cluster without clashing.
+    resource_name_prefix: str = ""
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}
 

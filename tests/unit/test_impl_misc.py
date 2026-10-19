@@ -204,13 +204,19 @@ class TestGetStatementName:
         assert "my-project" in name
         assert "my-model" in name
 
-    def test_override_bypasses_prefix(self, mocker):
-        adapter = self._adapter_with_credentials(mocker, "dbt-")
+    def test_empty_prefix(self, mocker):
+        adapter = self._adapter_with_credentials(mocker, "")
+        assert adapter.get_statement_name("model", "proj") == "proj-model"
+
+    @pytest.mark.parametrize(
+        ("prefix", "expected"), [("", "custom-name"), ("eng-a-", "eng-a-custom-name")]
+    )
+    def test_override_is_prefixed(self, mocker, prefix, expected):
+        adapter = self._adapter_with_credentials(mocker, prefix)
         name = adapter.get_statement_name(
             "my_model", "my_project", statement_name_override="custom-name"
         )
-        assert "custom-name" in name
-        assert "my-project" not in name
+        assert name == expected
 
     def test_suffix_appended(self, mocker):
         adapter = self._adapter_with_credentials(mocker, "dbt-")
@@ -218,11 +224,11 @@ class TestGetStatementName:
         assert name.endswith("-check") or "-check" in name
 
     def test_override_with_suffix(self, mocker):
-        adapter = self._adapter_with_credentials(mocker, "dbt-")
+        adapter = self._adapter_with_credentials(mocker, "eng-a-")
         name = adapter.get_statement_name(
             "model", "proj", suffix="-check", statement_name_override="base"
         )
-        assert "base-check" in name
+        assert name == "eng-a-base-check"
 
 
 class TestGetTestedModelRelation:
