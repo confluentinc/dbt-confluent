@@ -109,6 +109,20 @@ class ConfluentCredentials(Credentials):
         else:
             return (*keys, "cloud_provider", "cloud_region")
 
+    @classmethod
+    def __pre_deserialize__(cls, data):
+        """
+        Overridden to reject the removed `statement_name_prefix` key instead of
+        silently ignoring it.
+        """
+        data = super().__pre_deserialize__(data)
+        if "statement_name_prefix" in data:
+            raise DbtRuntimeError(
+                "`statement_name_prefix` has been removed; use `resource_name_prefix` instead. "
+                "Note that the new prefix applies to both statement and topic names."
+            )
+        return data
+
 
 def _execute_query_with_retry(
     cursor: "confluent_sql.Cursor",
