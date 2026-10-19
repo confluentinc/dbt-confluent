@@ -730,14 +730,15 @@ class ConfluentAdapter(SQLAdapter):
         so we can't look up nodes directly. Instead, we extract the model
         identifier from the unique_id (format: model.<package>.<name>)
         and find the relation in the adapter's cache. The profile's
-        resource_name_prefix is prepended to mirror confluent__generate_alias_name.
+        resource_name_prefix is prepended, with hyphens as underscores, to mirror
+        confluent__generate_alias_name.
         """
         # unique_id format:
         #   non-versioned: model.<package>.<name>
         #   versioned:     model.<package>.<name>.v<version>
         _, _, name, *v = tested_node_unique_id.split(".")
         version = f"_{v[0]}" if v and v[0].startswith("v") else ""
-        prefix = self.config.credentials.resource_name_prefix
+        prefix = self.config.credentials.resource_name_prefix.replace("-", "_")
         identifier = f"{prefix}{name}{version}"
         relation = self.get_relation(database, schema, identifier)
         if relation is None:

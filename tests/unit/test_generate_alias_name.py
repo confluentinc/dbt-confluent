@@ -30,9 +30,21 @@ def _generate_alias_name(prefix, custom_alias_name, node_name="orders"):
     [
         ("", None, "orders"),
         ("", "adopted_orders", "adopted_orders"),
-        ("eng_a_", None, "eng_a_orders"),
-        ("eng_a_", "adopted_orders", "eng_a_adopted_orders"),
+        ("eng-a-", None, "eng_a_orders"),
+        ("eng-a-", "adopted_orders", "eng_a_adopted_orders"),
     ],
 )
 def test_prefix_applied_to_generated_and_custom_alias(prefix, custom_alias_name, expected):
     assert _generate_alias_name(prefix, custom_alias_name) == expected
+
+
+@pytest.mark.parametrize(
+    ("prefix", "expected"),
+    [
+        # Hyphens in the alias itself are left alone, with or without a prefix
+        ("", "orders-v2"),
+        ("eng-a-", "eng_a_orders-v2"),
+    ],
+)
+def test_only_prefix_hyphens_replaced(prefix, expected):
+    assert _generate_alias_name(prefix, "orders-v2") == expected

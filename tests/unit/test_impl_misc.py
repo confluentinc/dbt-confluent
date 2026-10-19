@@ -237,8 +237,8 @@ class TestGetTestedModelRelation:
         [
             ("model.proj.orders", "", "orders"),
             ("model.proj.orders.v2", "", "orders_v2"),
-            ("model.proj.orders", "eng-a-", "eng-a-orders"),
-            ("model.proj.orders.v2", "eng-a-", "eng-a-orders_v2"),
+            ("model.proj.orders", "eng-a-", "eng_a_orders"),
+            ("model.proj.orders.v2", "eng-a-", "eng_a_orders_v2"),
         ],
     )
     def test_identifier_lookup(self, mocker, unique_id, resource_name_prefix, expected_identifier):
@@ -249,7 +249,7 @@ class TestGetTestedModelRelation:
     def test_missing_relation_raises(self, mocker):
         adapter = self._adapter(mocker, "eng-a-")
         adapter.get_relation.return_value = None
-        with pytest.raises(DbtDatabaseError, match="'eng-a-orders'"):
+        with pytest.raises(DbtDatabaseError, match="'eng_a_orders'"):
             adapter.get_tested_model_relation("model.proj.orders", "env", "cluster")
 
 
