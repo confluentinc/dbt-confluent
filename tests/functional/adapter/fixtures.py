@@ -10,16 +10,20 @@ logger = logging.getLogger(__name__)
 
 
 class ConfluentFixtures:
+    # Empty by default, so tests use the plain model names that production
+    # (no prefix) uses. Subclasses testing the prefix itself override it.
+    RESOURCE_NAME_PREFIX = ""
+
     @pytest.fixture(scope="class")
     def dbt_profile_data(self, unique_schema, dbt_profile_target, profiles_config_update):
-        # We add a unique `resource_name_prefix` to each test class
+        # We add a unique `statement_label` to each test class
         # so that we can cleanup all created statements at the end.
         profile = {
             "test": {
                 "outputs": {
                     "default": {
                         **dbt_profile_target,
-                        "resource_name_prefix": "dbt-adapter-test-",
+                        "resource_name_prefix": self.RESOURCE_NAME_PREFIX,
                         "statement_label": f"dbt-test-{uuid4()}",
                     },
                 },

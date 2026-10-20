@@ -380,8 +380,9 @@ def sweep_stale_test_statements(
     """Delete statements leaked by previous test sessions.
 
     Statement labels are fresh UUIDs per test class, so a crashed run's
-    statements are only discoverable by the suite-reserved
-    `resource_name_prefix` every test profile sets. Deletes every statement
+    statements are only discoverable by name. Only test classes that set
+    `RESOURCE_NAME_PREFIX` get this suite-reserved prefix,
+    the rest run unprefixed and are not covered by this sweep. Deletes every statement
     under that prefix older than `min_age` (creation time from statement
     metadata; statements without one are left alone). Terminal statements
     are auto-purged by Confluent after 30 days anyway — the ones that matter
