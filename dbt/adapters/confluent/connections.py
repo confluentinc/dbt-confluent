@@ -554,8 +554,8 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 endpoint=credentials.endpoint,
                 database=credentials.schema,
                 http_user_agent=user_agent,
-                # INFORMATION_SCHEMA queries (especially the unified UNION ALL drift
-                # catalog) routinely take longer than the default 5s timeout on cold
+                # INFORMATION_SCHEMA queries (especially the drift check's UNION ALL
+                # queries) routinely take longer than the default 5s timeout on cold
                 # metadata lookups, surfacing as a "read operation timed out".
                 http_timeout_secs=60,
             )
