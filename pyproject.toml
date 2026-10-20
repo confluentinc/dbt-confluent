@@ -78,7 +78,7 @@ confluent = "dbt.adapters.confluent"
 [tool.uv.sources]
 # Pinned to a confluent-sql main commit (Flink artifact API) so CI can resolve
 # create_artifact & friends -- remove once the needed confluent-sql release ships.
-confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "58cd9cbe471add0584037fedd2b21a62bad13dbe" }
+confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "e5ea776466b90c534019a7c27667c6c13aa05504" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
@@ -118,6 +118,11 @@ pretty = true
 
 [tool.hatch.version]
 path = "dbt/adapters/confluent/__version__.py"
+
+[tool.hatch.metadata]
+# Needed while confluent-sql is pinned to a git branch (oauth-epic-integration) instead of a
+# published release. Remove once oauth support ships in a tagged confluent-sql version.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["dbt"]
