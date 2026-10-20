@@ -12,9 +12,11 @@ from confluent_sql.exceptions import (
     StatementNotFoundError,
 )
 from confluent_sql.types import ColumnTypeDefinition
+from dbt_common.behavior_flags import BehaviorFlag
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError, DbtRuntimeError
+from dbt_common.ui import warning_tag
 
 from dbt.adapters.base import BaseRelation, available
 from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_table
@@ -24,7 +26,7 @@ from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import tableflow
+from . import functions, tableflow
 from .dry_run_types import display_type, fitted_type
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
@@ -55,6 +57,8 @@ _KAFKA_BACKED_CONFIG_KEYS = frozenset({"distributed_by", "tableflow"})
 MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
     "table": _UNIVERSAL_CONFIG_KEYS | _KAFKA_BACKED_CONFIG_KEYS | {"on_schema_drift"},
     "view": _UNIVERSAL_CONFIG_KEYS,
+    # A function is pure metadata (like a view) with no Kafka topic or long-running statement.
+    "function": _UNIVERSAL_CONFIG_KEYS | {"language", "artifact_id", "class", "connections"},
     "streaming_source": _UNIVERSAL_CONFIG_KEYS
     | _KAFKA_BACKED_CONFIG_KEYS
     | {"connector", "with", "on_schema_drift"},
@@ -136,6 +140,9 @@ class _CleanupRegistry(threading.local):
         self.relations: list = []
 
 
+FUNCTION_MATERIALIZATION_FLAG = "enable_experimental_function_materialization"
+
+
 class DryRunColumns(NamedTuple):
     """The column types `get_columns_from_dry_run` resolves, keyed by name in query order."""
 
@@ -160,6 +167,34 @@ class ConfluentAdapter(SQLAdapter):
         # worker thread; _CleanupRegistry.__init__ gives each of those threads
         # its own empty list on first access.
         self._deferred_cleanups = _CleanupRegistry()
+
+    @property
+    def _behavior_flags(self) -> list[BehaviorFlag]:
+        return [
+            {
+                "name": FUNCTION_MATERIALIZATION_FLAG,
+                "default": False,
+                "source": "dbt-confluent",
+                "description": (
+                    "The `function` materialization (Flink UDFs) is experimental. Changing a "
+                    "function's config drops and re-creates it, and if the re-create fails the "
+                    "previous function is restored on a best-effort basis. It is "
+                    "disabled unless this flag is enabled."
+                ),
+                "docs_url": "https://github.com/confluentinc/dbt-confluent/blob/main/MATERIALIZATIONS.md#function",
+            }
+        ]
+
+    @available
+    def require_function_materialization_enabled(self) -> None:
+        """Raise unless the experimental `function` materialization flag is enabled."""
+        # .no_warn: dbt would otherwise add a "this will change" warning on top of our error.
+        if not getattr(self.behavior, FUNCTION_MATERIALIZATION_FLAG).no_warn:
+            raise CompilationError(
+                "The `function` materialization is experimental and disabled by default. "
+                f"To use it, set `{FUNCTION_MATERIALIZATION_FLAG}: true` under `flags:` in "
+                "dbt_project.yml."
+            )
 
     @classmethod
     def quote(cls, identifier: str) -> str:
@@ -895,6 +930,142 @@ class ConfluentAdapter(SQLAdapter):
                 f"materialization for Confluent Flink.\n"
                 f"Supported config options include: {', '.join(supported)}."
             )
+
+    @available
+    def validate_function_config(
+        self, model_config: Any, relation: BaseRelation
+    ) -> dict[str, Any]:
+        """Validate a `function` node's config; see `functions.validate_function_config`.
+
+        Unqualified connection names resolve against the function's own catalog and database.
+        """
+        return functions.validate_function_config(
+            model_config, cast(str, relation.database), cast(str, relation.schema)
+        )
+
+    @available
+    def describe_function(
+        self, relation: BaseRelation, compute_pool_id: str | None = None
+    ) -> functions.FunctionState | None:
+        """The live function at `relation`, or None if it doesn't exist.
+
+        The lookup runs on the function's `compute_pool_id` override (the connection default if
+        None), like the statements that create or drop it. See `functions.describe_function`.
+        This is the one `DESCRIBE`: pass its result to `plan_function_change` and
+        `apply_function`.
+        """
+        return functions.describe_function(self._function_executor(compute_pool_id), relation)
+
+    @available
+    def plan_function_change(
+        self, existing: functions.FunctionState | None, udf: dict[str, Any]
+    ) -> list[str] | None:
+        """Compare the live function (`describe_function`'s result) to the validated config `udf`.
+
+        See `functions.plan_function_change`.
+        """
+        return functions.plan_function_change(existing, udf)
+
+    def _function_executor(self, compute_pool_id: str | None) -> functions.FunctionExecutor:
+        """`self.execute` bound to a function's `compute_pool_id` override."""
+
+        def execute(sql: str, **kwargs: Any) -> tuple[AdapterResponse, "agate.Table"]:
+            return self.execute(sql, compute_pool_id=compute_pool_id, **kwargs)
+
+        return execute
+
+    @available
+    def plan_function_action(
+        self,
+        relation: BaseRelation,
+        changes: list[str] | None,
+        on_configuration_change: str | None,
+        full_refresh: bool,
+    ) -> dict[str, str | None]:
+        """Decide what to do with a function given its changes, `on_configuration_change` and
+        whether this is a `--full-refresh`.
+
+        See `functions.plan_function_action`; returns its `action` and `message` as a dict.
+        An unset `on_configuration_change` means dbt's default, `apply`.
+        """
+        plan = functions.plan_function_action(
+            relation.render(),
+            changes,
+            str(on_configuration_change or "apply").lower(),
+            bool(full_refresh),
+        )
+        return plan._asdict()
+
+    @available
+    def apply_function(
+        self,
+        relation: BaseRelation,
+        udf: dict[str, Any],
+        existing: functions.FunctionState | None,
+        compute_pool_id: str | None,
+        create_statement_name: str,
+        drop_statement_name: str,
+    ) -> AdapterResponse:
+        """Create the function at `relation`, first dropping `existing` (its live state, from
+        `describe_function`) if there is one.
+
+        If the create fails after the drop, the function that was dropped is re-created from `existing`,
+        which is held in memory only. A process that dies between the drop and the create leaves
+        no function behind and nothing to restore it from. Returns the create statement's response.
+        """
+        execute = self._function_executor(compute_pool_id)
+        create_sql = functions.render_create_function(
+            relation,
+            udf["class_name"],
+            udf["language"],
+            udf["artifact_id"],
+            udf["connection_names"],
+        )
+        if existing is not None:
+            # A failed drop leaves the function in place, so there is nothing to restore.
+            execute(f"drop function {relation.render()}", statement_name=drop_statement_name)
+        try:
+            response, _ = execute(create_sql, statement_name=create_statement_name)
+        except Exception:
+            if existing is not None:
+                self._restore_function(relation, existing, execute, create_statement_name)
+            raise
+        return response
+
+    def _restore_function(
+        self,
+        relation: BaseRelation,
+        previous: functions.FunctionState,
+        execute: functions.FunctionExecutor,
+        statement_name: str,
+    ) -> None:
+        """Best-effort: re-create the previous function after a failed create."""
+        try:
+            sql = functions.render_create_function(
+                relation,
+                previous.class_name,
+                previous.language,
+                previous.artifact_id,
+                sorted(c.render() for c in previous.connections),
+            )
+            execute(sql, statement_name=sanitize_statement_name(f"{statement_name}-restore"))
+            logger.warning(
+                warning_tag(
+                    f"Changing function {relation.render()} failed; restored the previous one."
+                )
+            )
+        except Exception as e:
+            logger.error(f"Could not restore the previous function {relation.render()} ({e}).")
+
+    @available
+    def warn_function_change(self, message: str) -> None:
+        """Log a function-config-change warning, tagged so it stands out in the terminal."""
+        logger.warning(warning_tag(message))
+
+    @available
+    def noop_response(self, message: str) -> AdapterResponse:
+        """A response for a materialization step that deliberately submitted no statement."""
+        return AdapterResponse(_message=message)
 
     @available
     def render_start_mode(self, value: object) -> str:
