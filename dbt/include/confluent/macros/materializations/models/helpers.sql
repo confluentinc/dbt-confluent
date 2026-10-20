@@ -252,20 +252,21 @@ WITH (
        - SELECT models (table, streaming_table): two `sql.dry-run`s, of the
          model's SELECT and of `SELECT * FROM` the existing table, by
          adapter.get_columns_from_dry_run; check_schema_drift compares the
-         two as Flink types. Creates nothing. The catalog query runs first,
-         for the existing table's WITH options and distribution, and so a
-         materialized or unreadable existing table gets its dedicated error
-         before any dry-run.
+         two as Flink types. Creates nothing.
        - Fallback: a short-lived temp table read back from
          INFORMATION_SCHEMA (_create_schema_check_temp_table). Used for
          streaming_source (a DDL dry-run reports no schema), and when a
          dry-run reports no result schema or duplicate column names (the
          resolver returns none).
 
-     Round-trips to Confluent are expensive, so every metadata read is
-     batched into a single UNION ALL against INFORMATION_SCHEMA. A SELECT
-     model that falls back runs it twice: once before the dry-runs, and
-     again to cover the temp table.
+     Metadata: get_drift_metadata runs first on every path, for the
+     existing table's TABLES row, WITH options and, when distributed_by is
+     checked, distribution columns, so a materialized table, or one
+     INFORMATION_SCHEMA doesn't have yet, gets its dedicated error before
+     any dry-run. Only the fallback reads full COLUMNS (get_drift_columns,
+     after the temp table is created), so no path reads the same metadata
+     twice. Round-trips to Confluent are expensive, so each query batches
+     its reads into one UNION ALL against INFORMATION_SCHEMA.
 
      has_select_query: true if the model SQL is a SELECT (table,
                        streaming_table); false if it's column definitions
@@ -278,9 +279,13 @@ WITH (
   {% set temp_table_name = adapter.generate_schema_check_temp_name(this.identifier) %}
   {% set temp_relation = none %}
   {% set dry_run_columns = none %}
+  {% set drift_columns = none %}
+  {# Read the distribution columns only where _check_distribution_drift
+     uses them. #}
+  {% set include_distribution = enforce == 'all' and config.get('distributed_by') is not none %}
+  {{ get_drift_metadata(existing_relation, include_distribution) }}
+  {% set drift_metadata = load_result('get_drift_metadata').table %}
   {% if has_select_query %}
-    {{ get_drift_catalog(existing_relation, none) }}
-    {% set drift_catalog = load_result('get_drift_catalog').table %}
     {# Dry-run in the mode that evaluates the SELECT when the model is
        built: `table` creates its CTAS in snapshot_ddl (table.sql), so its
        SELECT runs as a snapshot; streaming_table's INSERT runs in
@@ -296,7 +301,7 @@ WITH (
     ) %}
     {% set dry_run_columns = adapter.get_columns_from_dry_run(
       existing_relation,
-      drift_catalog,
+      drift_metadata,
       sql,
       execution_mode=dry_run_mode,
       compute_pool_id=config.get('compute_pool_id', none)
@@ -311,10 +316,8 @@ WITH (
       type='table'
     ) %}
     {{ _create_schema_check_temp_table(temp_relation, has_select_query) }}
-    {# Read the catalog (again, for a SELECT model) so it covers the temp
-       table's columns too. #}
-    {{ get_drift_catalog(existing_relation, temp_relation) }}
-    {% set drift_catalog = load_result('get_drift_catalog').table %}
+    {{ get_drift_columns(existing_relation, temp_relation) }}
+    {% set drift_columns = load_result('get_drift_columns').table %}
   {% else %}
     {# The dry-run path creates no temp table, but an earlier run that died
        hard on the fallback path may have leaked one. dbt populated the
@@ -334,12 +337,13 @@ WITH (
   {% do adapter.check_schema_drift(
     existing_relation,
     temp_relation,
-    drift_catalog,
+    drift_metadata,
     config.get('with', {}),
     config.get('distributed_by'),
     enforce,
     config.get('connector'),
-    dry_run_columns=dry_run_columns
+    dry_run_columns=dry_run_columns,
+    drift_columns=drift_columns
   ) %}
 {% endmacro %}
 
@@ -379,22 +383,15 @@ WITH (
 {% endmacro %}
 
 
-{% macro _drift_catalog_columns_select(existing_relation, table_identifier) %}
-{#- One COLUMNS-section SELECT scoped to a single TABLE_NAME. Kept as its own
-   macro so the two call sites below can stay independent SELECTs joined by
-   UNION ALL — folding them into one WHERE ... OR ... would defeat the
-   server's predicate push-down on TABLE_NAME. -#}
+{% macro _drift_columns_select(existing_relation, table_identifier) %}
+{#- One COLUMNS SELECT scoped to a single TABLE_NAME. Kept as its own macro so
+   get_drift_columns can keep the existing and temp tables' SELECTs
+   independent, joined by UNION ALL — folding them into one WHERE ... OR ...
+   would defeat the server's predicate push-down on TABLE_NAME. -#}
     SELECT
-      'COLUMNS' AS section,
       TABLE_NAME AS table_name,
       COLUMN_NAME AS col_name,
-      FULL_DATA_TYPE AS data_type,
-      DISTRIBUTION_ORDINAL_POSITION AS dist_position,
-      CAST(NULL AS STRING) AS option_key,
-      CAST(NULL AS STRING) AS option_value,
-      CAST(NULL AS STRING) AS is_distributed,
-      CAST(NULL AS INT) AS dist_buckets,
-      CAST(NULL AS STRING) AS is_materialized
+      FULL_DATA_TYPE AS data_type
     FROM INFORMATION_SCHEMA.`COLUMNS`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
       AND TABLE_SCHEMA = '{{ existing_relation.schema }}'
@@ -403,49 +400,63 @@ WITH (
 {%- endmacro %}
 
 
-{% macro get_drift_catalog(existing_relation, temp_relation=none) %}
-  {# Fetch every piece of metadata the drift check needs in one query. The
-     COLUMNS section always covers the existing relation, plus the temp
-     relation when the temp-table fallback is in use (temp_relation is not
-     none).
-     The result is a sparse table with a `section` discriminator and a
-     `table_name` discriminator (existing vs temp for the COLUMNS section).
+{% macro get_drift_columns(existing_relation, temp_relation) %}
+  {# The temp-table fallback's column read: every column of the existing and
+     temp tables, with a `table_name` discriminator. Runs only after the temp
+     table is created; the dry-run path never reads full COLUMNS.
+
+     Example rows for a table `my_table`(id BIGINT, v STRING) being compared
+     against a temp table `tmp`(id BIGINT, v STRING, x INT). Columns shown
+     left-to-right are: table_name, col_name, data_type.
+
+       ('my_table', 'id', 'BIGINT')
+       ('my_table', 'v',  'STRING')
+       ('tmp',      'id', 'BIGINT')
+       ('tmp',      'v',  'STRING')
+       ('tmp',      'x',  'INT')
+
+     `_partition_drift_columns` (Python) splits this into per-table dicts. #}
+  {% call statement('get_drift_columns', fetch_result=True, hidden=True) %}
+{{ _drift_columns_select(existing_relation, existing_relation.identifier) }}
+    UNION ALL
+{{ _drift_columns_select(existing_relation, temp_relation.identifier) }}
+  {% endcall %}
+{% endmacro %}
+
+
+{% macro get_drift_metadata(existing_relation, include_distribution=false) %}
+  {# Fetch the existing relation's metadata for the drift check in one query:
+     its TABLES row, its TABLE_OPTIONS rows and, when include_distribution,
+     its distribution columns (the COLUMNS rows with a
+     DISTRIBUTION_ORDINAL_POSITION). Runs first on every drift-check path.
+     The result is a sparse table with a `section` discriminator.
      Confluent's INFORMATION_SCHEMA only supports the primitives we use here:
      SELECT, WHERE with =/<>/IS NULL/IS NOT NULL/AND/OR, UNION ALL, AS,
      and CAST(NULL AS dt).
 
      Example rows for a table `my_table`(id BIGINT distributed, v STRING)
-     with WITH(changelog.mode='upsert') being compared against a temp table
-     `tmp`(id BIGINT, v STRING, x INT). Columns shown left-to-right are:
-     section, table_name, col_name, data_type, dist_position, option_key,
+     with WITH(changelog.mode='upsert'), with include_distribution. Columns
+     shown left-to-right are: section, col_name, dist_position, option_key,
      option_value, is_distributed, dist_buckets, is_materialized.
 
-       ('COLUMNS',       'my_table', 'id', 'BIGINT', 1,    NULL,             NULL,     NULL,  NULL, NULL)
-       ('COLUMNS',       'my_table', 'v',  'STRING', NULL, NULL,             NULL,     NULL,  NULL, NULL)
-       ('COLUMNS',       'tmp',      'id', 'BIGINT', NULL, NULL,             NULL,     NULL,  NULL, NULL)
-       ('COLUMNS',       'tmp',      'v',  'STRING', NULL, NULL,             NULL,     NULL,  NULL, NULL)
-       ('COLUMNS',       'tmp',      'x',  'INT',    NULL, NULL,             NULL,     NULL,  NULL, NULL)
-       ('TABLES',        'my_table', NULL, NULL,     NULL, NULL,             NULL,     'YES', 4,    'NO')
-       ('TABLE_OPTIONS', 'my_table', NULL, NULL,     NULL, 'changelog.mode', 'upsert', NULL,  NULL, NULL)
+       ('TABLES',        NULL, NULL, NULL,             NULL,     'YES', 4,    'NO')
+       ('TABLE_OPTIONS', NULL, NULL, 'changelog.mode', 'upsert', NULL,  NULL, NULL)
+       ('DISTRIBUTION',  'id', 1,    NULL,             NULL,     NULL,  NULL, NULL)
 
-     is_materialized (TABLES section) flags a Flink materialized table under
-     the model's name — a reverse materialization switch the drop-and-recreate
-     flow must reject rather than skip or restart over.
+     An existing table always has a TABLES row, so its absence means
+     INFORMATION_SCHEMA hasn't caught up (or the table was dropped outside
+     dbt). is_materialized flags a Flink materialized table under the
+     model's name — a reverse materialization switch the drop-and-recreate
+     flow must reject rather than skip or restart over. include_distribution
+     is set only when the distribution check will run, so otherwise the
+     query reads no COLUMNS at all.
 
-     `_partition_drift_catalog` (Python) splits this back into per-concern
-     dicts before any drift check runs. #}
-  {% call statement('get_drift_catalog', fetch_result=True, hidden=True) %}
-{{ _drift_catalog_columns_select(existing_relation, existing_relation.identifier) }}
-{%- if temp_relation is not none %}
-    UNION ALL
-{{ _drift_catalog_columns_select(existing_relation, temp_relation.identifier) }}
-{%- endif %}
-    UNION ALL
+     `_partition_drift_metadata` (Python) splits this into a DriftMetadata
+     before any drift check runs. #}
+  {% call statement('get_drift_metadata', fetch_result=True, hidden=True) %}
     SELECT
       'TABLES' AS section,
-      TABLE_NAME AS table_name,
       CAST(NULL AS STRING) AS col_name,
-      CAST(NULL AS STRING) AS data_type,
       CAST(NULL AS INT) AS dist_position,
       CAST(NULL AS STRING) AS option_key,
       CAST(NULL AS STRING) AS option_value,
@@ -459,9 +470,7 @@ WITH (
     UNION ALL
     SELECT
       'TABLE_OPTIONS' AS section,
-      TABLE_NAME AS table_name,
       CAST(NULL AS STRING) AS col_name,
-      CAST(NULL AS STRING) AS data_type,
       CAST(NULL AS INT) AS dist_position,
       OPTION_KEY AS option_key,
       OPTION_VALUE AS option_value,
@@ -472,5 +481,23 @@ WITH (
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
       AND TABLE_SCHEMA = '{{ existing_relation.schema }}'
       AND TABLE_NAME = '{{ existing_relation.identifier }}'
+{%- if include_distribution %}
+    UNION ALL
+    SELECT
+      'DISTRIBUTION' AS section,
+      COLUMN_NAME AS col_name,
+      DISTRIBUTION_ORDINAL_POSITION AS dist_position,
+      CAST(NULL AS STRING) AS option_key,
+      CAST(NULL AS STRING) AS option_value,
+      CAST(NULL AS STRING) AS is_distributed,
+      CAST(NULL AS INT) AS dist_buckets,
+      CAST(NULL AS STRING) AS is_materialized
+    FROM INFORMATION_SCHEMA.`COLUMNS`
+    WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
+      AND TABLE_SCHEMA = '{{ existing_relation.schema }}'
+      AND IS_HIDDEN = 'NO'
+      AND TABLE_NAME = '{{ existing_relation.identifier }}'
+      AND DISTRIBUTION_ORDINAL_POSITION IS NOT NULL
+{%- endif %}
   {% endcall %}
 {% endmacro %}
