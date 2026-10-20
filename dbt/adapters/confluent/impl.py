@@ -150,6 +150,15 @@ class DryRunColumns(NamedTuple):
     expected: dict[str, ColumnTypeDefinition]  # from a dry-run of the model's SELECT
 
 
+class DriftMetadata(NamedTuple):
+    """The existing relation's metadata, from `get_drift_metadata`'s result."""
+
+    found: bool  # INFORMATION_SCHEMA.TABLES has a row for it
+    is_materialized: bool  # IS_MATERIALIZED='YES': a Flink materialized table
+    options: dict[str, str]  # {option_key: option_value}, from TABLE_OPTIONS
+    distribution: dict | None  # {buckets, columns}, or None when IS_DISTRIBUTED isn't 'YES'
+
+
 class ConfluentAdapter(SQLAdapter):
     """
     Controls actual implementation of adapter, and ability to override certain methods.
@@ -1110,19 +1119,19 @@ class ConfluentAdapter(SQLAdapter):
         self,
         existing_relation: ConfluentRelation,
         temp_relation: ConfluentRelation | None,
-        drift_catalog: "agate.Table",
+        drift_metadata: "agate.Table",
         expected_with: dict[str, str],
         expected_distribution: dict | None = None,
         enforce: Literal["all", "columns"] = "all",
         expected_connector: str | None = None,
         dry_run_columns: DryRunColumns | None = None,
+        drift_columns: "agate.Table | None" = None,
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
-        drift_catalog is the agate.Table returned by `get_drift_catalog`: a
-        sparse UNION ALL with a `section` discriminator (COLUMNS, TABLES,
-        TABLE_OPTIONS) and a `table_name` discriminator for the COLUMNS section.
-        Splitting it client-side trades one round-trip for a bit of Python.
+        drift_metadata is the agate.Table returned by `get_drift_metadata` for the existing
+        relation: a sparse UNION ALL of its TABLES row, its TABLE_OPTIONS rows and, when the
+        distribution check will run, its distribution columns, with a `section` discriminator.
 
         The columns come from exactly one of:
             dry_run_columns  — from `get_columns_from_dry_run` (SELECT models): the model's SELECT
@@ -1130,13 +1139,14 @@ class ConfluentAdapter(SQLAdapter):
                                expected map must be non-empty. They're compared as Flink types,
                                with the model's fitted to the table's by `fitted_type` (the table's
                                top-level nullability, and its string MAP keys and MULTISET elements
-                               where the model's fit). drift_catalog then holds only the existing
-                               relation, for options and distribution; get_columns_from_dry_run has
-                               already run the materialized-table and metadata-lag guards on it,
-                               which pass again here.
+                               where the model's fit). get_columns_from_dry_run has already run the
+                               materialized-table and metadata-lag guards on drift_metadata, which
+                               pass again here.
             temp_relation    — the temp-table fallback (streaming_source, or a SELECT the dry-runs
-                               can't stand in for). Its columns are read from drift_catalog and
-                               compared with the existing table's as FULL_DATA_TYPE strings.
+                               can't stand in for). drift_columns, the agate.Table returned by
+                               `get_drift_columns`, holds its columns and the existing table's,
+                               compared as FULL_DATA_TYPE strings. drift_columns is required
+                               exactly when temp_relation is given.
 
         Each helper returns a list of one-line violation strings; we collect
         them all and raise a single error so the user sees every drift in one
@@ -1162,6 +1172,12 @@ class ConfluentAdapter(SQLAdapter):
                 "temp_relation or dry_run_columns. Please report it at "
                 "https://github.com/confluentinc/dbt-confluent/issues."
             )
+        if (temp_relation is None) != (drift_columns is None):
+            raise DbtRuntimeError(
+                "dbt-confluent bug: check_schema_drift needs drift_columns exactly "
+                "when it's given temp_relation. Please report it at "
+                "https://github.com/confluentinc/dbt-confluent/issues."
+            )
         if dry_run_columns is not None and not dry_run_columns.expected:
             raise DbtRuntimeError(
                 "dbt-confluent bug: check_schema_drift got dry_run_columns with no "
@@ -1169,48 +1185,15 @@ class ConfluentAdapter(SQLAdapter):
                 "map, when it can't resolve them. Please report it at "
                 "https://github.com/confluentinc/dbt-confluent/issues."
             )
-        temp_identifier = None
-        if temp_relation is not None:
-            assert temp_relation.identifier is not None
-            temp_identifier = temp_relation.identifier
-        (
-            existing_columns,
-            catalog_expected_columns,
-            existing_options,
-            existing_distribution,
-            existing_is_materialized,
-        ) = self._partition_drift_catalog(
-            drift_catalog, existing_relation.identifier, temp_identifier
-        )
-
-        self._raise_if_materialized(existing_relation, existing_is_materialized)
-
-        # Temp-table path only (dry_run_columns.expected is checked non-empty above):
-        # an empty catalog_expected_columns means the drift-check temp table came back
-        # with zero columns from INFORMATION_SCHEMA. The temp table was just created
-        # from the model's column definitions / select query, so it has columns; an
-        # empty result almost always means Confluent Cloud's INFORMATION_SCHEMA hasn't
-        # yet propagated the freshly-created table. Surface this as a retriable
-        # database error rather than letting it cascade into a false "drift detected"
-        # message.
-        if dry_run_columns is None and not catalog_expected_columns:
-            raise DbtDatabaseError(
-                f"Drift check could not introspect the expected schema for "
-                f"'{existing_relation}': the temp table created from the model "
-                f"definition returned no columns from INFORMATION_SCHEMA. "
-                f"This usually indicates a transient Confluent Cloud metadata "
-                f"propagation lag. Retry with `dbt retry`; if it persists, "
-                f"run with `--full-refresh` or file a bug."
-            )
-
-        self._raise_if_existing_unreadable(existing_relation, existing_columns)
+        metadata = self._partition_drift_metadata(drift_metadata)
+        self._raise_if_materialized(existing_relation, metadata.is_materialized)
+        self._raise_if_existing_missing(existing_relation, metadata.found)
 
         violations: list[str] = []
         if dry_run_columns is not None:
             # Two dry-runs: compare Flink's own types, with fitted_type taking the table's
             # top-level nullability, and its string MAP keys and MULTISET elements where the
-            # model's fit (dry_run_types). The catalog's existing_columns only fed the metadata-lag
-            # guard above.
+            # model's fit (dry_run_types).
             violations.extend(
                 self._check_column_drift(
                     dry_run_columns.existing,
@@ -1220,14 +1203,35 @@ class ConfluentAdapter(SQLAdapter):
                 )
             )
         else:
-            violations.extend(self._check_column_drift(existing_columns, catalog_expected_columns))
+            assert temp_relation is not None and temp_relation.identifier is not None
+            assert drift_columns is not None
+            existing_columns, expected_columns = self._partition_drift_columns(
+                drift_columns, existing_relation.identifier, temp_relation.identifier
+            )
+            # An empty expected_columns means the drift-check temp table came back with zero
+            # columns from INFORMATION_SCHEMA. The temp table was just created from the model's
+            # column definitions / select query, so it has columns; an empty result almost always
+            # means Confluent Cloud's INFORMATION_SCHEMA hasn't yet propagated the freshly-created
+            # table. Surface this as a retriable database error rather than letting it cascade
+            # into a false "drift detected" message.
+            if not expected_columns:
+                raise DbtDatabaseError(
+                    f"Drift check could not introspect the expected schema for "
+                    f"'{existing_relation}': the temp table created from the model "
+                    f"definition returned no columns from INFORMATION_SCHEMA. "
+                    f"This usually indicates a transient Confluent Cloud metadata "
+                    f"propagation lag. Retry with `dbt retry`; if it persists, "
+                    f"run with `--full-refresh` or file a bug."
+                )
+            self._raise_if_existing_unreadable(existing_relation, existing_columns)
+            violations.extend(self._check_column_drift(existing_columns, expected_columns))
         if enforce == "all":
             expected_options = dict(expected_with)
             if expected_connector is not None:
                 expected_options["connector"] = expected_connector
-            violations.extend(self._check_options_drift(expected_options, existing_options))
+            violations.extend(self._check_options_drift(expected_options, metadata.options))
             violations.extend(
-                self._check_distribution_drift(expected_distribution, existing_distribution)
+                self._check_distribution_drift(expected_distribution, metadata.distribution)
             )
         if violations:
             bullets = "\n".join(f"  - {v}" for v in violations)
@@ -1241,7 +1245,7 @@ class ConfluentAdapter(SQLAdapter):
     def get_columns_from_dry_run(
         self,
         relation: ConfluentRelation,
-        drift_catalog: "agate.Table",
+        drift_metadata: "agate.Table",
         sql: str,
         execution_mode: str | None = None,
         compute_pool_id: str | None = None,
@@ -1254,10 +1258,10 @@ class ConfluentAdapter(SQLAdapter):
         `dry_run_columns`, in place of creating and introspecting a temp table. Both sides are
         Flink's own types, so nothing has to be rendered to INFORMATION_SCHEMA spelling.
 
-        drift_catalog is `get_drift_catalog`'s result for the existing relation alone. Before
-        any dry-run, it's checked the way `check_schema_drift` checks it, so a materialized
-        table, or a table dropped outside dbt, gets its dedicated error instead of paying for
-        two dry-runs first.
+        drift_metadata is `get_drift_metadata`'s result for the existing relation. Before any
+        dry-run, it's checked the way `check_schema_drift` checks it, so a materialized table,
+        or a table missing from INFORMATION_SCHEMA (metadata lag, or dropped outside dbt), gets
+        its dedicated error instead of paying for two dry-runs first.
 
         Returns None, and logs why at debug level, when a dry-run can't stand in for the temp
         table: no result schema, or duplicate output column names. The caller then falls back
@@ -1271,20 +1275,17 @@ class ConfluentAdapter(SQLAdapter):
         they render at run time, never at parse time.
 
         Raises:
-            CompilationError: if drift_catalog shows the existing relation is a Flink
+            CompilationError: if drift_metadata shows the existing relation is a Flink
                 materialized table.
-            DbtDatabaseError: if drift_catalog has no columns for the existing relation
-                (metadata propagation lag, or the table was dropped outside dbt), or if a
-                dry-run fails, for example on invalid SQL, or because the existing table was
-                dropped after the catalog query. The temp-table CTAS it replaces failed the
-                same way.
+            DbtDatabaseError: if drift_metadata has no INFORMATION_SCHEMA.TABLES row for the
+                existing relation (metadata propagation lag, or the table was dropped outside
+                dbt), or if a dry-run fails, for example on invalid SQL, or because the existing
+                table was dropped after the metadata query. The temp-table CTAS it replaces
+                failed the same way.
         """
-        assert relation.identifier is not None
-        existing_columns, _, _, _, is_materialized = self._partition_drift_catalog(
-            drift_catalog, relation.identifier, None
-        )
-        self._raise_if_materialized(relation, is_materialized)
-        self._raise_if_existing_unreadable(relation, existing_columns)
+        metadata = self._partition_drift_metadata(drift_metadata)
+        self._raise_if_materialized(relation, metadata.is_materialized)
+        self._raise_if_existing_missing(relation, metadata.found)
 
         expected = self._dry_run_columns(
             relation,
@@ -1342,7 +1343,7 @@ class ConfluentAdapter(SQLAdapter):
     def _raise_if_materialized(
         existing_relation: ConfluentRelation, existing_is_materialized: bool
     ) -> None:
-        """Raise CompilationError if the drift catalog flags the existing relation as a Flink
+        """Raise CompilationError if the drift metadata flags the existing relation as a Flink
         materialized table."""
         # A materialized table can't be managed by the drop-and-recreate materializations at all —
         # a skip would silently leave Flink maintaining the old defining query, and a streaming
@@ -1360,10 +1361,27 @@ class ConfluentAdapter(SQLAdapter):
             )
 
     @staticmethod
+    def _raise_if_existing_missing(existing_relation: ConfluentRelation, found: bool) -> None:
+        """Raise DbtDatabaseError if the drift metadata has no INFORMATION_SCHEMA.TABLES row for
+        the existing relation."""
+        # The drift check only runs when dbt's cache says the relation exists, so no TABLES row
+        # for it means a metadata propagation lag (or the table was dropped externally mid-run).
+        # Without this guard its options and distribution would read as empty and be reported as
+        # drift, steering the user toward a needless --full-refresh.
+        if not found:
+            raise DbtDatabaseError(
+                f"Drift check could not find '{existing_relation}' in "
+                f"INFORMATION_SCHEMA.TABLES. This usually indicates a transient "
+                f"Confluent Cloud metadata propagation lag (or the table was "
+                f"dropped outside dbt during the run). Retry with `dbt retry`; "
+                f"if it persists, run with `--full-refresh` or file a bug."
+            )
+
+    @staticmethod
     def _raise_if_existing_unreadable(
         existing_relation: ConfluentRelation, existing_columns: dict[str, str]
     ) -> None:
-        """Raise DbtDatabaseError if the drift catalog has no columns for the existing
+        """Raise DbtDatabaseError if get_drift_columns' result has no columns for the existing
         relation."""
         # The drift check only runs when dbt's cache says the relation exists, so zero COLUMNS
         # rows for it means a metadata propagation lag, as in check_schema_drift's temp-side guard
@@ -1380,49 +1398,26 @@ class ConfluentAdapter(SQLAdapter):
             )
 
     @staticmethod
-    def _partition_drift_catalog(
-        drift_catalog,
-        existing_identifier: str,
-        temp_identifier: str | None,
-    ) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict | None, bool]:
-        """Split the unified UNION ALL result into per-concern structures.
+    def _partition_drift_metadata(drift_metadata) -> DriftMetadata:
+        """Split `get_drift_metadata`'s result into the existing relation's DriftMetadata.
 
-        Returns:
-            existing_columns: {column_name: data_type} for the existing table
-            expected_columns: {column_name: data_type} for the temp table;
-                empty when temp_identifier is None (the dry-run path, whose
-                catalog has no temp rows)
-            existing_options: {option_key: option_value}
-            existing_distribution: {buckets, columns} or None
-            existing_is_materialized: True if the existing relation is a
-                Flink materialized table (IS_MATERIALIZED='YES')
+        Distribution columns come only from the DISTRIBUTION section, ordered by
+        DISTRIBUTION_ORDINAL_POSITION. A distributed table without DISTRIBUTION rows reports
+        `columns=[]`: either it has no distribution columns (a keyless table's default
+        `DISTRIBUTED INTO n BUCKETS`), or the macro didn't read them because the distribution
+        check won't run.
         """
-        columns_by_table: dict[str, dict[str, str]] = {existing_identifier: {}}
-        if temp_identifier is not None:
-            columns_by_table[temp_identifier] = {}
+        found = False
         existing_options: dict[str, str] = {}
         is_distributed = False
         is_materialized = False
         buckets: int | None = None
         positions: list[tuple[int, str]] = []
 
-        for row in drift_catalog:
+        for row in drift_metadata:
             section = row["section"]
-            if section == "COLUMNS":
-                # Defensive: get_drift_catalog filters TABLE_NAME to existing/temp,
-                # so a None target shouldn't happen — but skip rather than crash if
-                # INFORMATION_SCHEMA ever returns an unexpected row.
-                target = columns_by_table.get(row["table_name"])
-                if target is None:
-                    logger.warning(
-                        f"Got empty table during drift check for columns in {row['table_name']}. "
-                        "Columns drift detection skipped, this is probably a bug."
-                    )
-                    continue
-                target[row["col_name"]] = row["data_type"]
-                if row["table_name"] == existing_identifier and row["dist_position"] is not None:
-                    positions.append((row["dist_position"], row["col_name"]))
-            elif section == "TABLES":
+            if section == "TABLES":
+                found = True
                 if str(row["is_materialized"]).upper() == "YES":
                     is_materialized = True
                 if str(row["is_distributed"]).upper() == "YES":
@@ -1430,6 +1425,8 @@ class ConfluentAdapter(SQLAdapter):
                     buckets = row["dist_buckets"]
             elif section == "TABLE_OPTIONS":
                 existing_options[row["option_key"]] = row["option_value"]
+            elif section == "DISTRIBUTION":
+                positions.append((row["dist_position"], row["col_name"]))
 
         existing_distribution: dict | None = None
         if is_distributed:
@@ -1437,13 +1434,38 @@ class ConfluentAdapter(SQLAdapter):
                 "buckets": buckets,
                 "columns": [col for _, col in sorted(positions)],
             }
-        return (
-            columns_by_table[existing_identifier],
-            columns_by_table[temp_identifier] if temp_identifier is not None else {},
-            existing_options,
-            existing_distribution,
-            is_materialized,
+        return DriftMetadata(
+            found=found,
+            is_materialized=is_materialized,
+            options=existing_options,
+            distribution=existing_distribution,
         )
+
+    @staticmethod
+    def _partition_drift_columns(
+        drift_columns,
+        existing_identifier: str,
+        temp_identifier: str,
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Split `get_drift_columns`' result into {column_name: data_type} maps for the existing
+        table and the temp table, in that order."""
+        columns_by_table: dict[str, dict[str, str]] = {
+            existing_identifier: {},
+            temp_identifier: {},
+        }
+        for row in drift_columns:
+            # Defensive: get_drift_columns filters TABLE_NAME to existing/temp,
+            # so a None target shouldn't happen — but skip rather than crash if
+            # INFORMATION_SCHEMA ever returns an unexpected row.
+            target = columns_by_table.get(row["table_name"])
+            if target is None:
+                logger.warning(
+                    f"Got empty table during drift check for columns in {row['table_name']}. "
+                    "Columns drift detection skipped, this is probably a bug."
+                )
+                continue
+            target[row["col_name"]] = row["data_type"]
+        return columns_by_table[existing_identifier], columns_by_table[temp_identifier]
 
     @staticmethod
     def _check_column_drift(
