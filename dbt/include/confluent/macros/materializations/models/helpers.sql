@@ -259,14 +259,14 @@ WITH (
          dry-run reports no result schema or duplicate column names (the
          resolver returns none).
 
-     Metadata: get_drift_metadata runs first on every path, for the
-     existing table's TABLES row, WITH options and, when distributed_by is
-     checked, distribution columns, so a materialized table, or one
-     INFORMATION_SCHEMA doesn't have yet, gets its dedicated error before
-     any dry-run. Only the fallback reads full COLUMNS (get_drift_columns,
-     after the temp table is created), so no path reads the same metadata
-     twice. Round-trips to Confluent are expensive, so each query batches
-     its reads into one UNION ALL against INFORMATION_SCHEMA.
+     Metadata: get_drift_metadata runs first on every path, for the existing table's TABLES row,
+     WITH options and, when distributed_by is checked, distribution columns, so a materialized
+     table, or one INFORMATION_SCHEMA doesn't have yet, gets its dedicated error before any
+     dry-run. Only the fallback reads full COLUMNS (get_drift_columns, after the temp table is
+     created), so no path reads TABLES or TABLE_OPTIONS twice. The one overlap: with distributed_by
+     checked, the fallback reads the existing table's distribution columns in both queries (a few
+     rows). Round-trips to Confluent are expensive, so each query batches its reads into one
+     UNION ALL against INFORMATION_SCHEMA.
 
      has_select_query: true if the model SQL is a SELECT (table,
                        streaming_table); false if it's column definitions
