@@ -499,6 +499,34 @@ class TestAdapterValidateFunctionConfig:
         assert udf.artifact_config is None
 
 
+class TestRequireArtifactCredentials:
+    """Artifact API calls need a Global key; fail up front without one."""
+
+    GLOBAL_KEY = "global-key"
+    LIVE = functions.FunctionState(CLASS_NAME, "python", "cfa-live", frozenset())
+
+    def check(self, adapter, udf, existing, global_api_key: str | None):
+        adapter.config = SimpleNamespace(  # type: ignore[assignment]
+            credentials=SimpleNamespace(global_api_key=global_api_key)
+        )
+        adapter.require_artifact_credentials(udf, existing)
+
+    @pytest.mark.parametrize("existing", [None, LIVE], ids=["create", "replace"])
+    def test_an_artifact_path_needs_a_global_key(self, adapter, tmp_path, existing):
+        udf = package(tmp_path, b"v1")
+        with pytest.raises(CompilationError, match="global_api_key"):
+            self.check(adapter, udf, existing, global_api_key=None)
+        self.check(adapter, udf, existing, global_api_key=self.GLOBAL_KEY)
+
+    def test_replacing_a_function_by_artifact_id_needs_a_global_key(self, adapter):
+        with pytest.raises(CompilationError, match="global_api_key"):
+            self.check(adapter, ID_UDF, self.LIVE, global_api_key=None)
+        self.check(adapter, ID_UDF, self.LIVE, global_api_key=self.GLOBAL_KEY)
+
+    def test_creating_a_function_by_artifact_id_needs_no_key(self, adapter):
+        self.check(adapter, ID_UDF, None, global_api_key=None)
+
+
 class TestAdapterPlanFunctionChange:
     """For an `artifact_path`, the function is compared with the artifact already uploaded for
     that exact content: the same package is unchanged, a different one a change."""

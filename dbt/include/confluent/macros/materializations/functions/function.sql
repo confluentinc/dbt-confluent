@@ -8,6 +8,7 @@
   {#- The live function (None if absent), described once and reused below. Live lookup, so skipped
      at parse/compile time (`execute` is false), where None just means "create". -#}
   {%- set existing = adapter.describe_function(target_relation, config.get('compute_pool_id')) if execute else none -%}
+  {% if execute %}{% do adapter.require_artifact_credentials(udf, existing) %}{% endif %}
   {#- None if absent; else the differences from the config (empty if identical). -#}
   {%- set changes = adapter.plan_function_change(existing, udf) if execute else none -%}
   {#- What to do about them, per dbt's `on_configuration_change` (apply | continue | fail),

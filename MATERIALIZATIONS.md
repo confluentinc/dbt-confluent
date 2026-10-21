@@ -572,7 +572,8 @@ and stopped statements stay bound to the artifact they were compiled against, an
 which statements those are, so cleaning up old artifacts is left to you.
 
 An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
-looked up, the run fails with the existing function untouched.
+looked up, the run fails with the existing function untouched. The check only runs when replacing
+an existing function, and needs a Global API key too; a Flink-region key can't look it up.
 
 #### Changing an existing function
 
