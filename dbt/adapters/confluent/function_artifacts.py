@@ -1,4 +1,4 @@
-"""Artifact upload for the `function` materialization (#180).
+"""Artifact upload and cleanup for the `function` materialization (#180).
 
 A function can name a local package (`artifact_path`) instead of an already-uploaded artifact.
 The artifact is named after the package's content hash, so it is immutable and "same name" means
@@ -10,14 +10,15 @@ create the new one.
 
 The old artifact is never deleted as part of a replace: running and stopped statements stay
 bound to the artifact they were compiled against, and nothing tells us which statements those
-are, so removing old artifacts is left to the user.
+are. `find_unused_artifacts` finds the candidates for an explicit, manual cleanup instead.
 
 Every dbt-created artifact carries a `managed_by` marker naming the dbt project that uploaded
-it, which tells an artifact dbt created from one it didn't.
+it. An artifact without it, or from another project, is never deleted by dbt.
 """
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -52,6 +53,17 @@ class ArtifactConfig(NamedTuple):
 def encode_description(project: str | None) -> str:
     """The description of an artifact dbt uploaded for `project`."""
     return json.dumps({"managed_by": MANAGED_BY, "project": project}, separators=(",", ":"))
+
+
+def artifact_project(description: str | None) -> str | None:
+    """The dbt project that uploaded an artifact with this description, if dbt did."""
+    try:
+        body = json.loads(description or "")
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("managed_by") != MANAGED_BY:
+        return None
+    return body.get("project")
 
 
 def file_digest(path: Path) -> str:
@@ -97,3 +109,25 @@ def ensure_artifact(conn: Connection, artifact: ArtifactConfig) -> FlinkArtifact
         if existing is None:
             raise
         return existing
+
+
+def find_unused_artifacts(
+    conn: Connection, project: str, used_artifact_ids: Callable[[], set[str]]
+) -> list[FlinkArtifact]:
+    """This dbt `project`'s artifacts that no function uses.
+
+    Artifacts dbt didn't upload for `project` are ignored. An artifact a run uploaded but has
+    not yet created its function from looks unused too, so cleanup shouldn't run alongside a
+    `dbt run`.
+
+    Artifacts are listed *before* functions are looked up (`used_artifact_ids`), so a function
+    created in between can't be missed. Unused by a function doesn't mean unused: statements
+    may still be bound to an artifact, which is why deleting is left to the user.
+    """
+    ours = [
+        a for a in conn.get_artifacts_api().list() if artifact_project(a.description) == project
+    ]
+    if not ours:
+        return []
+    used = used_artifact_ids()
+    return [a for a in ours if a.id not in used]
