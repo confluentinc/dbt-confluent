@@ -474,7 +474,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
 
     def our_artifacts(self, project) -> list:
         prefix = project.adapter.config.credentials.statement_name_prefix
-        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
+        stem = f"{prefix}{project.adapter.config.project_name}-"
         handle = project.adapter.connections.get_thread_handle()
         return [a for a in handle.get_artifacts_api().list() if a.display_name.startswith(stem)]
 
@@ -634,7 +634,7 @@ class TestFunctionEmptyRun(FunctionFixtures):
         write_package(project, "empty-run")
         yield
         prefix = project.adapter.config.credentials.statement_name_prefix
-        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
+        stem = f"{prefix}{project.adapter.config.project_name}-"
         with project.adapter.connection_named("delete_artifacts"):
             handle = project.adapter.connections.get_thread_handle()
             for artifact in handle.get_artifacts_api().list():
@@ -645,3 +645,44 @@ class TestFunctionEmptyRun(FunctionFixtures):
         run_dbt(["build", "--empty"])
         rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
         assert {str(name): str(value) for name, value in rows}["plugin id"].startswith("cfa-")
+
+
+@requires_global_key
+class TestFunctionsSharingOnePackage(FunctionFixtures):
+    """Two functions from one package, built on separate threads: they share one artifact."""
+
+    NAME = "functionshared"
+    FUNCTIONS = ["udf_first", "udf_second"]
+    THREADS = 2
+
+    @pytest.fixture(scope="class")
+    def functions(self):
+        return {
+            f"{name}.sql": function_sql(
+                artifact_id=None, class_name=EXAMPLE_UDF_CLASS, language="python"
+            ).replace("artifact_id=None", f"artifact_path={PACKAGE_FILE!r}")
+            for name in self.FUNCTIONS
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def package(self, project):
+        write_package(project, "shared")
+        yield
+        prefix = project.adapter.config.credentials.statement_name_prefix
+        stem = f"{prefix}{project.adapter.config.project_name}-"
+        with project.adapter.connection_named("delete_artifacts"):
+            handle = project.adapter.connections.get_thread_handle()
+            for artifact in handle.get_artifacts_api().list():
+                if artifact.display_name.startswith(stem):
+                    handle.get_artifacts_api().delete(artifact.id)
+
+    def live_artifact_id(self, project, function: str) -> str:
+        rows = project.run_sql(f"describe function `{function}`", fetch="all")
+        return {str(name): str(value) for name, value in rows}["plugin id"]
+
+    def test_both_functions_use_the_same_artifact(self, project):
+        run_dbt(["build", "--threads", str(self.THREADS)])
+
+        artifact_ids = {self.live_artifact_id(project, name) for name in self.FUNCTIONS}
+
+        assert len(artifact_ids) == 1
