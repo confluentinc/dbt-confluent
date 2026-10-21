@@ -555,8 +555,8 @@ flags:
 
 #### Uploading the artifact
 
-With `artifact_path`, dbt uploads the package as the function's artifact, which needs a key that
-can use the artifact API (the [Global API key](#tableflow), as for Tableflow). The artifact is
+With `artifact_path`, dbt uploads the package as the function's artifact, which needs credentials that
+can use the artifact API (`auth: oauth`, or a [Global API key](#tableflow) as for Tableflow). The artifact is
 named after the package's content (`<statement prefix><project>-<function>-<digest>`), so
 the same package always maps to the same artifact. Artifact names are limited to 60 characters,
 so when the project and function names are too long to leave room for the digest, they are cut
@@ -575,7 +575,7 @@ which statements those are, so cleaning up old artifacts is left to you.
 
 An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
 looked up, the run fails with the existing function untouched. The check only runs when replacing
-an existing function, and needs a Global API key too; a Flink-region key can't look it up.
+an existing function.
 
 #### Changing an existing function
 
