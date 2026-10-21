@@ -29,6 +29,8 @@ from confluent_sql import (
     FlinkArtifact,
 )
 
+from .naming import truncate_with_hash
+
 MANAGED_BY = "dbt-confluent"
 
 # What a function's `language` implies about its package.
@@ -38,6 +40,9 @@ ARTIFACT_FORMATS: dict[str, tuple[str, ArtifactContentFormat, ArtifactRuntimeLan
 }
 
 _DIGEST_LENGTH = 16
+
+# The artifact API's limit on a display name (the driver rejects longer ones).
+MAX_ARTIFACT_NAME_LENGTH = 60
 
 
 class ArtifactConfig(NamedTuple):
@@ -64,8 +69,16 @@ def file_digest(path: Path) -> str:
 
 
 def artifact_display_name(prefix: str, project: str, function: str, digest: str) -> str:
-    """Name an artifact like a statement (`<prefix><project>-<function>`), plus the content digest."""
-    return f"{prefix}{project}-{function}-{digest}"
+    """Name an artifact like a statement (`<prefix><project>-<function>`), plus the content digest.
+
+    A label too long to leave room for the digest is cut short and ends in a hash of the full
+    label. The digest is never cut, since it is what makes the name mean "this content".
+    """
+    label = f"{prefix}{project}-{function}"
+    max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for '-'
+    if len(label) > max_label:
+        label = truncate_with_hash(label, max_label, label)
+    return f"{label}-{digest}"
 
 
 def find_artifact(conn: Connection, display_name: str, language: str) -> FlinkArtifact | None:
