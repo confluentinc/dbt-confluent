@@ -24,6 +24,7 @@ MODEL_SQL = "select id from src"
 DRY_RUN = DryRunColumns(existing={"id": "existing type"}, expected={"id": "expected type"})
 TEMP_NAME = "__dbt_tmp_schema_check_my_model"
 COLUMNS_FROM = "FROM INFORMATION_SCHEMA.`COLUMNS`"
+DISTRIBUTION_FILTER = "DISTRIBUTION_ORDINAL_POSITION IS NOT NULL"
 
 
 class _Config:
@@ -41,8 +42,8 @@ class _Harness:
 
     def __init__(self, config, dry_run_result=None, leaked=None):
         self.statements: list[tuple[str, str]] = []
-        # One stand-in table per load_result call, in order.
-        self.catalog_tables: list[object] = []
+        # One (statement name, stand-in table) per load_result call, in order.
+        self.loaded = []
         self.adapter = MagicMock()
         self.adapter.Relation = ConfluentRelation
         self.adapter.generate_schema_check_temp_name.side_effect = lambda identifier: (
@@ -70,10 +71,10 @@ class _Harness:
         return ""
 
     def _load_result(self, name):
-        assert name == "get_drift_catalog"
-        assert self.names[-1] == "get_drift_catalog", "loaded before the catalog query ran"
-        self.catalog_tables.append(object())
-        return SimpleNamespace(table=self.catalog_tables[-1])
+        assert name in ("get_drift_metadata", "get_drift_columns")
+        assert self.names[-1] == name, f"{name} loaded before its query ran"
+        self.loaded.append((name, object()))
+        return SimpleNamespace(table=self.loaded[-1][1])
 
     def run(self, has_select_query=True, enforce="all"):
         self.module.check_for_schema_drift(self.existing, has_select_query, enforce)
@@ -88,6 +89,10 @@ class _Harness:
     def sql(self, name):
         (sql,) = self.sqls(name)
         return sql
+
+    def table(self, name):
+        (table,) = [table for loaded, table in self.loaded if loaded == name]
+        return table
 
     @property
     def drift_call(self):
@@ -108,27 +113,33 @@ def test_dry_run_path_creates_nothing(materialized, mode):
 
     harness.run()
 
-    # No DROP, no CREATE: only the catalog query, with the existing table's COLUMNS alone.
-    assert harness.names == ["get_drift_catalog"]
-    catalog = harness.sql("get_drift_catalog")
-    assert catalog.count(COLUMNS_FROM) == 1
-    assert f"TABLE_NAME = '{TEMP_NAME}'" not in catalog
-    assert catalog.count("UNION ALL") == 2
-    (catalog_table,) = harness.catalog_tables
+    # No DROP, no CREATE, no COLUMNS read: only the metadata query, over TABLES and
+    # TABLE_OPTIONS.
+    assert harness.names == ["get_drift_metadata"]
+    metadata = harness.sql("get_drift_metadata")
+    assert COLUMNS_FROM not in metadata
+    assert "FROM INFORMATION_SCHEMA.`TABLES`" in metadata
+    assert "FROM INFORMATION_SCHEMA.`TABLE_OPTIONS`" in metadata
+    assert metadata.count("UNION ALL") == 1
+    # Partitioned once, and the same DriftMetadata goes to both consumers.
+    harness.adapter.partition_drift_metadata.assert_called_once_with(
+        harness.table("get_drift_metadata")
+    )
+    partitioned = harness.adapter.partition_drift_metadata.return_value
     harness.adapter.get_columns_from_dry_run.assert_called_once_with(
-        harness.existing, catalog_table, MODEL_SQL, execution_mode=mode, compute_pool_id=None
+        harness.existing, partitioned, MODEL_SQL, execution_mode=mode, compute_pool_id=None
     )
     args, kwargs = harness.drift_call
     assert args[0] == harness.existing
     assert args[1] is None
-    assert args[2] is catalog_table
-    assert kwargs == {"dry_run_columns": DRY_RUN}
+    assert args[2] is partitioned
+    assert kwargs == {"dry_run_columns": DRY_RUN, "drift_columns": None}
     harness.adapter.defer_drop.assert_not_called()
 
 
-def test_catalog_runs_before_the_dry_runs():
-    """The resolver checks the catalog for a materialized or unreadable table before it
-    dry-runs, so the catalog query must already have run when it's called."""
+def test_metadata_runs_before_the_dry_runs():
+    """The resolver checks the metadata for a materialized or missing table before it
+    dry-runs, so the metadata query must already have run when it's called."""
     harness = _Harness({"materialized": "table"}, dry_run_result=DRY_RUN)
     names_at_call = []
     harness.adapter.get_columns_from_dry_run.side_effect = lambda *args, **kwargs: (
@@ -137,7 +148,7 @@ def test_catalog_runs_before_the_dry_runs():
 
     harness.run()
 
-    assert names_at_call == [["get_drift_catalog"]]
+    assert names_at_call == [["get_drift_metadata"]]
 
 
 @pytest.mark.parametrize("model_mode", ["snapshot_ddl", "streaming_ddl", "streaming_query"])
@@ -189,44 +200,52 @@ def test_dry_run_path_reclaims_leaked_temp_table():
 
     harness.adapter.get_relation.assert_called_once_with("env-1", "cluster-a", TEMP_NAME)
     harness.adapter.defer_drop.assert_called_once_with(leaked)
-    assert harness.names == ["get_drift_catalog"]
+    assert harness.names == ["get_drift_metadata"]
 
 
-def test_fallback_path_rereads_the_catalog():
+def test_fallback_path_reads_columns_after_the_temp_table():
     """The resolver returned None: the temp table is dropped, deferred, created from the
-    wrapped SELECT and read back, as before, by a second catalog query that covers it.
-    check_schema_drift gets that second catalog."""
+    wrapped SELECT and read back by the columns query. The metadata isn't read again.
+    check_schema_drift gets the metadata and the columns."""
     harness = _Harness({"materialized": "table"}, dry_run_result=None)
 
     harness.run()
 
     assert harness.names == [
-        "get_drift_catalog",
+        "get_drift_metadata",
         "drop_leaked_temp_table",
         "create_temp_table",
-        "get_drift_catalog",
+        "get_drift_columns",
     ]
     temp = _temp_relation()
     assert harness.sql("drop_leaked_temp_table") == f"DROP TABLE IF EXISTS {temp}"
     assert harness.sql("create_temp_table") == (
         f"CREATE TABLE {temp} AS SELECT * FROM ( {MODEL_SQL} ) WHERE FALSE"
     )
-    first, second = harness.sqls("get_drift_catalog")
-    assert first.count(COLUMNS_FROM) == 1
-    assert f"TABLE_NAME = '{TEMP_NAME}'" not in first
-    assert second.count(COLUMNS_FROM) == 2
-    assert f"TABLE_NAME = '{TEMP_NAME}'" in second
+    assert COLUMNS_FROM not in harness.sql("get_drift_metadata")
+    columns = harness.sql("get_drift_columns")
+    assert columns.count(COLUMNS_FROM) == 2
+    assert "TABLE_NAME = 'my_model'" in columns
+    assert f"TABLE_NAME = '{TEMP_NAME}'" in columns
+    assert "INFORMATION_SCHEMA.`TABLES`" not in columns
+    assert "INFORMATION_SCHEMA.`TABLE_OPTIONS`" not in columns
     harness.adapter.defer_drop.assert_called_once_with(temp)
     harness.adapter.get_relation.assert_not_called()
     args, kwargs = harness.drift_call
     assert args[1] == temp
-    assert args[2] is harness.catalog_tables[1]
-    assert kwargs == {"dry_run_columns": None}
+    harness.adapter.partition_drift_metadata.assert_called_once_with(
+        harness.table("get_drift_metadata")
+    )
+    assert args[2] is harness.adapter.partition_drift_metadata.return_value
+    assert kwargs == {
+        "dry_run_columns": None,
+        "drift_columns": harness.table("get_drift_columns"),
+    }
 
 
 def test_streaming_source_skips_dry_run():
-    """Column definitions aren't a SELECT: no dry-run, and one catalog query after the DDL
-    temp table, as before."""
+    """Column definitions aren't a SELECT: no dry-run. The metadata query runs first, as on
+    every path, and the columns query after the DDL temp table."""
     harness = _Harness(
         {"materialized": "streaming_source", "connector": "faker", "with": {"a": "b"}}
     )
@@ -234,14 +253,25 @@ def test_streaming_source_skips_dry_run():
     harness.run(has_select_query=False)
 
     harness.adapter.get_columns_from_dry_run.assert_not_called()
-    assert harness.names == ["drop_leaked_temp_table", "create_temp_table", "get_drift_catalog"]
+    assert harness.names == [
+        "get_drift_metadata",
+        "drop_leaked_temp_table",
+        "create_temp_table",
+        "get_drift_columns",
+    ]
     temp = _temp_relation()
     assert harness.sql("create_temp_table") == f"CREATE TABLE {temp} ( {MODEL_SQL} )"
     args, kwargs = harness.drift_call
     assert args[1] == temp
-    assert args[2] is harness.catalog_tables[0]
+    harness.adapter.partition_drift_metadata.assert_called_once_with(
+        harness.table("get_drift_metadata")
+    )
+    assert args[2] is harness.adapter.partition_drift_metadata.return_value
     assert args[3:] == ({"a": "b"}, None, "all", "faker")
-    assert kwargs == {"dry_run_columns": None}
+    assert kwargs == {
+        "dry_run_columns": None,
+        "drift_columns": harness.table("get_drift_columns"),
+    }
 
 
 def test_enforce_passes_through_on_dry_run_path():
@@ -249,3 +279,41 @@ def test_enforce_passes_through_on_dry_run_path():
     harness.run(enforce="columns")
     args, _ = harness.drift_call
     assert args[5] == "columns"
+
+
+@pytest.mark.parametrize(
+    "materialized,has_select_query,dry_run_result",
+    [("table", True, DRY_RUN), ("table", True, None), ("streaming_source", False, None)],
+    ids=["dry-run", "fallback", "streaming_source"],
+)
+def test_distributed_by_reads_distribution_columns(materialized, has_select_query, dry_run_result):
+    """With distributed_by, the metadata query also reads the existing table's distribution
+    columns, and only those: COLUMNS rows with a distribution position, under their own
+    section."""
+    harness = _Harness(
+        {"materialized": materialized, "distributed_by": {"columns": ["id"]}},
+        dry_run_result=dry_run_result,
+    )
+
+    harness.run(has_select_query=has_select_query)
+
+    metadata = harness.sql("get_drift_metadata")
+    assert metadata.count(COLUMNS_FROM) == 1
+    assert "'DISTRIBUTION' AS section" in metadata
+    assert DISTRIBUTION_FILTER in metadata
+    assert "TABLE_NAME = 'my_model'" in metadata
+    assert f"TABLE_NAME = '{TEMP_NAME}'" not in metadata
+    assert metadata.count("UNION ALL") == 2
+
+
+def test_enforce_columns_skips_distribution_columns():
+    """enforce='columns' never checks distribution, so the metadata query doesn't read it,
+    even with distributed_by set."""
+    harness = _Harness(
+        {"materialized": "streaming_table", "distributed_by": {"columns": ["id"]}},
+        dry_run_result=DRY_RUN,
+    )
+
+    harness.run(enforce="columns")
+
+    assert COLUMNS_FROM not in harness.sql("get_drift_metadata")

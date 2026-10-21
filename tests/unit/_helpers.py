@@ -3,7 +3,7 @@
 import agate
 from confluent_sql.tableflow import TableflowTopic
 
-from dbt.adapters.confluent.impl import ConfluentRelation
+from dbt.adapters.confluent.impl import ConfluentAdapter, ConfluentRelation, DriftMetadata
 
 
 def relation(
@@ -54,12 +54,10 @@ def make_topic(
     )
 
 
-def drift_catalog_row(
+def drift_metadata_row(
     *,
     section,
-    table_name=None,
     col_name=None,
-    data_type=None,
     dist_position=None,
     option_key=None,
     option_value=None,
@@ -67,12 +65,10 @@ def drift_catalog_row(
     dist_buckets=None,
     is_materialized=None,
 ):
-    """One row of `get_drift_catalog`'s result, for make_drift_catalog."""
+    """One row of `_get_drift_metadata`'s result, for make_drift_metadata."""
     return (
         section,
-        table_name,
         col_name,
-        data_type,
         dist_position,
         option_key,
         option_value,
@@ -82,11 +78,9 @@ def drift_catalog_row(
     )
 
 
-_CATALOG_COLUMNS = [
+_METADATA_COLUMNS = [
     "section",
-    "table_name",
     "col_name",
-    "data_type",
     "dist_position",
     "option_key",
     "option_value",
@@ -97,11 +91,9 @@ _CATALOG_COLUMNS = [
 
 # Pin types so agate's inference doesn't coerce "YES" to a boolean (Confluent
 # returns it as a string, and the partitioner compares against the literal "YES").
-_CATALOG_TYPES = [
+_METADATA_TYPES = [
     agate.Text(),  # section
-    agate.Text(),  # table_name
     agate.Text(),  # col_name
-    agate.Text(),  # data_type
     agate.Number(),  # dist_position
     agate.Text(),  # option_key
     agate.Text(),  # option_value
@@ -111,6 +103,22 @@ _CATALOG_TYPES = [
 ]
 
 
-def make_drift_catalog(rows) -> agate.Table:
-    """An agate.Table shaped like `get_drift_catalog`'s result, from drift_catalog_row rows."""
-    return agate.Table(rows, column_names=_CATALOG_COLUMNS, column_types=_CATALOG_TYPES)
+def make_drift_metadata(rows) -> agate.Table:
+    """An agate.Table shaped like `_get_drift_metadata`'s result, from drift_metadata_row rows."""
+    return agate.Table(rows, column_names=_METADATA_COLUMNS, column_types=_METADATA_TYPES)
+
+
+def partitioned_drift_metadata(rows) -> DriftMetadata:
+    """The DriftMetadata `partition_drift_metadata` makes from drift_metadata_row rows: what
+    check_for_schema_drift hands get_columns_from_dry_run and check_schema_drift."""
+    return ConfluentAdapter._partition_drift_metadata(make_drift_metadata(rows))
+
+
+def make_drift_columns(rows) -> agate.Table:
+    """An agate.Table shaped like `_get_drift_columns`' result, from (table_name, col_name,
+    data_type) tuples."""
+    return agate.Table(
+        rows,
+        column_names=["table_name", "col_name", "data_type"],
+        column_types=[agate.Text(), agate.Text(), agate.Text()],
+    )
