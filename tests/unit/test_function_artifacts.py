@@ -521,31 +521,21 @@ class TestAdapterValidateFunctionConfig:
 
 
 class TestRequireArtifactCredentials:
-    """Artifact API calls need a Global key; fail up front without one."""
+    """The artifact API needs a Global key or OAuth; fail up front without either."""
 
-    GLOBAL_KEY = "global-key"
-    LIVE = functions.FunctionState(CLASS_NAME, "python", "cfa-live", frozenset())
-
-    def check(self, adapter, udf, existing, global_api_key: str | None):
+    def check(self, adapter, auth: str = "api_key", global_api_key: str | None = None):
         adapter.config = SimpleNamespace(  # type: ignore[assignment]
-            credentials=SimpleNamespace(global_api_key=global_api_key)
+            credentials=SimpleNamespace(auth=auth, global_api_key=global_api_key)
         )
-        adapter.require_artifact_credentials(udf, existing)
+        adapter.require_artifact_credentials()
 
-    @pytest.mark.parametrize("existing", [None, LIVE], ids=["create", "replace"])
-    def test_an_artifact_path_needs_a_global_key(self, adapter, tmp_path, existing):
-        udf = package(tmp_path, b"v1")
+    def test_an_api_key_profile_needs_a_global_key(self, adapter):
         with pytest.raises(CompilationError, match="global_api_key"):
-            self.check(adapter, udf, existing, global_api_key=None)
-        self.check(adapter, udf, existing, global_api_key=self.GLOBAL_KEY)
+            self.check(adapter, global_api_key=None)
+        self.check(adapter, global_api_key="global-key")
 
-    def test_replacing_a_function_by_artifact_id_needs_a_global_key(self, adapter):
-        with pytest.raises(CompilationError, match="global_api_key"):
-            self.check(adapter, ID_UDF, self.LIVE, global_api_key=None)
-        self.check(adapter, ID_UDF, self.LIVE, global_api_key=self.GLOBAL_KEY)
-
-    def test_creating_a_function_by_artifact_id_needs_no_key(self, adapter):
-        self.check(adapter, ID_UDF, None, global_api_key=None)
+    def test_an_oauth_profile_needs_no_key(self, adapter):
+        self.check(adapter, auth="oauth", global_api_key=None)
 
 
 class TestAdapterPlanFunctionChange:

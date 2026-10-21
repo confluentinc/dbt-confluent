@@ -56,7 +56,7 @@ You have several options for configuring your credentials:
 - **Use a Flink-region API key**
   - Flink-region API keys allow non-interactive use similar to global API keys, but are more restricted in scope.
   - Some routes used by the adapter will not work with a Flink-region API key.
-    - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) and [function artifacts](MATERIALIZATIONS.md#uploading-the-artifact) require a global API key.
+    - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) and [function artifacts](MATERIALIZATIONS.md#uploading-the-artifact) require a global API key (or `auth: oauth`).
 
 `dbt init` will prompt you for a choice and ensure your profile is configured correctly.
 
