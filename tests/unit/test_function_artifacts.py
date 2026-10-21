@@ -254,7 +254,28 @@ class TestFileDigestAndName:
         digest = "0123456789abcdef"
         name = fa.artifact_display_name("p" * length, "j" * length, "f" * length, digest)
         assert name.endswith("-" + digest)
-        assert len(name) == 3 * length + 2 + len(digest)
+        assert len(name) <= fa.MAX_ARTIFACT_NAME_LENGTH
+
+    def test_a_name_that_exactly_fits_is_left_as_is(self):
+        digest = "0123456789abcdef"
+        label_length = fa.MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1
+        function = "f" * (label_length - len("proj-"))
+        name = fa.artifact_display_name("", "proj", function, digest)
+        assert name == f"proj-{function}-{digest}"
+        assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
+
+    def test_a_long_name_is_deterministic(self):
+        args = ("dbt-", "j" * 100, "f" * 100, "0123456789abcdef")
+        assert fa.artifact_display_name(*args) == fa.artifact_display_name(*args)
+
+    def test_long_labels_that_differ_only_after_the_cut_get_different_names(self):
+        digest = "0123456789abcdef"
+        # The labels differ only in their last characters, which truncation cuts off, so
+        # only the hash of the full label tells the two names apart.
+        shared = "j" * 100
+        one = fa.artifact_display_name("dbt-", shared, "one", digest)
+        two = fa.artifact_display_name("dbt-", shared, "two", digest)
+        assert one != two
 
 
 class TestEnsureArtifact:

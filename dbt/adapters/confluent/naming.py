@@ -2,7 +2,15 @@ import hashlib
 import re
 
 MAX_STATEMENT_NAME_LENGTH = 100
+_HASH_LENGTH = 6
 _ILLEGAL_CHARS_RE = re.compile(r"[^a-z0-9-]")
+
+
+def truncate_with_hash(base: str, max_length: int, hash_source: str) -> str:
+    """Cut `base` to fit `max_length`, ending in `-<hash of hash_source>`."""
+    hash_suffix = hashlib.md5(hash_source.encode()).hexdigest()[:_HASH_LENGTH]
+    max_base = max_length - 1 - len(hash_suffix)  # 1 for '-'
+    return f"{base[:max_base]}-{hash_suffix}"
 
 
 def sanitize_statement_name(name: str) -> str:
@@ -39,8 +47,6 @@ def sanitize_statement_name(name: str) -> str:
     needs_hash = replaced_illegal or len(sanitized) > MAX_STATEMENT_NAME_LENGTH
 
     if needs_hash:
-        hash_suffix = hashlib.md5(original.encode()).hexdigest()[:6]
-        max_base = MAX_STATEMENT_NAME_LENGTH - 1 - len(hash_suffix)  # 1 for '-'
-        sanitized = f"{sanitized[:max_base]}-{hash_suffix}"
+        sanitized = truncate_with_hash(sanitized, MAX_STATEMENT_NAME_LENGTH, original)
 
     return sanitized

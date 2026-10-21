@@ -558,7 +558,9 @@ flags:
 With `artifact_path`, dbt uploads the package as the function's artifact, which needs a key that
 can use the artifact API (the [Global API key](#tableflow), as for Tableflow). The artifact is
 named after the package's content (`<statement prefix><project>-<function>-<digest>`), so
-the same package always maps to the same artifact:
+the same package always maps to the same artifact. Artifact names are limited to 60 characters,
+so when the project and function names are too long to leave room for the digest, they are cut
+short and end in a hash of the full text; the digest is never cut:
 
 - An unchanged package reuses its artifact, and the function is left alone.
 - A changed package is uploaded as a new artifact, and the function is replaced to use it.
