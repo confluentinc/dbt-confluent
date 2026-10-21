@@ -42,13 +42,23 @@ After installing, scaffold a new project with:
 dbt init my_project
 ```
 
-Select `confluent` as the adapter and fill in the prompts for your Confluent Cloud credentials (API key, compute pool, environment, etc.).
+Select `confluent` as the adapter and fill in the prompts for your Confluent Cloud credentials.
 
-You can authenticate with either a **Global** Confluent Cloud API key (`global_api_key` / `global_api_secret`, which works against every route) or a **Flink-region** key (`flink_api_key` / `flink_api_secret`). The `compute_pool_id` is optional: omit it to run statements in the environment+region [default compute pool](https://docs.confluent.io/cloud/current/flink/concepts/compute-pools.html#default-compute-pools). This profile-level pool is the default for every model; individual models can override it with `config(compute_pool_id='...')` — see [Materializations](MATERIALIZATIONS.md#compute-pool).
+You have several options for configuring your credentials:
 
-[Tableflow](MATERIALIZATIONS.md#tableflow) requires a Global key — it resolves your Kafka cluster id via a route a Flink-region key can't reach.
+- **Use a Global API key**
+  - Uses a single API key & secret pair that works against every Confluent Cloud route used by this adapter.
+  - This is the simplest configuration for non-interactive use.
+  - Sets `global_api_key` & `global_api_secret`.
+- **Use a Flink-region API key**
+  - Flink-region API keys allow non-interactive use similar to global API keys, but are more restricted in scope.
+  - Some routes used by the adapter will not work with a Flink-region API key.
+    - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) requires a global API key.
+- **Use OAuth (interactive Confluent Cloud sign-in, no API key)**
+  - Sets `auth: oauth` in your profile to use OAuth login (the default is `auth: api_key`).
+  - Omit `global_api_key`/`global_api_secret`/`flink_api_key`/`flink_api_secret` when using `auth: oauth`.
 
-Alternatively, set `auth: oauth` in the profile to authenticate via interactive Confluent Cloud sign-in instead of an API key — the first connection opens a browser for a one-time login, which is then shared across the run. Omit `global_api_key`/`global_api_secret`/`flink_api_key`/`flink_api_secret` when using `auth: oauth`.
+`dbt init` will prompt you for a choice and ensure your profile is configured correctly.
 
 ### Concept mapping
 
