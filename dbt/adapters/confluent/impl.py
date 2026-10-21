@@ -205,6 +205,23 @@ class ConfluentAdapter(SQLAdapter):
                 "dbt_project.yml."
             )
 
+    @available
+    def require_artifact_credentials(
+        self, udf: functions.FunctionConfig, existing: functions.FunctionState | None
+    ) -> None:
+        """Raise before any artifact API call if the profile has no key that can make it.
+
+        Needed to upload an `artifact_path`, and to check an `artifact_id` before replacing
+        an `existing` function; creating a function from an `artifact_id` never calls the API.
+        """
+        if not (udf.artifact_config or existing):
+            return
+        if not self.config.credentials.global_api_key:
+            raise CompilationError(
+                "Function artifacts need a Global API key. Add `global_api_key`/"
+                "`global_api_secret` to your profile -- see README.md#configuration."
+            )
+
     @classmethod
     def quote(cls, identifier: str) -> str:
         """
