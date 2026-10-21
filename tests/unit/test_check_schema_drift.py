@@ -1,14 +1,16 @@
 """Unit tests for schema drift detection logic in ConfluentAdapter.
 
-The public `check_schema_drift` is a thin orchestrator over four helpers:
-- `_partition_drift_catalog` splits the unified UNION ALL agate.Table into
-  per-concern dicts.
+The public `check_schema_drift` is a thin orchestrator over four helpers, and
+takes the metadata already partitioned:
+- `_partition_drift_metadata` (behind `partition_drift_metadata`, which
+  check_for_schema_drift calls once) and `_partition_drift_columns` split the
+  metadata and columns queries' agate.Tables into per-concern structures.
 - `_check_column_drift`, `_check_options_drift`, `_check_distribution_drift`
   return a list of one-line violation strings (empty list = no drift). The
   orchestrator collects them all and raises a single CompilationError so the
   user sees every drift in one run instead of fixing them one at a time.
 
-We test the helpers directly rather than fabricating a unified catalog for
+We test the helpers directly rather than fabricating query results for
 every case — the orchestrator is small enough that a couple of partition
 tests cover its glue, while the per-concern logic gets exhaustive coverage.
 """
@@ -17,9 +19,11 @@ import pytest
 from confluent_sql.types import ColumnTypeDefinition
 from dbt_common.exceptions import CompilationError, DbtDatabaseError, DbtRuntimeError
 
-from dbt.adapters.confluent.impl import ConfluentAdapter, DryRunColumns
-from tests.unit._helpers import drift_catalog_row as _row
-from tests.unit._helpers import make_drift_catalog as _make_catalog
+from dbt.adapters.confluent.impl import ConfluentAdapter, DriftMetadata, DryRunColumns
+from tests.unit._helpers import drift_metadata_row as _row
+from tests.unit._helpers import make_drift_columns as _make_columns
+from tests.unit._helpers import make_drift_metadata as _make_metadata
+from tests.unit._helpers import partitioned_drift_metadata as _partitioned
 from tests.unit._helpers import relation as _relation
 
 # ---------------------------------------------------------------------------
@@ -258,177 +262,128 @@ class TestCheckDistributionDrift:
 
 
 # ---------------------------------------------------------------------------
-# _partition_drift_catalog
+# _partition_drift_metadata / _partition_drift_columns
 # ---------------------------------------------------------------------------
 
 
-class TestPartitionDriftCatalog:
-    def test_splits_columns_by_table_name(self):
-        catalog = _make_catalog(
-            [
-                _row(section="COLUMNS", table_name="existing", col_name="id", data_type="BIGINT"),
-                _row(section="COLUMNS", table_name="temp", col_name="id", data_type="BIGINT"),
-                _row(
-                    section="COLUMNS",
-                    table_name="temp",
-                    col_name="extra",
-                    data_type="STRING",
-                ),
-            ]
+class TestPartitionDriftMetadata:
+    def test_tables_row_sets_found(self):
+        metadata = _make_metadata(
+            [_row(section="TABLES", is_distributed="NO", is_materialized="NO")]
         )
-        existing, expected, options, distribution, _ = ConfluentAdapter._partition_drift_catalog(
-            catalog, "existing", "temp"
+        assert ConfluentAdapter._partition_drift_metadata(metadata) == DriftMetadata(
+            found=True, is_materialized=False, options={}, distribution=None
         )
-        assert existing == {"id": "BIGINT"}
-        assert expected == {"id": "BIGINT", "extra": "STRING"}
-        assert options == {}
-        assert distribution is None
 
-    def test_extracts_distribution_from_tables_and_columns(self):
-        catalog = _make_catalog(
+    def test_no_tables_row_is_not_found(self):
+        """Metadata lag (or a table dropped outside dbt): TABLE_OPTIONS rows alone don't count
+        as finding the table."""
+        metadata = _make_metadata(
+            [_row(section="TABLE_OPTIONS", option_key="changelog.mode", option_value="upsert")]
+        )
+        partitioned = ConfluentAdapter._partition_drift_metadata(metadata)
+        assert partitioned.found is False
+        assert partitioned.options == {"changelog.mode": "upsert"}
+
+    def test_extracts_distribution_from_distribution_rows(self):
+        metadata = _make_metadata(
             [
-                _row(
-                    section="COLUMNS",
-                    table_name="existing",
-                    col_name="a",
-                    data_type="INT",
-                    dist_position=2,
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name="existing",
-                    col_name="b",
-                    data_type="INT",
-                    dist_position=1,
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name="existing",
-                    col_name="c",
-                    data_type="INT",
-                ),
-                _row(
-                    section="TABLES",
-                    table_name="existing",
-                    is_distributed="YES",
-                    dist_buckets=4,
-                ),
+                _row(section="TABLES", is_distributed="YES", dist_buckets=4),
+                _row(section="DISTRIBUTION", col_name="a", dist_position=2),
+                _row(section="DISTRIBUTION", col_name="b", dist_position=1),
             ]
         )
-        _, _, _, distribution, _ = ConfluentAdapter._partition_drift_catalog(
-            catalog, "existing", "temp"
-        )
+        distribution = ConfluentAdapter._partition_drift_metadata(metadata).distribution
         # Ordering by DISTRIBUTION_ORDINAL_POSITION: b (pos=1), then a (pos=2)
         assert distribution == {"buckets": 4, "columns": ["b", "a"]}
 
+    def test_distributed_without_distribution_rows_has_no_columns(self):
+        """A keyless table's default `DISTRIBUTED INTO 6 BUCKETS` has no distribution columns
+        (probe e3cbfffb), and the macro skips the DISTRIBUTION section when distributed_by isn't
+        checked. Both read as no columns."""
+        metadata = _make_metadata([_row(section="TABLES", is_distributed="YES", dist_buckets=6)])
+        distribution = ConfluentAdapter._partition_drift_metadata(metadata).distribution
+        assert distribution == {"buckets": 6, "columns": []}
+
     def test_no_distribution_when_is_distributed_no(self):
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="TABLES",
-                    table_name="existing",
-                    is_distributed="NO",
-                    dist_buckets=None,
-                ),
-            ]
-        )
-        _, _, _, distribution, _ = ConfluentAdapter._partition_drift_catalog(
-            catalog, "existing", "temp"
-        )
-        assert distribution is None
+        metadata = _make_metadata([_row(section="TABLES", is_distributed="NO", dist_buckets=None)])
+        assert ConfluentAdapter._partition_drift_metadata(metadata).distribution is None
 
     def test_is_distributed_case_insensitive(self):
         """Defensive: confluent-sql may someday return 'yes' / 'Yes' / True
         instead of the canonical 'YES'.  Comparison must not silently miss it."""
-        catalog = _make_catalog(
+        metadata = _make_metadata(
             [
-                _row(
-                    section="COLUMNS",
-                    table_name="existing",
-                    col_name="id",
-                    data_type="BIGINT",
-                    dist_position=1,
-                ),
-                _row(
-                    section="TABLES",
-                    table_name="existing",
-                    is_distributed="yes",
-                    dist_buckets=4,
-                ),
+                _row(section="TABLES", is_distributed="yes", dist_buckets=4),
+                _row(section="DISTRIBUTION", col_name="id", dist_position=1),
             ]
         )
-        _, _, _, distribution, _ = ConfluentAdapter._partition_drift_catalog(
-            catalog, "existing", "temp"
-        )
+        distribution = ConfluentAdapter._partition_drift_metadata(metadata).distribution
         assert distribution == {"buckets": 4, "columns": ["id"]}
 
     def test_collects_table_options(self):
-        catalog = _make_catalog(
+        metadata = _make_metadata(
             [
-                _row(
-                    section="TABLE_OPTIONS",
-                    table_name="existing",
-                    option_key="changelog.mode",
-                    option_value="upsert",
-                ),
-                _row(
-                    section="TABLE_OPTIONS",
-                    table_name="existing",
-                    option_key="connector",
-                    option_value="faker",
-                ),
+                _row(section="TABLES", is_distributed="NO"),
+                _row(section="TABLE_OPTIONS", option_key="changelog.mode", option_value="upsert"),
+                _row(section="TABLE_OPTIONS", option_key="connector", option_value="faker"),
             ]
         )
-        _, _, options, _, _ = ConfluentAdapter._partition_drift_catalog(
-            catalog, "existing", "temp"
-        )
+        options = ConfluentAdapter._partition_drift_metadata(metadata).options
         assert options == {"changelog.mode": "upsert", "connector": "faker"}
 
     def test_is_materialized_detected(self):
         """IS_MATERIALIZED='YES' in the TABLES section flags a materialized
         table; the default distribution flags ('NO') must not mask it."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="TABLES",
-                    table_name="existing",
-                    is_distributed="NO",
-                    is_materialized="YES",
-                ),
-            ]
+        metadata = _make_metadata(
+            [_row(section="TABLES", is_distributed="NO", is_materialized="YES")]
         )
-        *_, is_materialized = ConfluentAdapter._partition_drift_catalog(
-            catalog, "existing", "temp"
-        )
-        assert is_materialized is True
+        assert ConfluentAdapter._partition_drift_metadata(metadata).is_materialized is True
 
     def test_is_materialized_false_for_regular_table(self):
-        catalog = _make_catalog(
+        metadata = _make_metadata(
+            [_row(section="TABLES", is_distributed="YES", dist_buckets=4, is_materialized="NO")]
+        )
+        assert ConfluentAdapter._partition_drift_metadata(metadata).is_materialized is False
+
+    def test_available_to_jinja(self):
+        """check_for_schema_drift calls partition_drift_metadata from Jinja, and the macro
+        harness's mock adapter wouldn't notice it missing @available."""
+        assert "partition_drift_metadata" in ConfluentAdapter._available_
+        metadata = _make_metadata([_row(section="TABLES", is_distributed="NO")])
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        assert adapter.partition_drift_metadata(metadata) == (
+            ConfluentAdapter._partition_drift_metadata(metadata)
+        )
+
+
+class TestPartitionDriftColumns:
+    def test_splits_columns_by_table_name(self):
+        columns = _make_columns(
             [
-                _row(
-                    section="TABLES",
-                    table_name="existing",
-                    is_distributed="YES",
-                    dist_buckets=4,
-                    is_materialized="NO",
-                ),
+                ("existing", "id", "BIGINT"),
+                ("temp", "id", "BIGINT"),
+                ("temp", "extra", "STRING"),
             ]
         )
-        *_, is_materialized = ConfluentAdapter._partition_drift_catalog(
-            catalog, "existing", "temp"
-        )
-        assert is_materialized is False
-
-    def test_no_temp_identifier_reads_existing_only(self):
-        """Dry-run path: the catalog has no temp rows and no temp identifier."""
-        catalog = _make_catalog(
-            [_row(section="COLUMNS", table_name="existing", col_name="id", data_type="BIGINT")]
-        )
-        existing, expected, *_ = ConfluentAdapter._partition_drift_catalog(
-            catalog, "existing", None
-        )
+        existing, expected = ConfluentAdapter._partition_drift_columns(columns, "existing", "temp")
         assert existing == {"id": "BIGINT"}
-        assert expected == {}
+        assert expected == {"id": "BIGINT", "extra": "STRING"}
+
+    def test_skips_and_warns_on_an_unexpected_table(self, mocker):
+        warning = mocker.patch("dbt.adapters.confluent.impl.logger").warning
+        columns = _make_columns(
+            [
+                ("existing", "id", "BIGINT"),
+                ("other", "x", "INT"),
+                ("temp", "id", "BIGINT"),
+            ]
+        )
+        existing, expected = ConfluentAdapter._partition_drift_columns(columns, "existing", "temp")
+        assert existing == {"id": "BIGINT"}
+        assert expected == {"id": "BIGINT"}
+        warning.assert_called_once()
+        assert "other" in warning.call_args.args[0]
 
 
 # ---------------------------------------------------------------------------
@@ -449,62 +404,38 @@ DECIMAL_10_2 = _type({"type": "DECIMAL", "nullable": True, "precision": 10, "sca
 class TestCheckSchemaDriftOrchestrator:
     """Smoke tests for the public orchestrator. The per-concern helpers are
     exhaustively tested above; here we confirm only that the orchestrator
-    accepts Relation objects, partitions the catalog, collects violations
-    from every helper, and raises one error containing all of them."""
+    accepts Relation objects, partitions the query results, collects
+    violations from every helper, and raises one error containing all of
+    them."""
 
-    # Catalog rows reference tables by their `INFORMATION_SCHEMA` identifier,
-    # so the catalog labels must match the relations' identifiers exactly —
-    # otherwise the COLUMNS rows go unrouted and column drift silently
-    # disappears. We use "my_table" / "tmp_my_table" consistently below.
+    # get_drift_columns rows reference tables by their `INFORMATION_SCHEMA`
+    # identifier, so the labels must match the relations' identifiers exactly —
+    # otherwise the rows go unrouted and column drift silently disappears. We
+    # use "my_table" / "tmp_my_table" consistently below.
     EXISTING_ID = "my_table"
     TEMP_ID = "tmp_my_table"
 
     def test_collects_violations_from_every_concern(self):
         """When column + options + distribution are all drifted, the single
         raised error must mention every category — no fail-fast."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                    dist_position=1,
-                ),
-                _row(
-                    section="TABLES",
-                    table_name=self.EXISTING_ID,
-                    is_distributed="YES",
-                    dist_buckets=4,
-                ),
-                _row(
-                    section="TABLE_OPTIONS",
-                    table_name=self.EXISTING_ID,
-                    option_key="changelog.mode",
-                    option_value="upsert",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="extra",
-                    data_type="STRING",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)  # bypass __init__
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                catalog,
+                self._metadata(
+                    _row(
+                        section="TABLE_OPTIONS",
+                        option_key="changelog.mode",
+                        option_value="upsert",
+                    ),
+                    _row(section="DISTRIBUTION", col_name="id", dist_position=1),
+                    is_distributed="YES",
+                    dist_buckets=4,
+                ),
                 expected_with={"changelog.mode": "append"},
                 expected_distribution={"columns": ["other"], "buckets": 8},
+                drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT", "extra": "STRING"}),
             )
         msg = str(excinfo.value)
         assert "Schema drift detected for" in msg
@@ -517,35 +448,18 @@ class TestCheckSchemaDriftOrchestrator:
 
     def test_options_only_drift(self):
         """When only options drift, only options-related violations appear."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="TABLE_OPTIONS",
-                    table_name=self.EXISTING_ID,
-                    option_key="changelog.mode",
-                    option_value="upsert",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                catalog,
+                self._metadata(
+                    _row(
+                        section="TABLE_OPTIONS", option_key="changelog.mode", option_value="upsert"
+                    )
+                ),
                 expected_with={"changelog.mode": "append"},
+                drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
             )
         msg = str(excinfo.value)
         assert "option: 'changelog.mode'" in msg
@@ -558,97 +472,44 @@ class TestCheckSchemaDriftOrchestrator:
         """streaming_source's `connector` config is rendered into the DDL's
         WITH clause but lives outside the `with` config — the orchestrator
         must merge it into the expected options so changing it is caught."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="TABLE_OPTIONS",
-                    table_name=self.EXISTING_ID,
-                    option_key="connector",
-                    option_value="faker",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                catalog,
+                self._metadata(
+                    _row(section="TABLE_OPTIONS", option_key="connector", option_value="faker")
+                ),
                 expected_with={},
                 expected_connector="datagen",
+                drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
             )
         msg = str(excinfo.value)
         assert "option: 'connector' existing='faker', expected='datagen'" in msg
 
     def test_matching_connector_passes(self):
         """A connector that matches the existing table's option is no drift."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="TABLE_OPTIONS",
-                    table_name=self.EXISTING_ID,
-                    option_key="connector",
-                    option_value="faker",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         adapter.check_schema_drift(
             _relation(self.EXISTING_ID),
             _relation(self.TEMP_ID),
-            catalog,
+            self._metadata(
+                _row(section="TABLE_OPTIONS", option_key="connector", option_value="faker")
+            ),
             expected_with={},
             expected_connector="faker",
+            drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
         )
 
     def test_no_drift_returns_silently(self):
         """When nothing has drifted the orchestrator returns without raising."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         adapter.check_schema_drift(
             _relation(self.EXISTING_ID),
             _relation(self.TEMP_ID),
-            catalog,
+            self._metadata(),
             expected_with={},
+            drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
         )
 
     def test_materialized_table_raises_dedicated_error(self):
@@ -656,36 +517,15 @@ class TestCheckSchemaDriftOrchestrator:
         Flink materialized table) must raise its own error, not a drift list —
         the MT can't be managed by drop-and-recreate at all, so per-concern
         guidance would be noise. It takes precedence over other violations."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                # A drifted column that must NOT surface: the MT error wins.
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="renamed",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="TABLES",
-                    table_name=self.EXISTING_ID,
-                    is_distributed="NO",
-                    is_materialized="YES",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                catalog,
+                self._metadata(is_materialized="YES"),
                 expected_with={},
+                # A drifted column that must NOT surface: the MT error wins.
+                drift_columns=self._columns({"id": "BIGINT"}, {"renamed": "BIGINT"}),
             )
         msg = str(excinfo.value)
         assert "materialized table" in msg
@@ -697,36 +537,14 @@ class TestCheckSchemaDriftOrchestrator:
         """enforce='columns' (the streaming restart path under
         on_schema_drift='ignore') must still reject a materialized table:
         the restart would submit an INSERT against it."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                # Columns match exactly — only the MT flag differs.
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="TABLES",
-                    table_name=self.EXISTING_ID,
-                    is_distributed="NO",
-                    is_materialized="YES",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                catalog,
+                self._metadata(is_materialized="YES"),
                 expected_with={},
+                drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
                 enforce="columns",
             )
         assert "materialized table" in str(excinfo.value)
@@ -738,36 +556,20 @@ class TestCheckSchemaDriftOrchestrator:
 
         This is the one distribution-violation string that does not start with
         'distribution columns:'/'distribution buckets:', and the only path that
-        drives `_partition_drift_catalog` to return `existing_distribution=None`
+        drives `_partition_drift_metadata` to return `distribution=None`
         while `expected` is set — so we exercise it end-to-end (partition →
         orchestrator) rather than only at the `_check_distribution_drift` helper.
         """
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                # IS_DISTRIBUTED='NO' → partition yields existing_distribution=None
-                _row(section="TABLES", table_name=self.EXISTING_ID, is_distributed="NO"),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                catalog,
+                # IS_DISTRIBUTED='NO' → partition yields distribution=None
+                self._metadata(),
                 expected_with={},
                 expected_distribution={"columns": ["id"], "buckets": 4},
+                drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
             )
         msg = str(excinfo.value)
         assert "distribution: existing=<none>" in msg
@@ -783,31 +585,17 @@ class TestCheckSchemaDriftOrchestrator:
         metadata propagation lag, so we surface it as a retriable
         DbtDatabaseError with a distinct, diagnosable message.
         """
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="value",
-                    data_type="STRING",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(DbtDatabaseError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                catalog,
+                self._metadata(),
                 expected_with={},
+                drift_columns=self._columns({"id": "BIGINT", "value": "STRING"}, {}),
             )
         msg = str(excinfo.value)
+        assert "expected schema" in msg
         assert "INFORMATION_SCHEMA" in msg
         # Must not look like a regular column-list drift error.
         assert "drift detected" not in msg.lower()
@@ -822,137 +610,79 @@ class TestCheckSchemaDriftOrchestrator:
         retriable DbtDatabaseError, not a CompilationError advising a
         destructive --full-refresh.
         """
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="value",
-                    data_type="STRING",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(DbtDatabaseError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                catalog,
+                self._metadata(),
                 expected_with={},
+                drift_columns=self._columns({}, {"id": "BIGINT", "value": "STRING"}),
             )
         msg = str(excinfo.value)
+        assert "existing schema" in msg
         assert "INFORMATION_SCHEMA" in msg
         # Must not look like a regular column-list drift error.
         assert "drift detected" not in msg.lower()
 
     def test_enforce_columns_ignores_options_and_distribution_drift(self):
         """With enforce='columns', only column violations should raise."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                    dist_position=1,
-                ),
-                _row(
-                    section="TABLES",
-                    table_name=self.EXISTING_ID,
-                    is_distributed="YES",
-                    dist_buckets=4,
-                ),
-                _row(
-                    section="TABLE_OPTIONS",
-                    table_name=self.EXISTING_ID,
-                    option_key="changelog.mode",
-                    option_value="upsert",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         # Options and distribution differ, but enforce='columns' suppresses
         # those; columns match so no error is raised.
         adapter.check_schema_drift(
             _relation(self.EXISTING_ID),
             _relation(self.TEMP_ID),
-            catalog,
+            self._metadata(
+                _row(section="TABLE_OPTIONS", option_key="changelog.mode", option_value="upsert"),
+                _row(section="DISTRIBUTION", col_name="id", dist_position=1),
+                is_distributed="YES",
+                dist_buckets=4,
+            ),
             expected_with={"changelog.mode": "append"},
             expected_distribution={"columns": ["other"], "buckets": 8},
+            drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
             enforce="columns",
         )
 
     def test_enforce_columns_still_raises_on_column_drift(self):
         """enforce='columns' must still surface real column drift."""
-        catalog = _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                _row(
-                    section="COLUMNS",
-                    table_name=self.TEMP_ID,
-                    col_name="extra",
-                    data_type="STRING",
-                ),
-            ]
-        )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                catalog,
+                self._metadata(),
                 expected_with={},
+                drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT", "extra": "STRING"}),
                 enforce="columns",
             )
         assert "column added: 'extra'" in str(excinfo.value)
 
-    def _existing_catalog(self, *rows):
-        """The dry-run path's catalog: the existing table's rows only. Its COLUMNS rows feed
-        only the metadata-lag guard; the compared columns come from the dry-runs."""
-        return _make_catalog(
-            [
-                _row(
-                    section="COLUMNS",
-                    table_name=self.EXISTING_ID,
-                    col_name="id",
-                    data_type="BIGINT",
-                ),
-                *rows,
-            ]
+    @staticmethod
+    def _metadata(*rows, **tables_row):
+        """The partitioned metadata for a TABLES row for the existing table (not distributed and
+        not materialized, unless tables_row says otherwise), then `rows`."""
+        tables = {"is_distributed": "NO", "is_materialized": "NO", **tables_row}
+        return _partitioned([_row(section="TABLES", **tables), *rows])
+
+    def _columns(self, existing, temp):
+        """`_get_drift_columns`' result, from {column_name: data_type} maps for the existing and
+        temp tables."""
+        return _make_columns(
+            [(self.EXISTING_ID, name, data_type) for name, data_type in existing.items()]
+            + [(self.TEMP_ID, name, data_type) for name, data_type in temp.items()]
         )
 
     def test_dry_run_columns_replace_temp_rows(self):
-        """Dry-run path: both column maps arrive resolved, the catalog holds only the existing
+        """Dry-run path: both column maps arrive resolved, the metadata holds only the existing
         table, and drift is still detected."""
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         with pytest.raises(CompilationError) as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 None,
-                self._existing_catalog(),
+                self._metadata(),
                 expected_with={},
                 dry_run_columns=DryRunColumns(
                     existing={"id": BIGINT}, expected={"id": BIGINT, "extra": STRING}
@@ -965,7 +695,7 @@ class TestCheckSchemaDriftOrchestrator:
         adapter.check_schema_drift(
             _relation(self.EXISTING_ID),
             None,
-            self._existing_catalog(),
+            self._metadata(),
             expected_with={},
             dry_run_columns=DryRunColumns(
                 existing={"price": DECIMAL_10_2}, expected={"price": DECIMAL_10_2}
@@ -975,19 +705,14 @@ class TestCheckSchemaDriftOrchestrator:
     def test_dry_run_columns_with_enforce_columns(self):
         """The streaming restart path under on_schema_drift='ignore' dry-runs too:
         options/distribution drift is ignored, column drift still raises."""
-        catalog = self._existing_catalog(
-            _row(
-                section="TABLE_OPTIONS",
-                table_name=self.EXISTING_ID,
-                option_key="changelog.mode",
-                option_value="upsert",
-            ),
+        metadata = self._metadata(
+            _row(section="TABLE_OPTIONS", option_key="changelog.mode", option_value="upsert"),
         )
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
         adapter.check_schema_drift(
             _relation(self.EXISTING_ID),
             None,
-            catalog,
+            metadata,
             expected_with={"changelog.mode": "append"},
             enforce="columns",
             dry_run_columns=DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT}),
@@ -996,7 +721,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 None,
-                catalog,
+                metadata,
                 expected_with={"changelog.mode": "append"},
                 enforce="columns",
                 dry_run_columns=DryRunColumns(
@@ -1004,18 +729,19 @@ class TestCheckSchemaDriftOrchestrator:
                 ),
             )
 
-    def test_dry_run_columns_existing_empty_guard_still_fires(self):
-        """The existing-side propagation-lag guard reads the catalog on the dry-run path too:
-        it protects the options and distribution checks."""
+    def test_dry_run_columns_missing_tables_row_raises(self):
+        """The TABLES-row guard runs on the dry-run path too: without it, options and
+        distribution would read as empty and be reported as drift."""
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
-        with pytest.raises(DbtDatabaseError, match="existing schema"):
+        with pytest.raises(DbtDatabaseError, match="could not find") as excinfo:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 None,
-                _make_catalog([]),
+                _partitioned([]),
                 expected_with={},
                 dry_run_columns=DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT}),
             )
+        assert "INFORMATION_SCHEMA.TABLES" in str(excinfo.value)
 
     def test_empty_expected_columns_is_a_bug_not_lag(self):
         """The resolver returns None (fall back), never an empty expected map, which must
@@ -1025,7 +751,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 None,
-                _make_catalog([]),
+                _partitioned([]),
                 expected_with={},
                 dry_run_columns=DryRunColumns(existing={"id": BIGINT}, expected={}),
             )
@@ -1037,7 +763,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID) if both else None,
-                _make_catalog([]),
+                _partitioned([]),
                 expected_with={},
                 dry_run_columns=(
                     DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT})
@@ -1047,6 +773,73 @@ class TestCheckSchemaDriftOrchestrator:
             )
         assert "dbt-confluent" in str(excinfo.value)
 
+    @pytest.mark.parametrize("path", ["temp_without_columns", "dry_run_with_columns"])
+    def test_drift_columns_pair_with_temp_relation(self, path):
+        """drift_columns is the fallback's COLUMNS read: required with temp_relation, and a bug
+        without it."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        if path == "temp_without_columns":
+            arguments = {"temp_relation": _relation(self.TEMP_ID)}
+        else:
+            arguments = {
+                "temp_relation": None,
+                "dry_run_columns": DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT}),
+                "drift_columns": self._columns({"id": "BIGINT"}, {}),
+            }
+        with pytest.raises(DbtRuntimeError, match="drift_columns") as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                drift_metadata=self._metadata(),
+                expected_with={},
+                **arguments,
+            )
+        assert "dbt-confluent bug" in str(excinfo.value)
+
+    def test_missing_tables_row_raises_on_fallback(self):
+        """No TABLES row on the fallback path must not read as "no options, no distribution"
+        and report drift against them: it's the retriable lag error."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtDatabaseError, match="could not find") as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                _partitioned([]),
+                expected_with={"changelog.mode": "append"},
+                expected_distribution={"columns": ["id"], "buckets": 4},
+                drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
+            )
+        msg = str(excinfo.value)
+        assert "INFORMATION_SCHEMA.TABLES" in msg
+        assert "drift detected" not in msg.lower()
+
+    def test_missing_tables_row_checked_before_temp_columns(self):
+        """Guard order on the fallback: materialized, TABLES row, temp columns, existing
+        columns."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(DbtDatabaseError, match="could not find"):
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                _partitioned([]),
+                expected_with={},
+                drift_columns=self._columns({}, {}),
+            )
+
+    def test_distributed_table_without_distribution_columns_reports_drift(self):
+        """A keyless table's default distribution (IS_DISTRIBUTED='YES', no distribution
+        columns) gaining a distributed_by is real drift, not a lag error (design Q3)."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                self._metadata(is_distributed="YES", dist_buckets=6),
+                expected_with={},
+                expected_distribution={"columns": ["id"]},
+                dry_run_columns=DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT}),
+            )
+        assert "distribution columns: existing=[], expected=['id']" in str(excinfo.value)
+
     @pytest.mark.parametrize("existing_nullable", [True, False])
     def test_top_level_nullability_is_ignored(self, existing_nullable):
         """A yml not_null column fed by a nullable source column (or the reverse) is no drift,
@@ -1055,7 +848,7 @@ class TestCheckSchemaDriftOrchestrator:
         adapter.check_schema_drift(
             _relation(self.EXISTING_ID),
             None,
-            self._existing_catalog(),
+            self._metadata(),
             expected_with={},
             dry_run_columns=DryRunColumns(
                 existing={"id": _type({"type": "BIGINT", "nullable": not existing_nullable})},
@@ -1072,7 +865,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 None,
-                self._existing_catalog(),
+                self._metadata(),
                 expected_with={},
                 dry_run_columns=DryRunColumns(
                     existing={
@@ -1108,7 +901,7 @@ class TestCheckSchemaDriftOrchestrator:
         adapter.check_schema_drift(
             _relation(self.EXISTING_ID),
             None,
-            self._existing_catalog(),
+            self._metadata(),
             expected_with={},
             dry_run_columns=DryRunColumns(
                 existing={
@@ -1157,7 +950,7 @@ class TestCheckSchemaDriftOrchestrator:
         adapter.check_schema_drift(
             _relation(self.EXISTING_ID),
             None,
-            self._existing_catalog(),
+            self._metadata(),
             expected_with={},
             dry_run_columns=DryRunColumns(existing={"m": existing}, expected={"m": expected}),
         )
@@ -1185,7 +978,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 None,
-                self._existing_catalog(),
+                self._metadata(),
                 expected_with={},
                 dry_run_columns=DryRunColumns(existing={"m": existing}, expected={"m": expected}),
             )

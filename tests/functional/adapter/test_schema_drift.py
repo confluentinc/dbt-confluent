@@ -11,13 +11,14 @@ When a table already exists and --full-refresh is not set, the adapter should:
 Scope note: the drift *detection logic* (columns added/removed/renamed/type,
 WITH options, distribution columns/buckets, partitioning, collect-and-raise)
 is exhaustively unit-tested in tests/unit/test_check_schema_drift.py, which
-runs in milliseconds against hand-built catalogs. The functional tests here
-exist only to prove the end-to-end wiring against a live Confluent backend:
-that each materialization fires the drift check, that get_drift_catalog reads
-real INFORMATION_SCHEMA output, and that the skip / error / full-refresh /
-ignore behaviors hold. We therefore keep ONE representative drift case per
-materialization rather than re-verifying every drift kind through a (slow)
-live run — the kind-by-kind discrimination is the unit tests' job.
+runs in milliseconds against hand-built query results. The functional tests
+here exist only to prove the end-to-end wiring against a live Confluent
+backend: that each materialization fires the drift check, that the drift
+queries read real INFORMATION_SCHEMA output, and that the skip / error /
+full-refresh / ignore behaviors hold. We therefore keep ONE representative
+drift case per materialization rather than re-verifying every drift kind
+through a (slow) live run — the kind-by-kind discrimination is the unit
+tests' job.
 """
 
 import re
@@ -50,6 +51,8 @@ _CREATE_TABLE_TARGET = re.compile(
 )
 # The model name in dbt's default query comment, e.g. "node_id": "model.proj.my_table".
 _QUERY_COMMENT_MODEL = re.compile(r'"node_id":\s*"model\.[^".]+\.(?P<model>[^"]+)"')
+# An INFORMATION_SCHEMA view a statement reads, e.g. INFORMATION_SCHEMA.`TABLES`.
+_INFORMATION_SCHEMA_VIEW = re.compile(r"INFORMATION_SCHEMA\.`(?P<view>\w+)`")
 
 
 def created_table_identifiers(submitted: list[SubmittedStatement]) -> set[str]:
@@ -98,6 +101,34 @@ def dry_run_models(submitted: list[SubmittedStatement]) -> set[str]:
     return models
 
 
+def information_schema_statements(submitted: list[SubmittedStatement], model: str) -> list[str]:
+    """The SQL of every statement `model` submitted that reads an INFORMATION_SCHEMA view written
+    as INFORMATION_SCHEMA.`VIEW` (uppercase, the form the adapter's own queries use), in submission
+    order. A read written another way isn't counted. The model is read from the node_id in dbt's
+    query comment. Counting them pins how many INFORMATION_SCHEMA round-trips each model costs."""
+    statements = []
+    for statement in submitted:
+        sql = statement["sql"]
+        match = _QUERY_COMMENT_MODEL.search(sql)
+        if match and match.group("model") == model and _INFORMATION_SCHEMA_VIEW.search(sql):
+            statements.append(sql)
+    return statements
+
+
+def drift_queries(submitted: list[SubmittedStatement], model: str) -> list[str]:
+    """The SQL of `model`'s drift-check INFORMATION_SCHEMA queries (_get_drift_metadata and
+    _get_drift_columns), in submission order. They're told apart from the model's other
+    INFORMATION_SCHEMA reads by their `col_name` column, which no other adapter query uses."""
+    return [
+        sql for sql in information_schema_statements(submitted, model) if " AS col_name" in sql
+    ]
+
+
+def views_read(sql: str) -> list[str]:
+    """The INFORMATION_SCHEMA views `sql` reads, sorted, each once."""
+    return sorted(set(_INFORMATION_SCHEMA_VIEW.findall(sql)))
+
+
 def _submitted(sql: str) -> SubmittedStatement:
     return {"name": "dbt-1", "sql": sql, "properties": {}, "is_dry_run": False}
 
@@ -117,6 +148,35 @@ def test_created_table_identifiers_rejects_an_unparseable_target():
     """Offline: a CREATE TABLE the regex can't read must fail, not be skipped."""
     with pytest.raises(AssertionError, match="Can't parse the CREATE TABLE target"):
         created_table_identifiers([_submitted("CREATE TABLE (id INT)")])
+
+
+def test_drift_queries_picks_the_models_drift_queries():
+    """Offline: no Confluent connection."""
+    model_a = '/* {"node_id": "model.proj.a"} */\n'
+    model_b = '/* {"node_id": "model.proj.b"} */\n'
+    submitted = [
+        _submitted(
+            model_a + "SELECT 'TABLES' AS section, CAST(NULL AS STRING) AS col_name "
+            "FROM INFORMATION_SCHEMA.`TABLES` UNION ALL SELECT 'TABLE_OPTIONS' AS section, "
+            "CAST(NULL AS STRING) AS col_name FROM INFORMATION_SCHEMA.`TABLE_OPTIONS`"
+        ),
+        # Another model's drift query.
+        _submitted(model_b + "SELECT COLUMN_NAME AS col_name FROM INFORMATION_SCHEMA.`COLUMNS`"),
+        # Not INFORMATION_SCHEMA at all.
+        _submitted(model_a + "DROP TABLE IF EXISTS `env`.`cluster`.`t`"),
+        # get_relation_kind's read: INFORMATION_SCHEMA, but not a drift query.
+        _submitted(model_a + "SELECT IS_MATERIALIZED FROM INFORMATION_SCHEMA.`TABLES`"),
+        _submitted(
+            model_a + "SELECT TABLE_NAME AS table_name, COLUMN_NAME AS col_name "
+            "FROM INFORMATION_SCHEMA.`COLUMNS` UNION ALL SELECT TABLE_NAME AS table_name, "
+            "COLUMN_NAME AS col_name FROM INFORMATION_SCHEMA.`COLUMNS`"
+        ),
+    ]
+    assert len(information_schema_statements(submitted, "a")) == 3
+    assert [views_read(sql) for sql in drift_queries(submitted, "a")] == [
+        ["TABLES", "TABLE_OPTIONS"],
+        ["COLUMNS"],
+    ]
 
 
 # -- Shared faker source feeding the table / streaming_table models --
@@ -237,7 +297,8 @@ class TestSchemaDriftDetection(ConfluentFixtures):
 
     Per-kind discrimination (renamed/removed/type/options) is covered by the
     unit tests; here a single added-column drift per materialization proves the
-    check is wired and reaches check_schema_drift through the live catalog query.
+    check is wired and reaches check_schema_drift through the live
+    INFORMATION_SCHEMA queries.
     """
 
     # Every model in this project runs a drift check on a non-full-refresh run.
@@ -294,6 +355,28 @@ class TestSchemaDriftDetection(ConfluentFixtures):
         assert drift_temp_tables_created(
             submitted, project.adapter, *self.DRIFT_CHECKED_MODELS
         ) == {"source_for_drift", "my_source"}
+        # The SELECT models read only the metadata; the streaming_source models read it, then
+        # read full COLUMNS after creating their temp table.
+        for model in ("my_table", "my_streaming_table"):
+            assert [views_read(sql) for sql in drift_queries(submitted, model)] == [
+                ["TABLES", "TABLE_OPTIONS"]
+            ], model
+        for model in ("source_for_drift", "my_source"):
+            assert [views_read(sql) for sql in drift_queries(submitted, model)] == [
+                ["TABLES", "TABLE_OPTIONS"],
+                ["COLUMNS"],
+            ], model
+        # INFORMATION_SCHEMA round-trips per model: the drift queries, plus, for a temp table,
+        # drop_relation's IS_MATERIALIZED lookup when post_model_hook drops it.
+        expected_reads = {
+            "my_table": 1,
+            "my_streaming_table": 1,
+            "source_for_drift": 3,
+            "my_source": 3,
+        }
+        assert {
+            model: len(information_schema_statements(submitted, model)) for model in expected_reads
+        } == expected_reads
         # The streaming_source temp tables are dropped by post_model_hook, not
         # inline — prove the happy-path cleanup wiring.
         assert_tables_absent(project, *self._drift_temp_tables(project))
@@ -311,10 +394,10 @@ class TestSchemaDriftDetection(ConfluentFixtures):
         """Every materialization drifted at once, asserted in a single run.
 
         A `dbt run` drift-checks *every* model in the project (each pays two dry-runs or a
-        temp-table create, plus a catalog query), so the per-run cost is paid whether one model
-        drifts or all three. We therefore mutate all three and assert each raises, rather than
-        spending three separate runs for no extra coverage — the per-kind detection logic is
-        unit-tested.
+        temp-table create, plus its INFORMATION_SCHEMA queries), so the per-run cost is paid
+        whether one model drifts or all three. We therefore mutate all three and assert each
+        raises, rather than spending three separate runs for no extra coverage — the per-kind
+        detection logic is unit-tested.
         """
         set_model_file(project, relation(project, "my_table"), TABLE_MODEL_EXTRA_COLUMN)
         set_model_file(
@@ -653,13 +736,28 @@ class TestDistributedBySchemaDrift(ConfluentFixtures):
         project.run_sql("drop table if exists dist_drift_ctas")
         project.run_sql("drop table if exists dist_drift_source")
 
-    def test_second_run_skips(self, project):
+    def test_second_run_skips(self, project, monkeypatch):
         """Re-running with the same distribution must skip cleanly for both
-        materializations — also proves both DISTRIBUTED BY clauses rendered."""
+        materializations — also proves both DISTRIBUTED BY clauses rendered.
+        With distributed_by set, the metadata query also reads the distribution
+        columns, and only those."""
+        submitted = capture_submitted_statement_properties(monkeypatch)
         results = run_dbt(["run"])
         assert len(results) == 3
         for r in results:
             assert r.message == "SKIP", f"{r.node.name} was not skipped (message: {r.message})"
+        (ctas_metadata,) = drift_queries(submitted, "dist_drift_ctas")
+        source_metadata, source_columns = drift_queries(submitted, "dist_drift_source")
+        for metadata in (ctas_metadata, source_metadata):
+            assert views_read(metadata) == ["COLUMNS", "TABLES", "TABLE_OPTIONS"]
+            assert "DISTRIBUTION_ORDINAL_POSITION IS NOT NULL" in metadata
+        assert views_read(source_columns) == ["COLUMNS"]
+        # The distribution columns ride in the metadata query, so distributed_by adds no
+        # round-trip.
+        expected_reads = {"dist_drift_ctas": 1, "dist_drift_source": 3, "source_for_drift": 3}
+        assert {
+            model: len(information_schema_statements(submitted, model)) for model in expected_reads
+        } == expected_reads
 
     def test_distribution_drift_detected(self, project):
         """Both materializations' distribution drifted at once, in a single run
@@ -841,6 +939,16 @@ class TestDryRunTypesDoNotFalselyDrift(ConfluentFixtures):
         assert drift_temp_tables_created(
             submitted, project.adapter, "dry_run_types", "dry_run_cte", "forced_fallback"
         ) == {"forced_fallback"}
+        # The forced fallback reads the metadata once, before the dry-runs, then only COLUMNS
+        # after its temp table.
+        assert [views_read(sql) for sql in drift_queries(submitted, "forced_fallback")] == [
+            ["TABLES", "TABLE_OPTIONS"],
+            ["COLUMNS"],
+        ]
+        expected_reads = {"dry_run_types": 1, "dry_run_cte": 1, "forced_fallback": 3}
+        assert {
+            model: len(information_schema_statements(submitted, model)) for model in expected_reads
+        } == expected_reads
         assert_tables_absent(
             project, project.adapter.generate_schema_check_temp_name("forced_fallback")
         )
