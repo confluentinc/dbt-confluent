@@ -569,9 +569,19 @@ short and end in a hash of the full text; the digest is never cut:
 The artifact's description records that dbt manages it (`managed_by`) and the dbt project that
 uploaded it.
 
-dbt never deletes an artifact, including the one a replaced function used to run on. Running
-and stopped statements stay bound to the artifact they were compiled against, and dbt can't tell
-which statements those are, so cleaning up old artifacts is left to you.
+#### Artifact limit and cleanup
+
+Each organization, cloud, region and environment can have no more than 100 Flink artifacts (see
+Confluent's [UDF limitations](https://docs.confluent.io/cloud/current/flink/concepts/user-defined-functions.html#udf-limitations)).
+dbt uploads a new artifact for every distinct package, so replacing a function's package uses up
+one more. A package is distinct by its bytes, not its sources: rebuilding a package from unchanged
+sources can still produce different bytes (for example from embedded timestamps or file ordering),
+and so a new digest and a new artifact upload.
+
+dbt never deletes an artifact, including the one a replaced function used to run on. Managing the
+limit, and cleaning up artifacts nothing uses any more, is left to you. Take care not to delete an
+artifact still in use: running and stopped statements stay bound to the artifact they were compiled
+against, and dbt can't tell which statements those are.
 
 An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
 looked up, the run fails with the existing function untouched. The check only runs when replacing
