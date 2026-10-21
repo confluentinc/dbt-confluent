@@ -508,9 +508,11 @@ independently. Flink scans the source once per consumer, not once shared across 
 ### Function
 
 A `function` registers a user-defined function (UDF) in Flink from an artifact (a Java JAR or
-Python ZIP) that has already been uploaded to Confluent Cloud, by issuing
-`CREATE FUNCTION ... USING JAR 'confluent-artifact://<artifact_id>'`. dbt orders it ahead of any
-model that calls it via `{{ function('name') }}`.
+Python ZIP) in Confluent Cloud, by issuing
+`CREATE FUNCTION ... USING JAR 'confluent-artifact://<artifact_id>'`. The artifact is either one
+you uploaded yourself (`artifact_id`) or a local package that dbt uploads for you
+(`artifact_path`). dbt orders the function ahead of any model that calls it via
+`{{ function('name') }}`.
 
 Declare the function with a `config()` call in a file under `functions/` (dbt requires
 a function to have a body file, so the config call is all it contains):
@@ -525,7 +527,10 @@ a function to have a body file, so the config call is all it contains):
 ```
 
 - `language`: `java` or `python`.
-- `artifact_id`: an artifact already uploaded to this environment.
+- `artifact_id`: an artifact already uploaded to this environment. Exactly one of `artifact_id`
+  and `artifact_path` is required.
+- `artifact_path`: a local package for dbt to upload, relative to the dbt project root: a `.jar`
+  for `java` or a `.zip` for `python`. See [Uploading the artifact](#uploading-the-artifact).
 - `class`: the Java class, or the Python module path of the function.
 - `connections`: optional list of connection names the function may use.
 
@@ -548,16 +553,29 @@ flags:
   enable_experimental_function_materialization: true
 ```
 
-**Current limitations:**
+#### Uploading the artifact
 
-- [#187](https://github.com/confluentinc/dbt-confluent/issues/187):
-  Changing a function's config drops and re-creates it without validating the artifact ID first,
-  so using an invalid artifact ID can cause the function to be dropped. If the re-create fails, dbt
-  tries to re-create the previous function from what it described before dropping it. That is
-  best-effort and held in memory only, so a run that is killed between the drop and the create
-  leaves no function behind.
-- [#180](https://github.com/confluentinc/dbt-confluent/issues/180):
-  The desired artifact must be uploaded to Confluent separately.
+With `artifact_path`, dbt uploads the package as the function's artifact, which needs a key that
+can use the artifact API (the [Global API key](#tableflow), as for Tableflow). The artifact is
+named after the package's content (`<statement prefix><project>-<function>-<digest>`), so
+the same package always maps to the same artifact. Artifact names are limited to 60 characters,
+so when the project and function names are too long to leave room for the digest, they are cut
+short and end in a hash of the full text; the digest is never cut:
+
+- An unchanged package reuses its artifact, and the function is left alone.
+- A changed package is uploaded as a new artifact, and the function is replaced to use it.
+- Uploading happens when the function is created or replaced, not at parse or compile time.
+
+The artifact's description records that dbt manages it (`managed_by`) and the dbt project that
+uploaded it.
+
+dbt never deletes an artifact, including the one a replaced function used to run on. Running
+and stopped statements stay bound to the artifact they were compiled against, and dbt can't tell
+which statements those are, so cleaning up old artifacts is left to you.
+
+An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
+looked up, the run fails with the existing function untouched. The check only runs when replacing
+an existing function, and needs a Global API key too; a Flink-region key can't look it up.
 
 #### Changing an existing function
 
@@ -576,6 +594,10 @@ re-creating it. On each run the materialization compares the live function (via
 | `apply` (dbt's default) | Warns, drops the function, and creates it again |
 | `continue` | Warns and leaves the existing function in place |
 | `fail` | Fails the run without changing anything |
+
+If the re-create fails after the drop, dbt tries to create the previous function again from what
+it described before dropping. That is best-effort and held in memory only, so a run that is killed
+between the drop and the create leaves no function behind.
 
 `--full-refresh` always drops and re-creates an existing function, even if it matches the config,
 and `on_configuration_change` doesn't apply to it (that setting governs changes to an existing
@@ -608,7 +630,7 @@ Each per-materialization section links back to the specific subsections below th
 
 Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing. For example, `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
 
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `language`, `artifact_id`, `class`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `language`, `artifact_id`, `artifact_path`, `class`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
 
 If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
 

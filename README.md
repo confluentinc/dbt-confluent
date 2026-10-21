@@ -56,7 +56,7 @@ You have several options for configuring your credentials:
 - **Use a Flink-region API key**
   - Flink-region API keys allow non-interactive use similar to global API keys, but are more restricted in scope.
   - Some routes used by the adapter will not work with a Flink-region API key.
-    - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) requires a global API key.
+    - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) and [function artifacts](MATERIALIZATIONS.md#uploading-the-artifact) require a global API key.
 
 `dbt init` will prompt you for a choice and ensure your profile is configured correctly.
 
@@ -194,22 +194,12 @@ export CONFLUENT_FLINK_API_SECRET=xxx
 # The test is skipped when this is unset or equal to CONFLUENT_COMPUTE_POOL_ID.
 export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 
-# Optional: a Global API key, used only by the Tableflow functional tests
-# (Tableflow's control-plane routes require one regardless of the Flink-region
-# pair above -- see MATERIALIZATIONS.md#tableflow). Those tests are skipped
-# when either of these is unset.
+# Optional: a Global API key, used only by the Tableflow and function (artifact upload)
+# functional tests (those control-plane routes require one regardless of the Flink-region
+# pair above -- see MATERIALIZATIONS.md#tableflow). The Tableflow tests and the function
+# tests that upload artifacts are skipped when either of these is unset.
 export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
-
-# Optional: two different, already-uploaded UDF artifacts that contain the same class, used only
-# by the function lifecycle test (skipped when any of the first three is unset or the two
-# artifact IDs are equal). CONFLUENT_TEST_UDF_LANGUAGE defaults to python.
-#
-# Note: These are temporary, and will be removed when artifact upload support is added.
-export CONFLUENT_TEST_UDF_ARTIFACT_ID=cfa-xxxxxx
-export CONFLUENT_TEST_UDF_ARTIFACT_ID_2=cfa-yyyyyy
-export CONFLUENT_TEST_UDF_CLASS=module.path.or.Class
-export CONFLUENT_TEST_UDF_LANGUAGE=python
 ```
 
 ```bash
