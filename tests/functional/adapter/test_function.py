@@ -8,7 +8,7 @@ all that's needed to prove the behavior flag, config validation and absent-funct
 
 `TestFunctionLifecycle` walks every plan outcome (create, unchanged, keep, fail, replace) using two
 artifacts it uploads itself, and `TestFunctionArtifactUpload` covers dbt uploading a local package
-(`artifact_path`). Both need a key that can use the artifact API (the Global key), and delete
+(`artifact_path`). Both need a key that can use the artifact API (the Global key or a Cloud key), and delete
 whatever they upload.
 """
 
@@ -219,10 +219,15 @@ PACKAGE_FILE = "udf_package.zip"
 EXAMPLE_UDF_SOURCE = Path(__file__).parent / "data" / "example_udf-0.1.0"
 EXAMPLE_UDF_CLASS = "example_udf.tshirt_sizing.is_smaller"
 
-# Uploading an artifact is a control-plane call, which needs the Global key (like Tableflow).
-requires_global_key = pytest.mark.skipif(
-    not (os.getenv("CONFLUENT_GLOBAL_API_KEY") and os.getenv("CONFLUENT_GLOBAL_API_SECRET")),
-    reason="Uploading artifacts needs CONFLUENT_GLOBAL_API_KEY and CONFLUENT_GLOBAL_API_SECRET",
+# Artifact routes are control-plane calls, which need the Global key or a Cloud key.
+requires_artifact_key = pytest.mark.skipif(
+    not (
+        (os.getenv("CONFLUENT_GLOBAL_API_KEY") and os.getenv("CONFLUENT_GLOBAL_API_SECRET"))
+        or (os.getenv("CONFLUENT_CLOUD_API_KEY") and os.getenv("CONFLUENT_CLOUD_API_SECRET"))
+    ),
+    reason=(
+        "Using artifacts needs CONFLUENT_GLOBAL_API_KEY/SECRET or CONFLUENT_CLOUD_API_KEY/SECRET"
+    ),
 )
 
 
@@ -271,7 +276,7 @@ def udf_artifact_ids(project, tmp_path_factory) -> list[str]:
                     pass
 
 
-@requires_global_key
+@requires_artifact_key
 class TestFunctionLifecycle(FunctionFixtures):
     """One function taken through every plan outcome, in order (each test builds on the last):
     create, unchanged, keep, fail, replace on a config change, replace on --full-refresh.
@@ -358,7 +363,7 @@ class TestFunctionLifecycle(FunctionFixtures):
         assert self.live_artifact_id(project) == udf_artifact_ids[1]
 
 
-@requires_global_key
+@requires_artifact_key
 class TestFunctionRetryAfterFailedStatement(FunctionFixtures):
     """A failed `CREATE FUNCTION` statement must not block the next run. Statement names carry
     the dbt invocation id, so the retry's statement doesn't collide with the failed one that is
@@ -395,7 +400,7 @@ class TestFunctionRetryAfterFailedStatement(FunctionFixtures):
         assert {str(name): str(value) for name, value in rows}["plugin id"] == udf_artifact_ids[0]
 
 
-@requires_global_key
+@requires_artifact_key
 class TestFunctionRunsHooks(FunctionFixtures):
     """`pre_hook` runs before the function is created and `post_hook` after. The hooks are cheap
     `SHOW` statements tagged with a marker comment so they can be found in what was submitted."""
@@ -430,7 +435,7 @@ class TestFunctionRunsHooks(FunctionFixtures):
         assert position(self.PRE_MARKER) < position("CREATE FUNCTION") < position(self.POST_MARKER)
 
 
-@requires_global_key
+@requires_artifact_key
 class TestFunctionArtifactUpload(FunctionFixtures):
     """A function from a local `artifact_path`: dbt uploads the package and registers the
     function from it. Re-running reuses the artifact; a changed package gets a new artifact,
@@ -438,7 +443,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
     builds on the last.
 
     Needs no pre-uploaded artifact, but does write to Confluent's artifact API (and so needs a
-    key that can: the Global key). Anything it uploads is deleted afterwards."""
+    key that can: the Global key or a Cloud key). Anything it uploads is deleted afterwards."""
 
     NAME = "functionupload"
     FIRST_VERSION, SECOND_VERSION = "v1", "v2"

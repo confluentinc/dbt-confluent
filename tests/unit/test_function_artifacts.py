@@ -520,24 +520,6 @@ class TestAdapterValidateFunctionConfig:
         assert udf.artifact_config is None
 
 
-class TestRequireArtifactCredentials:
-    """The artifact API needs a Global key or OAuth; fail up front without either."""
-
-    def check(self, adapter, auth: str = "api_key", global_api_key: str | None = None):
-        adapter.config = SimpleNamespace(  # type: ignore[assignment]
-            credentials=SimpleNamespace(auth=auth, global_api_key=global_api_key)
-        )
-        adapter.require_artifact_credentials()
-
-    def test_an_api_key_profile_needs_a_global_key(self, adapter):
-        with pytest.raises(CompilationError, match="global_api_key"):
-            self.check(adapter, global_api_key=None)
-        self.check(adapter, global_api_key="global-key")
-
-    def test_an_oauth_profile_needs_no_key(self, adapter):
-        self.check(adapter, auth="oauth", global_api_key=None)
-
-
 class TestAdapterPlanFunctionChange:
     """For an `artifact_path`, the function is compared with the artifact already uploaded for
     that exact content: the same package is unchanged, a different one a change."""

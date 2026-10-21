@@ -556,7 +556,7 @@ flags:
 #### Uploading the artifact
 
 With `artifact_path`, dbt uploads the package as the function's artifact, which needs credentials that
-can use the artifact API (`auth: oauth`, or a [Global API key](#tableflow) as for Tableflow). The artifact is
+can use the artifact API: `auth: oauth`, a [Global API key](#tableflow) as for Tableflow, or a Cloud API key (`cloud_api_key` / `cloud_api_secret`) alongside your Flink-region key. The artifact is
 named after the package's content (`<statement prefix><project>-<function>-<digest>`), so
 the same package always maps to the same artifact. Artifact names are limited to 60 characters,
 so when the project and function names are too long to leave room for the digest, they are cut
@@ -584,7 +584,7 @@ artifact still in use: running and stopped statements stay bound to the artifact
 against, and dbt can't tell which statements those are.
 
 An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
-looked up, the run fails with the existing function untouched. The check only runs when replacing
+looked up (for example with only a Flink-region key), the run fails with the existing function untouched. The check only runs when replacing
 an existing function.
 
 #### Changing an existing function
@@ -752,9 +752,13 @@ A mapping with various tableflow topic-level configuration settings:
   - Attempting this change will succeed in disabling the external storage, but will fail (with a clear error message) trying to re-enable it before the grace period expires.
   - Re-run the model after waiting for the grace period to pass (instructions will be provided in the dbt run output),
     or use `--full-refresh` to drop the table entirely (including the data resident on the Kafka topic) and rebuild from scratch immediately.
-- Tableflow's control-plane routes require a Global API key (`global_api_key` / `global_api_secret`).
+- Tableflow's control-plane routes require one of:
+  - `auth: oauth`.
+  - A Global API key (`global_api_key` / `global_api_secret`).
+  - A Tableflow API key (`tableflow_api_key` / `tableflow_api_secret`) together with `database_kafka_cluster_id` (the `lkc-...` id of the `schema` cluster), since a Tableflow key can't look the cluster id up itself.
+  - A Flink-region or Cloud API key is not enough. dbt checks this before running any statement for a model that sets `tableflow`, and fails with a compile error if the profile can't use Tableflow.
   - If you previously ran your models with only the flink API key configured, you may need to generate a new key for Tableflow.
-  - Note that a global API works for the Flink APIs as well, so you do not need to provide both.
+  - Note that a global API key works for the Flink APIs as well, so you do not need to provide both.
 
 ### Distributed By
 

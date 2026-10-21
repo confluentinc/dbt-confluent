@@ -44,6 +44,10 @@ def dbt_profile_target(unique_schema):
     # is configured (Tableflow's own tests are skipped in that case).
     global_api_key = os.getenv("CONFLUENT_GLOBAL_API_KEY")
     global_api_secret = os.getenv("CONFLUENT_GLOBAL_API_SECRET")
+    # A Cloud resource management key covers the artifact routes (function tests) without a
+    # Global key; the driver ignores it when a Global key is supplied, so it's only added then.
+    cloud_api_key = os.getenv("CONFLUENT_CLOUD_API_KEY")
+    cloud_api_secret = os.getenv("CONFLUENT_CLOUD_API_SECRET")
     environment = os.getenv("CONFLUENT_ENV_ID")
     organization_id = os.getenv("CONFLUENT_ORG_ID")
     compute_pool_id = os.getenv("CONFLUENT_COMPUTE_POOL_ID")
@@ -68,6 +72,9 @@ def dbt_profile_target(unique_schema):
     else:
         target["flink_api_key"] = flink_api_key
         target["flink_api_secret"] = flink_api_secret
+        if cloud_api_key and cloud_api_secret:
+            target["cloud_api_key"] = cloud_api_key
+            target["cloud_api_secret"] = cloud_api_secret
     return target
 
 

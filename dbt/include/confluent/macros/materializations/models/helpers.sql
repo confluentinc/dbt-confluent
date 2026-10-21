@@ -15,6 +15,9 @@
     {% endif %}
   {% endfor %}
   {% do adapter.validate_materialization_config(config.get('materialized'), observed_config) %}
+  {#- Before any DDL, so missing Tableflow credentials don't surface only after the table is
+     created (ensure_tableflow_config runs last). -#}
+  {% if execute and config.get('tableflow') %}{% do adapter.require_tableflow_credentials() %}{% endif %}
 {% endmacro %}
 
 

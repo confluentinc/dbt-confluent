@@ -47,3 +47,35 @@ class TestOpenAuthMode:
         assert kwargs["auth"] == "api_key"
         assert kwargs["flink_api_key"] == flink_api_key
         assert kwargs["flink_api_secret"] == flink_api_secret
+
+
+class TestOpenScopedCredentials:
+    def test_scoped_keys_and_cluster_id_are_passed_to_driver(self, connect):
+        profile = {
+            "flink_api_key": "flink-key",
+            "flink_api_secret": "flink-secret",
+            "cloud_api_key": "cloud-key",
+            "cloud_api_secret": "cloud-secret",
+            "tableflow_api_key": "tableflow-key",
+            "tableflow_api_secret": "tableflow-secret",
+            "database_kafka_cluster_id": "lkc-abc123",
+        }
+
+        open_connection(profile)
+
+        kwargs = connect.call_args.kwargs
+        for field, value in profile.items():
+            assert kwargs[field] == value
+
+    def test_scoped_credentials_default_to_unset(self, connect):
+        open_connection({"flink_api_key": "my-key", "flink_api_secret": "my-secret"})
+
+        kwargs = connect.call_args.kwargs
+        for field in (
+            "cloud_api_key",
+            "cloud_api_secret",
+            "tableflow_api_key",
+            "tableflow_api_secret",
+            "database_kafka_cluster_id",
+        ):
+            assert kwargs[field] is None

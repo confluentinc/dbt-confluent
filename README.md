@@ -49,6 +49,7 @@ You have several options for configuring your credentials:
 - **Use OAuth (interactive Confluent Cloud sign-in, no API key)**
   - Sets `auth: oauth` in your profile to use OAuth login (the default is `auth: api_key`).
   - Omit `global_api_key`/`global_api_secret`/`flink_api_key`/`flink_api_secret` when using `auth: oauth`.
+  - Works against every route used by this adapter, including Tableflow and artifacts.
 - **Use a Global API key**
   - Uses a single API key & secret pair that works against every Confluent Cloud route used by this adapter.
   - This is the simplest configuration for non-interactive use.
@@ -56,7 +57,11 @@ You have several options for configuring your credentials:
 - **Use a Flink-region API key**
   - Flink-region API keys allow non-interactive use similar to global API keys, but are more restricted in scope.
   - Some routes used by the adapter will not work with a Flink-region API key.
-    - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) and [function artifacts](MATERIALIZATIONS.md#uploading-the-artifact) require a global API key (or `auth: oauth`).
+    - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) needs OAuth, a global API key, or the scoped Tableflow key below.
+- **Add scoped control-plane keys alongside a Flink-region API key**
+  - `tableflow_api_key` / `tableflow_api_secret` (created with `confluent api-key create --resource tableflow`) authenticate Tableflow's routes. You must also set `database_kafka_cluster_id` to the `lkc-...` id of your `schema` cluster, since Tableflow needs it and a scoped key can't look it up.
+  - `cloud_api_key` / `cloud_api_secret` (created with `confluent api-key create --resource cloud`) authenticate Flink artifact routes, which the [`function` materialization](MATERIALIZATIONS.md#uploading-the-artifact) uses to upload and look up artifacts.
+  - These keys are ignored when `global_api_key` is set, and neither replaces a Global or Flink-region key for running SQL.
 
 `dbt init` will prompt you for a choice and ensure your profile is configured correctly.
 
@@ -194,12 +199,18 @@ export CONFLUENT_FLINK_API_SECRET=xxx
 # The test is skipped when this is unset or equal to CONFLUENT_COMPUTE_POOL_ID.
 export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 
-# Optional: a Global API key, used only by the Tableflow and function (artifact upload)
-# functional tests (those control-plane routes require one regardless of the Flink-region
-# pair above -- see MATERIALIZATIONS.md#tableflow). The Tableflow tests and the function
-# tests that upload artifacts are skipped when either of these is unset.
+# Optional: a Global API key, used only by the Tableflow and function (artifact) functional
+# tests (those control-plane routes require one regardless of the Flink-region pair above --
+# see MATERIALIZATIONS.md#tableflow). The Tableflow tests and the function tests that use
+# artifacts are skipped when either of these is unset.
 export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
+
+# Optional: a Cloud resource management key, which the function tests can use instead of the
+# Global key (the tests skip unless one of the two pairs is set). It is only added to the test
+# profile when no Global key is set, so unset the Global pair to test with it.
+export CONFLUENT_CLOUD_API_KEY=xxx
+export CONFLUENT_CLOUD_API_SECRET=xxx
 ```
 
 ```bash
