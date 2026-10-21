@@ -46,6 +46,9 @@ Select `confluent` as the adapter and fill in the prompts for your Confluent Clo
 
 You have several options for configuring your credentials:
 
+- **Use OAuth (interactive Confluent Cloud sign-in, no API key)**
+  - Sets `auth: oauth` in your profile to use OAuth login (the default is `auth: api_key`).
+  - Omit `global_api_key`/`global_api_secret`/`flink_api_key`/`flink_api_secret` when using `auth: oauth`.
 - **Use a Global API key**
   - Uses a single API key & secret pair that works against every Confluent Cloud route used by this adapter.
   - This is the simplest configuration for non-interactive use.
@@ -54,9 +57,6 @@ You have several options for configuring your credentials:
   - Flink-region API keys allow non-interactive use similar to global API keys, but are more restricted in scope.
   - Some routes used by the adapter will not work with a Flink-region API key.
     - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) requires a global API key.
-- **Use OAuth (interactive Confluent Cloud sign-in, no API key)**
-  - Sets `auth: oauth` in your profile to use OAuth login (the default is `auth: api_key`).
-  - Omit `global_api_key`/`global_api_secret`/`flink_api_key`/`flink_api_secret` when using `auth: oauth`.
 
 `dbt init` will prompt you for a choice and ensure your profile is configured correctly.
 
