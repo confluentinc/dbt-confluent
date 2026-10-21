@@ -3,7 +3,7 @@
 import agate
 from confluent_sql.tableflow import TableflowTopic
 
-from dbt.adapters.confluent.impl import ConfluentRelation
+from dbt.adapters.confluent.impl import ConfluentAdapter, ConfluentRelation, DriftMetadata
 
 
 def relation(
@@ -65,7 +65,7 @@ def drift_metadata_row(
     dist_buckets=None,
     is_materialized=None,
 ):
-    """One row of `get_drift_metadata`'s result, for make_drift_metadata."""
+    """One row of `_get_drift_metadata`'s result, for make_drift_metadata."""
     return (
         section,
         col_name,
@@ -104,12 +104,18 @@ _METADATA_TYPES = [
 
 
 def make_drift_metadata(rows) -> agate.Table:
-    """An agate.Table shaped like `get_drift_metadata`'s result, from drift_metadata_row rows."""
+    """An agate.Table shaped like `_get_drift_metadata`'s result, from drift_metadata_row rows."""
     return agate.Table(rows, column_names=_METADATA_COLUMNS, column_types=_METADATA_TYPES)
 
 
+def partitioned_drift_metadata(rows) -> DriftMetadata:
+    """The DriftMetadata `partition_drift_metadata` makes from drift_metadata_row rows: what
+    check_for_schema_drift hands get_columns_from_dry_run and check_schema_drift."""
+    return ConfluentAdapter._partition_drift_metadata(make_drift_metadata(rows))
+
+
 def make_drift_columns(rows) -> agate.Table:
-    """An agate.Table shaped like `get_drift_columns`' result, from (table_name, col_name,
+    """An agate.Table shaped like `_get_drift_columns`' result, from (table_name, col_name,
     data_type) tuples."""
     return agate.Table(
         rows,

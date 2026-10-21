@@ -1,7 +1,9 @@
 """Unit tests for schema drift detection logic in ConfluentAdapter.
 
-The public `check_schema_drift` is a thin orchestrator over five helpers:
-- `_partition_drift_metadata` and `_partition_drift_columns` split the
+The public `check_schema_drift` is a thin orchestrator over four helpers, and
+takes the metadata already partitioned:
+- `_partition_drift_metadata` (behind `partition_drift_metadata`, which
+  check_for_schema_drift calls once) and `_partition_drift_columns` split the
   metadata and columns queries' agate.Tables into per-concern structures.
 - `_check_column_drift`, `_check_options_drift`, `_check_distribution_drift`
   return a list of one-line violation strings (empty list = no drift). The
@@ -21,6 +23,7 @@ from dbt.adapters.confluent.impl import ConfluentAdapter, DriftMetadata, DryRunC
 from tests.unit._helpers import drift_metadata_row as _row
 from tests.unit._helpers import make_drift_columns as _make_columns
 from tests.unit._helpers import make_drift_metadata as _make_metadata
+from tests.unit._helpers import partitioned_drift_metadata as _partitioned
 from tests.unit._helpers import relation as _relation
 
 # ---------------------------------------------------------------------------
@@ -343,6 +346,16 @@ class TestPartitionDriftMetadata:
         )
         assert ConfluentAdapter._partition_drift_metadata(metadata).is_materialized is False
 
+    def test_available_to_jinja(self):
+        """check_for_schema_drift calls partition_drift_metadata from Jinja, and the macro
+        harness's mock adapter wouldn't notice it missing @available."""
+        assert "partition_drift_metadata" in ConfluentAdapter._available_
+        metadata = _make_metadata([_row(section="TABLES", is_distributed="NO")])
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        assert adapter.partition_drift_metadata(metadata) == (
+            ConfluentAdapter._partition_drift_metadata(metadata)
+        )
+
 
 class TestPartitionDriftColumns:
     def test_splits_columns_by_table_name(self):
@@ -648,13 +661,13 @@ class TestCheckSchemaDriftOrchestrator:
 
     @staticmethod
     def _metadata(*rows, **tables_row):
-        """get_drift_metadata's result: a TABLES row for the existing table (not distributed and
+        """The partitioned metadata for a TABLES row for the existing table (not distributed and
         not materialized, unless tables_row says otherwise), then `rows`."""
         tables = {"is_distributed": "NO", "is_materialized": "NO", **tables_row}
-        return _make_metadata([_row(section="TABLES", **tables), *rows])
+        return _partitioned([_row(section="TABLES", **tables), *rows])
 
     def _columns(self, existing, temp):
-        """get_drift_columns' result, from {column_name: data_type} maps for the existing and
+        """`_get_drift_columns`' result, from {column_name: data_type} maps for the existing and
         temp tables."""
         return _make_columns(
             [(self.EXISTING_ID, name, data_type) for name, data_type in existing.items()]
@@ -724,7 +737,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 None,
-                _make_metadata([]),
+                _partitioned([]),
                 expected_with={},
                 dry_run_columns=DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT}),
             )
@@ -738,7 +751,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 None,
-                _make_metadata([]),
+                _partitioned([]),
                 expected_with={},
                 dry_run_columns=DryRunColumns(existing={"id": BIGINT}, expected={}),
             )
@@ -750,7 +763,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID) if both else None,
-                _make_metadata([]),
+                _partitioned([]),
                 expected_with={},
                 dry_run_columns=(
                     DryRunColumns(existing={"id": BIGINT}, expected={"id": BIGINT})
@@ -790,7 +803,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                _make_metadata([]),
+                _partitioned([]),
                 expected_with={"changelog.mode": "append"},
                 expected_distribution={"columns": ["id"], "buckets": 4},
                 drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
@@ -807,7 +820,7 @@ class TestCheckSchemaDriftOrchestrator:
             adapter.check_schema_drift(
                 _relation(self.EXISTING_ID),
                 _relation(self.TEMP_ID),
-                _make_metadata([]),
+                _partitioned([]),
                 expected_with={},
                 drift_columns=self._columns({}, {}),
             )

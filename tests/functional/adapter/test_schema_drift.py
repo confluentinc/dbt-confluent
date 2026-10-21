@@ -116,8 +116,8 @@ def information_schema_statements(submitted: list[SubmittedStatement], model: st
 
 
 def drift_queries(submitted: list[SubmittedStatement], model: str) -> list[str]:
-    """The SQL of `model`'s drift-check INFORMATION_SCHEMA queries (get_drift_metadata and
-    get_drift_columns), in submission order. They're told apart from the model's other
+    """The SQL of `model`'s drift-check INFORMATION_SCHEMA queries (_get_drift_metadata and
+    _get_drift_columns), in submission order. They're told apart from the model's other
     INFORMATION_SCHEMA reads by their `col_name` column, which no other adapter query uses."""
     return [
         sql for sql in information_schema_statements(submitted, model) if " AS col_name" in sql

@@ -13,7 +13,7 @@ from confluent_sql.types import ColumnTypeDefinition
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter, DryRunColumns
-from tests.unit._helpers import drift_metadata_row, make_drift_metadata, relation
+from tests.unit._helpers import drift_metadata_row, partitioned_drift_metadata, relation
 
 ID = {"name": "id", "type": {"type": "BIGINT", "nullable": False}}
 PRICE = {
@@ -22,9 +22,9 @@ PRICE = {
 }
 MODEL = relation("my_model")
 SELECT_EXISTING = "SELECT * FROM `env-1`.`cluster-a`.`my_model`"
-# get_drift_metadata's result for a plain existing table: INFORMATION_SCHEMA has it, and it
-# isn't materialized.
-METADATA = make_drift_metadata(
+# The partitioned metadata for a plain existing table: INFORMATION_SCHEMA has it, and it isn't
+# materialized.
+METADATA = partitioned_drift_metadata(
     [drift_metadata_row(section="TABLES", is_distributed="NO", is_materialized="NO")]
 )
 
@@ -151,7 +151,7 @@ def test_dry_run_error_propagates(adapter, failing):
 def test_materialized_table_raises_before_any_dry_run(adapter):
     """The metadata query runs first, so a Flink materialized table gets its dedicated error
     without paying for the dry-runs."""
-    metadata = make_drift_metadata(
+    metadata = partitioned_drift_metadata(
         [drift_metadata_row(section="TABLES", is_distributed="NO", is_materialized="YES")]
     )
 
@@ -165,6 +165,8 @@ def test_missing_existing_table_raises_before_any_dry_run(adapter):
     """No TABLES row for the existing table (metadata lag, or dropped outside dbt) gets the
     "could not find" error, not a dry-run failure."""
     with pytest.raises(DbtDatabaseError, match="in INFORMATION_SCHEMA.TABLES"):
-        adapter.get_columns_from_dry_run(MODEL, make_drift_metadata([]), "select id from src")
+        adapter.get_columns_from_dry_run(
+            MODEL, partitioned_drift_metadata([]), "select id from src"
+        )
 
     adapter.connections.dry_run_schema.assert_not_called()

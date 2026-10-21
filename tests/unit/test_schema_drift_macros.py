@@ -121,14 +121,18 @@ def test_dry_run_path_creates_nothing(materialized, mode):
     assert "FROM INFORMATION_SCHEMA.`TABLES`" in metadata
     assert "FROM INFORMATION_SCHEMA.`TABLE_OPTIONS`" in metadata
     assert metadata.count("UNION ALL") == 1
-    metadata_table = harness.table("get_drift_metadata")
+    # Partitioned once, and the same DriftMetadata goes to both consumers.
+    harness.adapter.partition_drift_metadata.assert_called_once_with(
+        harness.table("get_drift_metadata")
+    )
+    partitioned = harness.adapter.partition_drift_metadata.return_value
     harness.adapter.get_columns_from_dry_run.assert_called_once_with(
-        harness.existing, metadata_table, MODEL_SQL, execution_mode=mode, compute_pool_id=None
+        harness.existing, partitioned, MODEL_SQL, execution_mode=mode, compute_pool_id=None
     )
     args, kwargs = harness.drift_call
     assert args[0] == harness.existing
     assert args[1] is None
-    assert args[2] is metadata_table
+    assert args[2] is partitioned
     assert kwargs == {"dry_run_columns": DRY_RUN, "drift_columns": None}
     harness.adapter.defer_drop.assert_not_called()
 
@@ -229,7 +233,10 @@ def test_fallback_path_reads_columns_after_the_temp_table():
     harness.adapter.get_relation.assert_not_called()
     args, kwargs = harness.drift_call
     assert args[1] == temp
-    assert args[2] is harness.table("get_drift_metadata")
+    harness.adapter.partition_drift_metadata.assert_called_once_with(
+        harness.table("get_drift_metadata")
+    )
+    assert args[2] is harness.adapter.partition_drift_metadata.return_value
     assert kwargs == {
         "dry_run_columns": None,
         "drift_columns": harness.table("get_drift_columns"),
@@ -256,7 +263,10 @@ def test_streaming_source_skips_dry_run():
     assert harness.sql("create_temp_table") == f"CREATE TABLE {temp} ( {MODEL_SQL} )"
     args, kwargs = harness.drift_call
     assert args[1] == temp
-    assert args[2] is harness.table("get_drift_metadata")
+    harness.adapter.partition_drift_metadata.assert_called_once_with(
+        harness.table("get_drift_metadata")
+    )
+    assert args[2] is harness.adapter.partition_drift_metadata.return_value
     assert args[3:] == ({"a": "b"}, None, "all", "faker")
     assert kwargs == {
         "dry_run_columns": None,

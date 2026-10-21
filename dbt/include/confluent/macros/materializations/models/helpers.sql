@@ -259,10 +259,10 @@ WITH (
          dry-run reports no result schema or duplicate column names (the
          resolver returns none).
 
-     Metadata: get_drift_metadata runs first on every path, for the existing table's TABLES row,
+     Metadata: _get_drift_metadata runs first on every path, for the existing table's TABLES row,
      WITH options and, when distributed_by is checked, distribution columns, so a materialized
      table, or one INFORMATION_SCHEMA doesn't have yet, gets its dedicated error before any
-     dry-run. Only the fallback reads full COLUMNS (get_drift_columns, after the temp table is
+     dry-run. Only the fallback reads full COLUMNS (_get_drift_columns, after the temp table is
      created), so no path reads TABLES or TABLE_OPTIONS twice. The one overlap: with distributed_by
      checked, the fallback reads the existing table's distribution columns in both queries (a few
      rows). Round-trips to Confluent are expensive, so each query batches its reads into one
@@ -283,8 +283,12 @@ WITH (
   {# Read the distribution columns only where _check_distribution_drift
      uses them. #}
   {% set include_distribution = enforce == 'all' and config.get('distributed_by') is not none %}
-  {{ get_drift_metadata(existing_relation, include_distribution) }}
-  {% set drift_metadata = load_result('get_drift_metadata').table %}
+  {{ _get_drift_metadata(existing_relation, include_distribution) }}
+  {# Partitioned once, here: get_columns_from_dry_run and check_schema_drift
+     both take the DriftMetadata. #}
+  {% set drift_metadata = adapter.partition_drift_metadata(
+    load_result('get_drift_metadata').table
+  ) %}
   {% if has_select_query %}
     {# Dry-run in the mode that evaluates the SELECT when the model is
        built: `table` creates its CTAS in snapshot_ddl (table.sql), so its
@@ -316,7 +320,7 @@ WITH (
       type='table'
     ) %}
     {{ _create_schema_check_temp_table(temp_relation, has_select_query) }}
-    {{ get_drift_columns(existing_relation, temp_relation) }}
+    {{ _get_drift_columns(existing_relation, temp_relation) }}
     {% set drift_columns = load_result('get_drift_columns').table %}
   {% else %}
     {# The dry-run path creates no temp table, but an earlier run that died
@@ -385,7 +389,7 @@ WITH (
 
 {% macro _drift_columns_select(existing_relation, table_identifier) %}
 {#- One COLUMNS SELECT scoped to a single TABLE_NAME. Kept as its own macro so
-   get_drift_columns can keep the existing and temp tables' SELECTs
+   _get_drift_columns can keep the existing and temp tables' SELECTs
    independent, joined by UNION ALL — folding them into one WHERE ... OR ...
    would defeat the server's predicate push-down on TABLE_NAME. -#}
     SELECT
@@ -400,7 +404,7 @@ WITH (
 {%- endmacro %}
 
 
-{% macro get_drift_columns(existing_relation, temp_relation) %}
+{% macro _get_drift_columns(existing_relation, temp_relation) %}
   {# The temp-table fallback's column read: every column of the existing and
      temp tables, with a `table_name` discriminator. Runs only after the temp
      table is created; the dry-run path never reads full COLUMNS.
@@ -424,7 +428,7 @@ WITH (
 {% endmacro %}
 
 
-{% macro get_drift_metadata(existing_relation, include_distribution=false) %}
+{% macro _get_drift_metadata(existing_relation, include_distribution=false) %}
   {# Fetch the existing relation's metadata for the drift check in one query:
      its TABLES row, its TABLE_OPTIONS rows and, when include_distribution,
      its distribution columns (the COLUMNS rows with a
@@ -451,7 +455,7 @@ WITH (
      is set only when the distribution check will run, so otherwise the
      query reads no COLUMNS at all.
 
-     `_partition_drift_metadata` (Python) splits this into a DriftMetadata
+     `partition_drift_metadata` (Python) splits this into a DriftMetadata
      before any drift check runs. #}
   {% call statement('get_drift_metadata', fetch_result=True, hidden=True) %}
     SELECT
