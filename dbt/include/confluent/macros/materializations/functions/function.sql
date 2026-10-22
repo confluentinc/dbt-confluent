@@ -5,6 +5,7 @@
   {% do validate_materialization_config() %}
   {%- set target_relation = this.incorporate(type='function') -%}
   {%- set udf = adapter.validate_function_config(config, target_relation) -%}
+  {% if execute %}{% do adapter.require_artifact_credentials() %}{% endif %}
   {#- The live function (None if absent), described once and reused below. Live lookup, so skipped
      at parse/compile time (`execute` is false), where None just means "create". -#}
   {%- set existing = adapter.describe_function(target_relation, config.get('compute_pool_id')) if execute else none -%}

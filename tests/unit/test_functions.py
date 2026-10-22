@@ -6,6 +6,7 @@ describe-parsing and diffing decide whether a re-run is a no-op or a drop and re
 false "changed" (needless drop) or a false "unchanged" (stale function) both matter.
 """
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -14,6 +15,11 @@ import pytest
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.confluent import functions
+from dbt.adapters.confluent.function_artifacts import (
+    ArtifactConfig,
+    artifact_display_name,
+    file_digest,
+)
 from dbt.adapters.confluent.functions import FunctionState, QualifiedName
 from dbt.adapters.confluent.impl import FUNCTION_MATERIALIZATION_FLAG, ConfluentAdapter
 from dbt.adapters.contracts.connection import AdapterResponse
@@ -22,6 +28,7 @@ CATALOG = "env-1"
 DATABASE = "cluster-a"
 ARTIFACT_ID = "cfa-abc123"
 CLASS_NAME = "com.example.my.TShirtSizingIsSmaller"
+PREFIX, PROJECT, FUNCTION = "dbt-", "proj", "is_smaller"
 
 
 class FakeConfig(dict):
@@ -34,8 +41,16 @@ def java_config(**overrides) -> FakeConfig:
     )
 
 
-def validate(config: FakeConfig) -> dict:
-    return functions.validate_function_config(config, CATALOG, DATABASE)
+def validate(config: FakeConfig, project_root: Path | None = None) -> functions.FunctionConfig:
+    return functions.validate_function_config(
+        config,
+        CATALOG,
+        DATABASE,
+        project_root=project_root,
+        project=PROJECT,
+        name_prefix=PREFIX,
+        function=FUNCTION,
+    )
 
 
 def conn(name: str, database: str = DATABASE, catalog: str = CATALOG) -> QualifiedName:
@@ -44,29 +59,44 @@ def conn(name: str, database: str = DATABASE, catalog: str = CATALOG) -> Qualifi
 
 class TestValidateFunctionConfig:
     def test_minimal_java_config(self):
-        assert validate(java_config()) == {
-            "language": "java",
-            "artifact_id": ARTIFACT_ID,
-            "class_name": CLASS_NAME,
-            "connections": [],
-            "connection_names": [],
-        }
+        assert validate(java_config()) == functions.FunctionConfig(
+            language="java",
+            class_name=CLASS_NAME,
+            connections=[],
+            connection_names=[],
+            artifact_id=ARTIFACT_ID,
+            artifact_config=None,
+        )
 
     def test_python_with_connections(self):
         config = java_config(
             language="PYTHON", connections=["my_external_service"], **{"class": "pkg.mod.fn"}
         )
-        assert validate(config) == {
-            "language": "python",
-            "artifact_id": ARTIFACT_ID,
-            "class_name": "pkg.mod.fn",
-            "connections": [conn("my_external_service")],
-            "connection_names": ["`my_external_service`"],
-        }
+        assert validate(config) == functions.FunctionConfig(
+            language="python",
+            class_name="pkg.mod.fn",
+            connections=[conn("my_external_service")],
+            connection_names=["`my_external_service`"],
+            artifact_id=ARTIFACT_ID,
+            artifact_config=None,
+        )
+
+    @pytest.mark.parametrize("missing", ["catalog", "database", "function"])
+    def test_a_relation_that_is_not_fully_qualified_raises(self, missing):
+        parts = {"catalog": CATALOG, "database": DATABASE, "function": FUNCTION} | {missing: None}
+        with pytest.raises(CompilationError, match="fully qualified relation"):
+            functions.validate_function_config(
+                java_config(),
+                parts["catalog"],
+                parts["database"],
+                project=PROJECT,
+                name_prefix=PREFIX,
+                function=parts["function"],
+            )
 
     def test_omitted_connections_and_type_use_defaults(self):
         udf = validate(java_config(connections=None, type=None))
-        assert udf["connections"] == []
+        assert udf.connections == []
 
     def test_explicit_scalar_type_is_accepted(self):
         validate(java_config(type="scalar"))
@@ -76,9 +106,9 @@ class TestValidateFunctionConfig:
         [
             ({"language": None}, "'language' must be one of"),
             ({"language": "sql"}, "'language' must be one of"),
-            ({"artifact_id": None}, "'artifact_id' must be"),
-            ({"artifact_id": "abc123"}, "'artifact_id' must be"),
-            ({"artifact_id": "cfa-"}, "'artifact_id' must be"),
+            ({"artifact_id": None}, "one of 'artifact_id'"),
+            ({"artifact_id": "abc123"}, "one of 'artifact_id'"),
+            ({"artifact_id": "cfa-"}, "one of 'artifact_id'"),
             ({"class": None}, "'class' must be a non-empty string"),
             ({"class": "  "}, "'class' must be a non-empty string"),
             ({"connections": "my_external_service"}, "'connections' must be a list"),
@@ -124,7 +154,7 @@ class TestRenderIdentifier:
 
     def test_ddl_gets_identifiers_as_configured_not_qualified(self):
         udf = validate(java_config(connections=["svc", "other-db.svc2"]))
-        assert udf["connection_names"] == ["`svc`", "`other-db`.`svc2`"]
+        assert udf.connection_names == ["`svc`", "`other-db`.`svc2`"]
 
 
 class TestParseQualifiedName:
@@ -229,9 +259,14 @@ class TestDiffFunctionState:
 def test_adapter_delegates_validation_to_functions_module():
     # bypass __init__ — the wrapper only needs the method dispatch
     adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+    adapter.config = SimpleNamespace(  # type: ignore[assignment]
+        project_root="/unused",
+        project_name=PROJECT,
+        credentials=SimpleNamespace(statement_name_prefix=PREFIX),
+    )
 
     class Relation:
-        database, schema = CATALOG, DATABASE
+        database, schema, identifier = CATALOG, DATABASE, FUNCTION
 
     assert adapter.validate_function_config(java_config(), Relation()) == validate(java_config())
 
@@ -364,6 +399,63 @@ class TestFunctionMaterializationFlag:
         self.adapter_with_flag(enabled=True).require_function_materialization_enabled()
 
 
+class TestValidateArtifactPath:
+    """`artifact_path` is the alternative to `artifact_id`: a local package dbt will upload."""
+
+    PACKAGE = "udf.zip"
+
+    @pytest.fixture
+    def project_root(self, tmp_path):
+        (tmp_path / self.PACKAGE).write_bytes(b"zip")
+        (tmp_path / "udf.jar").write_bytes(b"jar")
+        (tmp_path / "notes.txt").write_text("x")
+        return tmp_path
+
+    def validate_path(self, project_root, **overrides):
+        config = java_config(**{"language": "python", "artifact_id": None} | overrides)
+        return validate(config, project_root)
+
+    def test_relative_path_resolves_against_the_project_root(self, project_root):
+        udf = self.validate_path(project_root, artifact_path=self.PACKAGE)
+        assert udf.artifact_config
+        assert udf.artifact_config.path == (project_root / self.PACKAGE).resolve()
+        assert udf.artifact_id is None
+
+    def test_the_artifact_is_named_after_its_project_function_and_content(self, project_root):
+        udf = self.validate_path(project_root, artifact_path=self.PACKAGE)
+        digest = file_digest(project_root / self.PACKAGE)
+        assert udf.artifact_config == ArtifactConfig(
+            path=(project_root / self.PACKAGE).resolve(),
+            name=artifact_display_name(PREFIX, PROJECT, FUNCTION, digest),
+            project=PROJECT,
+            language="python",
+        )
+
+    def test_an_artifact_id_has_no_artifact_config(self):
+        assert validate(java_config()).artifact_config is None
+
+    def test_java_takes_a_jar(self, project_root):
+        udf = validate(java_config(artifact_id=None, artifact_path="udf.jar"), project_root)
+        assert udf.artifact_config
+        assert udf.artifact_config.path.name == "udf.jar"
+        assert udf.artifact_config.language == "java"
+
+    @pytest.mark.parametrize(
+        "overrides, expected_substring",
+        [
+            ({"artifact_id": ARTIFACT_ID, "artifact_path": "udf.zip"}, "mutually exclusive"),
+            ({"artifact_path": "missing.zip"}, "is not a file"),
+            ({"artifact_path": "notes.txt"}, "must be a .zip file for python"),
+            ({"artifact_path": "udf.jar"}, "must be a .zip file for python"),
+            ({"artifact_path": ""}, "'artifact_path' must be a non-empty string"),
+            ({"artifact_path": 7}, "'artifact_path' must be a non-empty string"),
+        ],
+    )
+    def test_invalid_paths_raise(self, project_root, overrides, expected_substring):
+        with pytest.raises(CompilationError, match=expected_substring):
+            self.validate_path(project_root, **overrides)
+
+
 class TestRenderCreateFunction:
     RELATION = SimpleNamespace(render=lambda: f"`{CATALOG}`.`{DATABASE}`.`is_smaller`")
 
@@ -407,6 +499,8 @@ class TestApplyFunctionRestore:
     def adapter(self, *, create_fails: bool) -> ConfluentAdapter:
         """An adapter whose `execute` records statements. Only the first create fails."""
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        # The configured artifact exists: `get` on the artifacts API succeeds.
+        adapter.connections = SimpleNamespace(get_thread_handle=MagicMock)  # type: ignore[assignment]
         submitted: list[str] = []
         creates = 0
 
