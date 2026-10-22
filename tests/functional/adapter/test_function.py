@@ -474,7 +474,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
 
     def our_artifacts(self, project) -> list:
         prefix = project.adapter.config.credentials.statement_name_prefix
-        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
+        stem = f"{prefix}{project.adapter.config.project_name}-"
         handle = project.adapter.connections.get_thread_handle()
         return [a for a in handle.get_artifacts_api().list() if a.display_name.startswith(stem)]
 
@@ -555,7 +555,21 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.live_artifact_id(project) == self.failed_run_artifact["id"]
         assert self.artifacts(project).keys() == before.keys()  # nothing was uploaded or deleted
 
-    def test_6_continue_and_fail_upload_nothing(self, project, plan_actions):
+    def test_6_cleanup_lists_the_artifacts_no_function_uses(self, project):
+        """A dry run: the earlier artifacts are listed, the live one is not, nothing is deleted,
+        and the output says how to delete them."""
+        live_artifact_id = self.live_artifact_id(project)
+        before = self.artifacts(project)
+        unused = before.keys() - {live_artifact_id}
+
+        _, output = run_dbt_and_capture(["run-operation", "cleanup_function_artifacts"])
+
+        assert all(artifact_id in output for artifact_id in unused)
+        assert live_artifact_id not in output
+        assert "--args '{delete: true}'" in output
+        assert self.artifacts(project) == before
+
+    def test_7_continue_and_fail_upload_nothing(self, project, plan_actions):
         """The plan is made before anything is uploaded, so neither touches artifacts."""
         before, live_artifact_id = self.artifacts(project), self.live_artifact_id(project)
         package_file = Path(project.project_root) / PACKAGE_FILE
@@ -573,7 +587,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.artifacts(project) == before
         assert self.live_artifact_id(project) == live_artifact_id
 
-    def test_7_full_refresh_re_creates_on_the_same_artifact(
+    def test_8_full_refresh_re_creates_on_the_same_artifact(
         self, project, plan_actions, submitted_sql
     ):
         """An unchanged package is replaced on --full-refresh, without a new upload."""
@@ -588,7 +602,19 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.artifacts(project) == before
         assert self.live_artifact_id(project) == live_artifact_id
 
+    def test_9_cleanup_deletes_the_unused_artifacts(self, project):
+        """Cleanup is scoped to this project, so it is safe to delete for real here: only this
+        class's artifacts are candidates (unless the class runs twice at once on one environment)."""
+        live_artifact_id = self.live_artifact_id(project)
+        assert self.artifacts(project).keys() - {live_artifact_id}  # something to delete
 
+        run_dbt(["run-operation", "cleanup_function_artifacts", "--args", "{delete: true}"])
+
+        assert self.artifacts(project).keys() == {live_artifact_id}
+        assert self.live_artifact_id(project) == live_artifact_id
+
+
+@requires_global_key
 class TestFunctionEmptyRun(FunctionFixtures):
     """`--empty` only limits the rows models read; a function is DDL, so it is still created
     (models that call it in an `--empty` run need it), uploading its package like any other run."""
@@ -608,7 +634,7 @@ class TestFunctionEmptyRun(FunctionFixtures):
         write_package(project, "empty-run")
         yield
         prefix = project.adapter.config.credentials.statement_name_prefix
-        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
+        stem = f"{prefix}{project.adapter.config.project_name}-"
         with project.adapter.connection_named("delete_artifacts"):
             handle = project.adapter.connections.get_thread_handle()
             for artifact in handle.get_artifacts_api().list():
@@ -619,3 +645,44 @@ class TestFunctionEmptyRun(FunctionFixtures):
         run_dbt(["build", "--empty"])
         rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
         assert {str(name): str(value) for name, value in rows}["plugin id"].startswith("cfa-")
+
+
+@requires_global_key
+class TestFunctionsSharingOnePackage(FunctionFixtures):
+    """Two functions from one package, built on separate threads: they share one artifact."""
+
+    NAME = "functionshared"
+    FUNCTIONS = ["udf_first", "udf_second"]
+    THREADS = 2
+
+    @pytest.fixture(scope="class")
+    def functions(self):
+        return {
+            f"{name}.sql": function_sql(
+                artifact_id=None, class_name=EXAMPLE_UDF_CLASS, language="python"
+            ).replace("artifact_id=None", f"artifact_path={PACKAGE_FILE!r}")
+            for name in self.FUNCTIONS
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def package(self, project):
+        write_package(project, "shared")
+        yield
+        prefix = project.adapter.config.credentials.statement_name_prefix
+        stem = f"{prefix}{project.adapter.config.project_name}-"
+        with project.adapter.connection_named("delete_artifacts"):
+            handle = project.adapter.connections.get_thread_handle()
+            for artifact in handle.get_artifacts_api().list():
+                if artifact.display_name.startswith(stem):
+                    handle.get_artifacts_api().delete(artifact.id)
+
+    def live_artifact_id(self, project, function: str) -> str:
+        rows = project.run_sql(f"describe function `{function}`", fetch="all")
+        return {str(name): str(value) for name, value in rows}["plugin id"]
+
+    def test_both_functions_use_the_same_artifact(self, project):
+        run_dbt(["build", "--threads", str(self.THREADS)])
+
+        artifact_ids = {self.live_artifact_id(project, name) for name in self.FUNCTIONS}
+
+        assert len(artifact_ids) == 1

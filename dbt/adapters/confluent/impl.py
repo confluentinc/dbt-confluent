@@ -30,6 +30,7 @@ from dbt.adapters.sql import SQLAdapter
 
 from . import function_artifacts, functions, tableflow
 from .dry_run_types import display_type, fitted_type
+from .function_artifacts_repo import FunctionArtifactsRepo
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
@@ -185,6 +186,9 @@ class ConfluentAdapter(SQLAdapter):
         # worker thread; _CleanupRegistry.__init__ gives each of those threads
         # its own empty list on first access.
         self._deferred_cleanups = _CleanupRegistry()
+        # Unlike the registry above, shared by every thread on purpose: it is how threads
+        # building functions from one package hash, list and upload it once between them.
+        self._artifacts_repo = FunctionArtifactsRepo()
 
     @property
     def _behavior_flags(self) -> list[BehaviorFlag]:
@@ -1006,10 +1010,8 @@ class ConfluentAdapter(SQLAdapter):
         against the artifact already uploaded for that content, if any.
         """
         if udf.artifact_config:
-            artifact = function_artifacts.find_artifact(
-                self.connections.get_thread_handle(),
-                udf.artifact_config.name,
-                udf.artifact_config.language,
+            artifact = self._artifacts_repo.find(
+                self.connections.get_thread_handle(), udf.artifact_config.name
             )
             udf = udf._replace(artifact_id=artifact.id if artifact else None)
         return functions.plan_function_change(existing, udf)
@@ -1063,13 +1065,13 @@ class ConfluentAdapter(SQLAdapter):
         after the drop, the function that was dropped is re-created from `existing`, which is
         held in memory only. A process that dies between the drop and the create leaves no
         function behind and nothing to restore it from. The artifact the function replaced is
-        left in place, since statements may still be bound to it. Returns the create
-        statement's response.
+        left in place, since statements may still be bound to it (see
+        `cleanup_function_artifacts`). Returns the create statement's response.
         """
         conn = self.connections.get_thread_handle()
         execute = self._function_executor(compute_pool_id)
         if udf.artifact_config:
-            artifact_id = function_artifacts.ensure_artifact(conn, udf.artifact_config).id
+            artifact_id = self._artifacts_repo.ensure(conn, udf.artifact_config).id
         else:
             assert udf.artifact_id  # validation guarantees one or the other
             artifact_id = udf.artifact_id
@@ -1093,7 +1095,8 @@ class ConfluentAdapter(SQLAdapter):
                 warning_tag(
                     f"Function {relation.render()} now uses artifact {artifact_id}. Statements "
                     f"started before this change stay on the old artifact {existing.artifact_id} "
-                    "until they are recreated; it is not deleted."
+                    "until they are recreated; it is not deleted. Once they are, "
+                    "`dbt run-operation cleanup_function_artifacts` lists unused artifacts."
                 )
             )
         return response
@@ -1135,6 +1138,46 @@ class ConfluentAdapter(SQLAdapter):
             )
         except Exception as e:
             logger.error(f"Could not restore the previous function {relation.render()} ({e}).")
+
+    @available
+    def cleanup_function_artifacts(self, delete: bool = False) -> list[dict[str, str | None]]:
+        """List this project's artifacts that no function uses (see
+        `function_artifacts.find_unused_artifacts`), and delete them with `delete`.
+
+        Each entry is `{artifact, error}`, with `artifact` being `id (name)`; `error` is set if
+        deleting it failed (every one is tried). Deleting is on the user's word that statements
+        using an old artifact were recreated: they stay bound to it, and fail to restart once it
+        is gone.
+        """
+        conn = self.connections.get_thread_handle()
+
+        def used_artifact_ids() -> set[str]:
+            _, routines = self.execute(
+                "SELECT EXTERNAL_ARTIFACTS "
+                f"FROM `{self.config.credentials.database}`.`INFORMATION_SCHEMA`.`ROUTINES` "
+                "WHERE EXTERNAL_ARTIFACTS IS NOT NULL",
+                fetch=True,
+            )
+            return {
+                artifact_id
+                for (artifacts,) in routines.rows
+                for artifact_id in functions.artifact_ids_in(artifacts)
+            }
+
+        results: list[dict[str, str | None]] = []
+        for artifact in function_artifacts.find_unused_artifacts(
+            conn, self.config.project_name, used_artifact_ids
+        ):
+            error = None
+            if delete:
+                try:
+                    conn.get_artifacts_api().delete(artifact.id)
+                except Exception as e:
+                    error = str(e)
+            results.append(
+                {"artifact": f"{artifact.id} ({artifact.display_name})", "error": error}
+            )
+        return results
 
     @available
     def warn_function_change(self, message: str) -> None:

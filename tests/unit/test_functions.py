@@ -8,12 +8,13 @@ false "changed" (needless drop) or a false "unchanged" (stale function) both mat
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
+from dbt.adapters.base.relation import BaseRelation
 from dbt.adapters.confluent import functions
 from dbt.adapters.confluent.function_artifacts import (
     ArtifactConfig,
@@ -287,6 +288,23 @@ def test_adapter_runs_the_function_lookup_on_the_configured_compute_pool():
     assert adapter.execute.call_args.kwargs["compute_pool_id"] == POOL_ID
 
 
+class TestArtifactIdsIn:
+    def test_one_artifact(self):
+        assert functions.artifact_ids_in("confluent-artifact://cfa-abc123/latest") == {
+            "cfa-abc123"
+        }
+
+    def test_several_artifacts_in_one_value(self):
+        value = "[confluent-artifact://cfa-one/latest, confluent-artifact://cfa-two/1]"
+        assert functions.artifact_ids_in(value) == {"cfa-one", "cfa-two"}
+
+    @pytest.mark.parametrize(
+        "value", [None, "", "gs://bucket/udf.jar", "confluent-artifact://x/1"]
+    )
+    def test_anything_without_an_artifact_id_is_empty(self, value):
+        assert functions.artifact_ids_in(value) == set()
+
+
 class TestPlanFunctionChange:
     """`describe_function` infers existence from DESCRIBE's outcome, not a catalog query."""
 
@@ -304,7 +322,7 @@ class TestPlanFunctionChange:
         return MagicMock(side_effect=raises, return_value=(None, SimpleNamespace(rows=returns)))
 
     def plan(self, execute: MagicMock) -> list[str] | None:
-        existing = functions.describe_function(execute, self.RELATION)
+        existing = functions.describe_function(execute, cast(BaseRelation, self.RELATION))
         return functions.plan_function_change(existing, validate(java_config()))
 
     def test_missing_function_is_none(self):
@@ -379,7 +397,7 @@ class TestFunctionMaterializationFlag:
 
     def adapter_with_flag(self, enabled: bool) -> ConfluentAdapter:
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
-        adapter._behavior = SimpleNamespace(
+        adapter._behavior = SimpleNamespace(  # type: ignore[has-type]
             **{FUNCTION_MATERIALIZATION_FLAG: SimpleNamespace(no_warn=enabled)}
         )
         return adapter
@@ -421,12 +439,12 @@ class TestValidateArtifactPath:
         assert udf.artifact_config.path == (project_root / self.PACKAGE).resolve()
         assert udf.artifact_id is None
 
-    def test_the_artifact_is_named_after_its_project_function_and_content(self, project_root):
+    def test_the_artifact_is_named_after_its_project_and_content(self, project_root):
         udf = self.validate_path(project_root, artifact_path=self.PACKAGE)
         digest = file_digest(project_root / self.PACKAGE)
         assert udf.artifact_config == ArtifactConfig(
             path=(project_root / self.PACKAGE).resolve(),
-            name=artifact_display_name(PREFIX, PROJECT, FUNCTION, digest),
+            name=artifact_display_name(PREFIX, PROJECT, digest),
             project=PROJECT,
             language="python",
         )

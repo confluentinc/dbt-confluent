@@ -1,4 +1,4 @@
-"""Artifact upload for the `function` materialization (#180).
+"""Artifact upload and cleanup for the `function` materialization (#180).
 
 A function can name a local package (`artifact_path`) instead of an already-uploaded artifact.
 The artifact is named after the package's content hash, so it is immutable and "same name" means
@@ -10,24 +10,19 @@ create the new one.
 
 The old artifact is never deleted as part of a replace: running and stopped statements stay
 bound to the artifact they were compiled against, and nothing tells us which statements those
-are, so removing old artifacts is left to the user.
+are. `find_unused_artifacts` finds the candidates for an explicit, manual cleanup instead.
 
 Every dbt-created artifact carries a `managed_by` marker naming the dbt project that uploaded
-it, which tells an artifact dbt created from one it didn't.
+it. An artifact without it, or from another project, is never deleted by dbt.
 """
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, NewType
 
-from confluent_sql import (
-    ArtifactAlreadyExistsError,
-    ArtifactContentFormat,
-    ArtifactRuntimeLanguage,
-    Connection,
-    FlinkArtifact,
-)
+from confluent_sql import ArtifactContentFormat, ArtifactRuntimeLanguage, Connection, FlinkArtifact
 
 from .naming import truncate_with_hash
 
@@ -41,8 +36,18 @@ ARTIFACT_FORMATS: dict[str, tuple[str, ArtifactContentFormat, ArtifactRuntimeLan
 
 _DIGEST_LENGTH = 16
 
+
 # The artifact API's limit on a display name (the driver rejects longer ones).
 MAX_ARTIFACT_NAME_LENGTH = 60
+
+# Seconds the driver allows for transferring the package, passed explicitly so the timeouts
+# that wait on an upload (see `function_artifacts_repo`) are sized from it rather than from a default.
+UPLOAD_TIMEOUT_SECS = 300
+
+# Times a package transfer that fails midway is re-sent (the driver's default is none, since it
+# re-sends the whole archive). One retry, so two attempts, rides out a transient blip; failures to
+# connect are retried by the driver's own default, as nothing was sent.
+UPLOAD_TRANSFER_RETRIES = 1
 
 
 class ArtifactConfig(NamedTuple):
@@ -59,54 +64,61 @@ def encode_description(project: str | None) -> str:
     return json.dumps({"managed_by": MANAGED_BY, "project": project}, separators=(",", ":"))
 
 
-def file_digest(path: Path) -> str:
+def artifact_project(description: str | None) -> str | None:
+    """The dbt project that uploaded an artifact with this description, if dbt did."""
+    try:
+        body = json.loads(description or "")
+    except ValueError:
+        return None
+    if not isinstance(body, dict) or body.get("managed_by") != MANAGED_BY:
+        return None
+    return body.get("project")
+
+
+# The digest of a package file's content. Only `file_digest` makes one, so a value of this type
+# really is a content digest, and the places that key on "this content" accept nothing else.
+ArtifactDigest = NewType("ArtifactDigest", str)
+
+
+def file_digest(path: Path) -> ArtifactDigest:
     """A short, stable digest of a file's content."""
     sha = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             sha.update(chunk)
-    return sha.hexdigest()[:_DIGEST_LENGTH]
+    return ArtifactDigest(sha.hexdigest()[:_DIGEST_LENGTH])
 
 
-def artifact_display_name(prefix: str, project: str, function: str, digest: str) -> str:
-    """Name an artifact like a statement (`<prefix><project>-<function>`), plus the content digest.
+def artifact_display_name(prefix: str, project: str, digest: str) -> str:
+    """Name an artifact like a statement (`<prefix><project>`), plus the content digest.
 
     A label too long to leave room for the digest is cut short and ends in a hash of the full
     label. The digest is never cut, since it is what makes the name mean "this content".
     """
-    label = f"{prefix}{project}-{function}"
+    label = f"{prefix}{project}"
     max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for '-'
     if len(label) > max_label:
         label = truncate_with_hash(label, max_label, label)
     return f"{label}-{digest}"
 
 
-def find_artifact(conn: Connection, display_name: str, language: str) -> FlinkArtifact | None:
-    """The artifact with this exact name, if any."""
-    runtime_language = ARTIFACT_FORMATS[language][2]
-    for artifact in conn.get_artifacts_api().list(runtime_language=runtime_language):
-        if artifact.display_name == display_name:
-            return artifact
-    return None
+def find_unused_artifacts(
+    conn: Connection, project: str, used_artifact_ids: Callable[[], set[str]]
+) -> list[FlinkArtifact]:
+    """This dbt `project`'s artifacts that no function uses.
 
+    Artifacts dbt didn't upload for `project` are ignored. An artifact a run uploaded but has
+    not yet created its function from looks unused too, so cleanup shouldn't run alongside a
+    `dbt run`.
 
-def ensure_artifact(conn: Connection, artifact: ArtifactConfig) -> FlinkArtifact:
-    """Upload the package as a new artifact unless one for this content exists; return it."""
-    name, language = artifact.name, artifact.language
-    existing = find_artifact(conn, name, language)
-    if existing is not None:
-        return existing
-    _, content_format, runtime_language = ARTIFACT_FORMATS[language]
-    try:
-        return conn.get_artifacts_api().create(
-            name,
-            file=artifact.path,
-            content_format=content_format,
-            runtime_language=runtime_language,
-            description=encode_description(artifact.project),
-        )
-    except ArtifactAlreadyExistsError:  # a concurrent run won the race
-        existing = find_artifact(conn, name, language)
-        if existing is None:
-            raise
-        return existing
+    Artifacts are listed *before* functions are looked up (`used_artifact_ids`), so a function
+    created in between can't be missed. Unused by a function doesn't mean unused: statements
+    may still be bound to an artifact, which is why deleting is left to the user.
+    """
+    ours = [
+        a for a in conn.get_artifacts_api().list() if artifact_project(a.description) == project
+    ]
+    if not ours:
+        return []
+    used = used_artifact_ids()
+    return [a for a in ours if a.id not in used]

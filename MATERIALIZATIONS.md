@@ -562,6 +562,8 @@ the same package always maps to the same artifact. Artifact names are limited to
 so when the project and function names are too long to leave room for the digest, they are cut
 short and end in a hash of the full text; the digest is never cut:
 
+- Functions that point at the same package share one artifact: dbt hashes, looks up and uploads
+  it once per run, however many functions use it or how many threads build them.
 - An unchanged package reuses its artifact, and the function is left alone.
 - A changed package is uploaded as a new artifact, and the function is replaced to use it.
 - Uploading happens when the function is created or replaced, not at parse or compile time.
@@ -581,7 +583,16 @@ and so a new digest and a new artifact upload.
 dbt never deletes an artifact, including the one a replaced function used to run on. Managing the
 limit, and cleaning up artifacts nothing uses any more, is left to you. Take care not to delete an
 artifact still in use: running and stopped statements stay bound to the artifact they were compiled
-against, and dbt can't tell which statements those are.
+against.
+
+To find them, run `dbt run-operation cleanup_function_artifacts`. It lists this project's
+artifacts (the ones carrying its `managed_by` marker) that no function uses, according to
+`INFORMATION_SCHEMA.ROUTINES`, and prints the command that deletes them. Nothing is deleted
+unless you run it with `--args '{delete: true}'`. Artifacts that another project or you uploaded
+are never listed or deleted. Unused by a function doesn't mean unused: delete only once the
+statements that were running on an old artifact have been recreated, and not while a `dbt run`
+is in progress, since an artifact it has uploaded may not have its function yet. Every delete is
+attempted, and any failures are reported at the end.
 
 An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
 looked up, the run fails with the existing function untouched. The check only runs when replacing
