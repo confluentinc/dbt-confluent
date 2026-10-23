@@ -616,16 +616,15 @@ def reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
     rewritten. Anything else re-raises as-is rather than risk
     mislabeling an unrelated `ProgrammingError`.
 
-    Only `global_api_key`/`global_api_secret` is offered as a fix: CMK
-    cluster-id resolution requires the global key specifically, so a
-    Tableflow-scoped key pair can't satisfy it -- this adapter doesn't
-    expose `database_kafka_cluster_id` to skip the lookup instead (#105).
+    The message offers the two ways the driver can satisfy Tableflow (#105).
     """
     if "requires a global API key" not in str(e):
         raise e
     raise DbtDatabaseError(
-        "Tableflow needs to resolve your Kafka cluster id, which requires a Global "
-        "API key. Add `global_api_key`/`global_api_secret` to your profile -- see "
+        "Tableflow needs a credential it can use and a Kafka cluster id. Add "
+        "`global_api_key`/`global_api_secret` to your profile, or add "
+        "`tableflow_api_key`/`tableflow_api_secret` together with "
+        "`database_kafka_cluster_id` (the `lkc-...` id of the `schema` cluster) -- see "
         "README.md#configuration."
     ) from e
 
