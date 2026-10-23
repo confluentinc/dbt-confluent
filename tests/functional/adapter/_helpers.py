@@ -11,7 +11,11 @@ from typing import Literal, TypedDict
 import agate
 import pytest
 from confluent_sql import Connection
-from confluent_sql.exceptions import OperationalError, StatementNotFoundError
+from confluent_sql.exceptions import (
+    OperationalError,
+    StatementNotFoundError,
+    TableflowTopicNotFoundError,
+)
 from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.adapters.confluent.utils import fetch_from_cursor
@@ -401,3 +405,22 @@ def sweep_stale_test_statements(
                 continue
             # The adapter helper swallows missing-statement / pool-scoped 403s.
             project.adapter.delete_statement(statement.name)
+
+
+def get_tableflow(project, name):
+    """Live Tableflow state for `name`'s backing topic, or None if not enabled."""
+    with project.adapter.connection_named("tableflow_check"):
+        conn = project.adapter.connections.get_thread_connection()
+        try:
+            return conn.handle.get_tableflow(name)
+        except TableflowTopicNotFoundError:
+            return None
+
+
+def disable_tableflow_best_effort(project, name):
+    with project.adapter.connection_named("tableflow_teardown"):
+        conn = project.adapter.connections.get_thread_connection()
+        try:
+            conn.handle.disable_tableflow(name)
+        except TableflowTopicNotFoundError:
+            pass
