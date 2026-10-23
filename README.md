@@ -82,7 +82,7 @@ models:
 
 ### Isolating environments
 
-Because a schema is a whole Kafka cluster, several developers often build the same project into one cluster. To keep them from clobbering each other's topics and statements, give each target its own `resource_name_prefix` in `profiles.yml`:
+Because a schema is a whole Kafka cluster, several data engineers often build the same project into one cluster. To keep your topics and statements apart from everyone else's, set the optional `resource_name_prefix` in your own `profiles.yml`:
 
 ```yaml
 # profiles.yml
@@ -94,10 +94,20 @@ my_project:
       resource_name_prefix: alice-
 ```
 
-The prefix is prepended to every topic and Flink statement name the project creates, including explicit `alias` and `statement_name` configs. It is empty by default, and sources are never prefixed. Because the same prefix must be valid in both topic and statement names, it may only contain lowercase letters, digits and hyphens, must start with a letter or digit, and can be at most 64 characters, anything else fails when the profile loads. Topic names use the prefix with hyphens turned into underscores, so `alice-` names the topic `alice_orders` and the statement `alice-my_project-orders`, because dbt writes ephemeral model names into SQL unquoted, where a hyphen would read as minus. Leave it unset on the production target so existing and [adopted](MATERIALIZATIONS.md#streaming-table-adopting-existing-resources) names stay unchanged.
+It is empty by default, so names only change when you set it:
+
+| | Without | With `resource_name_prefix: alice-` |
+|---|---|---|
+| Statement | `dbt-my_project-orders` | `alice-dbt-my_project-orders` |
+| Topic | `orders` | `alice_orders` |
+
+The prefix also applies to explicit `alias` and `statement_name` configs, sources are never prefixed. In topic names its hyphens become underscores, because dbt writes ephemeral model names into SQL unquoted. It may only contain lowercase letters, digits and hyphens, must start with a letter or digit, and can be at most 64 characters, otherwise the profile fails to load.
+
+`statement_name_prefix` (default `dbt-`) is a separate setting: it names statements but leaves topic names alone, so it does not isolate anything.
 
 > [!WARNING]
-> Topic names get the prefix through the adapter's `generate_alias_name` macro. Overriding `generate_alias_name` in your project replaces it, so topics lose the prefix while statements keep it, and isolation silently breaks. We recommend not overriding it; if you must, prepend `target.resource_name_prefix | replace('-', '_')` to the alias yourself.
+> - Changing either prefix on a target with running statements starts new ones under the new names and leaves the old ones running. Stop the old statements first.
+> - Topic names get the prefix through the adapter's `generate_alias_name` macro. If your project overrides `generate_alias_name`, prepend `target.resource_name_prefix | replace('-', '_')` to the alias yourself, or topics lose the prefix while statements keep it.
 
 ## Usage
 
