@@ -1,5 +1,4 @@
 import logging
-from textwrap import dedent
 from uuid import uuid4
 
 import pytest
@@ -10,19 +9,20 @@ logger = logging.getLogger(__name__)
 
 
 class ConfluentFixtures:
-    # Empty by default, so tests use the plain model names that production
-    # (no prefix) uses. Subclasses testing the prefix itself override it.
+    # Unprefixed by default, set by tests covering resource_name_prefix isolation.
     RESOURCE_NAME_PREFIX = ""
 
     @pytest.fixture(scope="class")
     def dbt_profile_data(self, unique_schema, dbt_profile_target, profiles_config_update):
-        # We add a unique `statement_label` to each test class
-        # so that we can cleanup all created statements at the end.
+        # Every test class gets the suite-reserved `statement_name_prefix`
+        # (so sweep_stale_test_statements can find leaked statements) and a
+        # unique `statement_label` (so we can cleanup its statements at the end).
         profile = {
             "test": {
                 "outputs": {
                     "default": {
                         **dbt_profile_target,
+                        "statement_name_prefix": "dbt-adapter-test-",
                         "resource_name_prefix": self.RESOURCE_NAME_PREFIX,
                         "statement_label": f"dbt-test-{uuid4()}",
                     },

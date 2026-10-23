@@ -110,7 +110,7 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
         conn = project.adapter.connections.get_thread_connection()
         # closing_cursor auto-closes on exit (mode kept explicit even though
         # SNAPSHOT is its default) -- unlike a bare cursor.execute, it doesn't
-        # attach the test profile's statement_label or resource_name_prefix
+        # attach the test profile's statement_label or name prefixes
         # on its own:
         # - Without the label, delete_statements_by_label can't find these
         #   polling statements at normal teardown.
@@ -122,7 +122,10 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
         with conn.handle.closing_cursor(mode=ExecutionMode.SNAPSHOT) as cursor:
             cursor.execute(
                 sql,
-                statement_name=f"{conn.credentials.resource_name_prefix}{uuid.uuid4()}",
+                statement_name=(
+                    f"{conn.credentials.resource_name_prefix}"
+                    f"{conn.credentials.statement_name_prefix}{uuid.uuid4()}"
+                ),
                 statement_labels=[conn.credentials.statement_label],
             )
             if fetch == "one":
@@ -380,9 +383,8 @@ def sweep_stale_test_statements(
     """Delete statements leaked by previous test sessions.
 
     Statement labels are fresh UUIDs per test class, so a crashed run's
-    statements are only discoverable by name. Only test classes that set
-    `RESOURCE_NAME_PREFIX` get this suite-reserved prefix,
-    the rest run unprefixed and are not covered by this sweep. Deletes every statement
+    statements are only discoverable by the suite-reserved
+    `statement_name_prefix` every test profile sets. Deletes every statement
     under that prefix older than `min_age` (creation time from statement
     metadata; statements without one are left alone). Terminal statements
     are auto-purged by Confluent after 30 days anyway — the ones that matter

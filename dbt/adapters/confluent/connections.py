@@ -81,10 +81,9 @@ class ConfluentCredentials(Credentials):
     cloud_region: str | None = None
     endpoint: str | None = None
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
+    statement_name_prefix: str = "dbt-"
     statement_label: str = "dbt-confluent"
-    # Prepended to every relation (Kafka topic) name and Flink statement name,
-    # including explicit `alias` / `statement_name` configs, so several developers
-    # can share one cluster without clashing.
+    # Isolates each data engineer's statements and topics in a shared cluster.
     resource_name_prefix: str = ""
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}
@@ -109,7 +108,14 @@ class ConfluentCredentials(Credentials):
         """
         List of keys to display in the `dbt debug` output.
         """
-        keys = ("organization_id", "database", "schema", "compute_pool_id", "resource_name_prefix", "auth")
+        keys = (
+            "organization_id",
+            "database",
+            "schema",
+            "compute_pool_id",
+            "resource_name_prefix",
+            "auth",
+        )
         if self.endpoint:
             return (*keys, "endpoint")
         else:
@@ -117,17 +123,8 @@ class ConfluentCredentials(Credentials):
 
     @classmethod
     def __pre_deserialize__(cls, data):
-        """
-        Overridden to reject the removed `statement_name_prefix` key instead of
-        silently ignoring it, and to reject a `resource_name_prefix` that isn't
-        valid in both statement and topic names.
-        """
+        """Reject an invalid `resource_name_prefix` when the profile loads."""
         data = super().__pre_deserialize__(data)
-        if "statement_name_prefix" in data:
-            raise DbtRuntimeError(
-                "`statement_name_prefix` has been removed; use `resource_name_prefix` instead. "
-                "Note that the new prefix applies to both statement and topic names."
-            )
         prefix = data.get("resource_name_prefix", "")
         if not is_resource_name_prefix_valid(prefix):
             raise DbtRuntimeError(
@@ -506,7 +503,8 @@ class ConfluentConnectionManager(SQLConnectionManager):
 
             # Use deterministic name if provided, otherwise fall back to UUID
             if statement_name is None:
-                prefix = connection.credentials.resource_name_prefix
+                creds = connection.credentials
+                prefix = f"{creds.resource_name_prefix}{creds.statement_name_prefix}"
                 statement_name = sanitize_statement_name(f"{prefix}{uuid.uuid4()}")
 
             cursor = connection.handle.cursor(mode=resolved_mode)

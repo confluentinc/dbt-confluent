@@ -45,8 +45,12 @@ prompts:
     hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'"
     type: "string"
     default: 'streaming_query'
+  statement_name_prefix:
+    hint: "Prefix for statement names (project name is appended automatically)"
+    type: "string"
+    default: "dbt-"
   resource_name_prefix:
-    hint: "Optional prefix for topic and statement names (project name is appended to statement names automatically)"
+    hint: "Optional prefix isolating each data engineer's topics and statements, e.g. 'alice-'"
     type: "string"
     default: ""
   statement_label:
