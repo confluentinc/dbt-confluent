@@ -7,6 +7,7 @@ whoever owns that Global key, and carry a reserved display name (`dbt-adapter-te
 Underscore-prefixed so pytest does not treat it as a test module.
 """
 
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ from typing import Literal, get_args
 import httpx
 
 from tests.functional.adapter._helpers import SWEEP_MIN_AGE_SECONDS
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.confluent.cloud"
 KEY_NAME_PREFIX = "dbt-adapter-test-"
@@ -76,7 +79,8 @@ def sweep_stale_api_keys(
 
     Only touches keys that are the suite's own: owned by `owner` (see `owner_id`), for the cloud
     or tableflow resource, and named exactly as `create_api_key` names them. Keys younger than
-    `min_age` may belong to a session still running, so they are left alone.
+    `min_age` may belong to a session still running, so they are left alone. A key that can't be
+    deleted is logged and skipped.
     """
     now = time.time()
     url: str | None = "/iam/v2/api-keys"
@@ -92,7 +96,12 @@ def sweep_stale_api_keys(
                 continue
             created_at = datetime.fromisoformat(key["metadata"]["created_at"]).timestamp()
             if now - created_at >= min_age:
-                delete_api_key(client, key["id"])
+                try:
+                    delete_api_key(client, key["id"])
+                except httpx.HTTPError:
+                    # Best effort, like the suite's other sweeps: one stale key we can't
+                    # delete must not fail every test in the class.
+                    logger.warning("Could not delete stale test API key %s", key["id"])
         # `next` is an absolute URL that already carries the query string.
         url, params = page["metadata"].get("next"), None
 
