@@ -3,7 +3,23 @@
 import agate
 from confluent_sql.tableflow import TableflowTopic
 
+from dbt.adapters.confluent.connections import ConfluentCredentials
 from dbt.adapters.confluent.impl import ConfluentAdapter, ConfluentRelation, DriftMetadata
+
+
+def make_credentials(**profile) -> ConfluentCredentials:
+    """Credentials for `profile` (as it would appear in profiles.yml, minus `type`), over a
+    minimal valid base profile."""
+    return ConfluentCredentials.from_dict(
+        {
+            "organization_id": "org-123",
+            "environment_id": "env-xyz",
+            "dbname": "my_db",
+            "cloud_provider": "aws",
+            "cloud_region": "us-west-1",
+            **profile,
+        }
+    )
 
 
 def relation(

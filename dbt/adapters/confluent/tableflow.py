@@ -616,10 +616,7 @@ def reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
     rewritten. Anything else re-raises as-is rather than risk
     mislabeling an unrelated `ProgrammingError`.
 
-    Two fixes are offered, matching the two ways the driver can satisfy
-    Tableflow: a Global key pair, or a Tableflow-scoped key pair plus
-    `database_kafka_cluster_id`, which pre-seeds the cluster id so the CMK
-    lookup (and with it the Global key requirement) is skipped (#105).
+    The message offers the two ways the driver can satisfy Tableflow (#105).
     """
     if "requires a global API key" not in str(e):
         raise e

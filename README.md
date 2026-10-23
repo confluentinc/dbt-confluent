@@ -238,13 +238,11 @@ export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
 
-# The Global key is also what test_scoped_credentials.py uses to mint (and afterwards delete) a
-# Cloud key and a Tableflow key through the IAM API, then run Tableflow and function models
-# under each credential combination. Keys it leaks are swept after two hours.
+# test_scoped_credentials.py also uses the Global key to mint (and afterwards delete) a Cloud
+# key and a Tableflow key, and runs models under each credential combination.
 
-# Optional: a Cloud resource management key, which the function tests can use instead of the
-# Global key (the tests skip unless one of the two pairs is set). It is only added to the test
-# profile when no Global key is set, so unset the Global pair to test with it.
+# Optional: a Cloud key, which the function tests can use instead of the Global key. It is only
+# added to the test profile when no Global key is set, so unset the Global pair to test with it.
 export CONFLUENT_CLOUD_API_KEY=xxx
 export CONFLUENT_CLOUD_API_SECRET=xxx
 ```

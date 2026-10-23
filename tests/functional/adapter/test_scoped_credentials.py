@@ -29,23 +29,26 @@ import pytest
 
 from dbt.tests.util import run_dbt
 from tests.functional.adapter._api_keys import (
+    RESOURCES,
     ApiKey,
     create_api_key,
     delete_api_key,
     iam_client,
+    owner_id,
     resolve_kafka_cluster_id,
     sweep_stale_api_keys,
 )
 from tests.functional.adapter._helpers import (
     capture_submitted_statement_properties,
+    delete_function_artifacts,
     delete_statements_by_label,
     disable_tableflow_best_effort,
     drop_any_relation,
+    get_result_by_name,
     get_tableflow,
 )
 from tests.functional.adapter.test_function import (
     EXAMPLE_UDF_CLASS,
-    FLAG,
     PACKAGE_FILE,
     FunctionFixtures,
     function_sql,
@@ -64,7 +67,7 @@ _RUN_TAG = format(int(time.time()), "08x")
 # `creds` is in test_tableflow.py's leftover-relation sweep pattern.
 TABLE = f"dbttest_tf_creds_{_RUN_TAG}"
 # Kept short: the uploaded artifact is named `<prefix><project>-<function>-<digest>` and a name
-# over 60 characters is truncated, which `delete_uploaded_artifacts` could no longer match.
+# over 60 characters is truncated, which `delete_function_artifacts` could no longer match.
 FUNCTION = f"dbtt_creds_{_RUN_TAG}"
 
 TABLEFLOW_MODEL = f"""
@@ -117,12 +120,12 @@ def iam():
 @pytest.fixture(scope="class")
 def scoped_keys(iam):
     """A fresh Cloud key and Tableflow key, deleted when the class is done."""
-    owner_key = GLOBAL_API_KEY or ""
-    sweep_stale_api_keys(iam, owner_key)
+    owner = owner_id(iam, GLOBAL_API_KEY or "")
+    sweep_stale_api_keys(iam, owner)
     keys: dict[str, ApiKey] = {}
     try:
-        for resource in ("cloud", "tableflow"):
-            keys[resource] = create_api_key(iam, owner_key, resource, _RUN_TAG)
+        for resource in RESOURCES:
+            keys[resource] = create_api_key(iam, owner, resource, _RUN_TAG)
         yield keys
     finally:
         for key in keys.values():
@@ -130,8 +133,8 @@ def scoped_keys(iam):
 
 
 @pytest.fixture(scope="class")
-def kafka_cluster_id(iam, unique_schema):
-    return resolve_kafka_cluster_id(iam, os.environ["CONFLUENT_ENV_ID"], unique_schema)
+def kafka_cluster_id(iam, dbt_profile_target, unique_schema):
+    return resolve_kafka_cluster_id(iam, dbt_profile_target["database"], unique_schema)
 
 
 class TestScopedCredentials(FunctionFixtures):
@@ -159,27 +162,17 @@ class TestScopedCredentials(FunctionFixtures):
         )
         cloud = scoped_keys["cloud"]
         tableflow = scoped_keys["tableflow"]
+        tableflow_key = {**flink_key, **key_fields("tableflow", tableflow.id, tableflow.secret)}
         credentials = {
             "flink_key": flink_key,
             "cloud_key": {**flink_key, **key_fields("cloud", cloud.id, cloud.secret)},
-            "tableflow_key": {
-                **flink_key,
-                **key_fields("tableflow", tableflow.id, tableflow.secret),
-                "database_kafka_cluster_id": kafka_cluster_id,
-            },
-            "tableflow_key_without_cluster_id": {
-                **flink_key,
-                **key_fields("tableflow", tableflow.id, tableflow.secret),
-            },
+            "tableflow_key": {**tableflow_key, "database_kafka_cluster_id": kafka_cluster_id},
+            "tableflow_key_without_cluster_id": tableflow_key,
             "global_key": global_key,
         }
         outputs = {target: {**base, **fields} for target, fields in credentials.items()}
         outputs["default"] = outputs["global_key"]
         return {"test": {"outputs": outputs, "target": "default"}}
-
-    @pytest.fixture(scope="class")
-    def project_config_update(self, project_config_update):
-        return {**project_config_update, "flags": {FLAG: True}}
 
     @pytest.fixture(scope="class")
     def models(self):
@@ -198,15 +191,13 @@ class TestScopedCredentials(FunctionFixtures):
         write_package(project, "v1")
 
     @pytest.fixture(scope="class", autouse=True)
-    def class_clean_up(self, project, dbt_profile_data, scoped_keys):
-        # Requests `scoped_keys` so the keys outlive this teardown, which needs the Global key
-        # only (the `default` target) but runs after every credential set is done with.
+    def class_clean_up(self, project, dbt_profile_data):
         yield
         label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
         disable_tableflow_best_effort(project, TABLE)
         if drop_any_relation(project, TABLE):
             delete_statements_by_label(project, label)
-        delete_uploaded_artifacts(project)
+        delete_function_artifacts(project, FUNCTION)
 
     @pytest.mark.parametrize("target", CASES)
     def test_tableflow_model(self, project, submitted, target):
@@ -239,20 +230,6 @@ class TestScopedCredentials(FunctionFixtures):
 
 
 def error_message(results, name: str) -> str:
-    (result,) = [r for r in results if r.node.name == name]
-    assert result.status.name == "Error", f"{name} did not fail: {result.status}"
+    result = get_result_by_name(results, name)
+    assert result is not None and result.status.name == "Error", f"{name} did not fail: {result}"
     return result.message
-
-
-def delete_uploaded_artifacts(project) -> None:
-    """Delete the artifacts the function runs uploaded (best effort)."""
-    prefix = project.adapter.config.credentials.statement_name_prefix
-    stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION}-"
-    with project.adapter.connection_named("cleanup_artifacts"):
-        api = project.adapter.connections.get_thread_handle().get_artifacts_api()
-        for artifact in api.list():
-            if artifact.display_name.startswith(stem):
-                try:
-                    api.delete(artifact.id)
-                except Exception:
-                    pass

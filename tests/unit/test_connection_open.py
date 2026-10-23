@@ -2,8 +2,17 @@ from unittest import mock
 
 import pytest
 
-from dbt.adapters.confluent.connections import ConfluentConnectionManager, ConfluentCredentials
+from dbt.adapters.confluent.connections import ConfluentConnectionManager
 from dbt.adapters.contracts.connection import Connection, ConnectionState
+from tests.unit._helpers import make_credentials
+
+SCOPED_FIELDS = (
+    "cloud_api_key",
+    "cloud_api_secret",
+    "tableflow_api_key",
+    "tableflow_api_secret",
+    "database_kafka_cluster_id",
+)
 
 
 @pytest.fixture
@@ -15,17 +24,7 @@ def connect():
 
 def open_connection(profile: dict):
     """Open a connection for `profile` (as it would appear in profiles.yml, minus `type`)."""
-    credentials = ConfluentCredentials.from_dict(
-        {
-            "organization_id": "org-123",
-            "environment_id": "env-xyz",
-            "dbname": "my_db",
-            "cloud_provider": "aws",
-            "cloud_region": "us-west-1",
-            **profile,
-        }
-    )
-    connection = Connection(type="confluent", name="test", credentials=credentials)
+    connection = Connection(type="confluent", name="test", credentials=make_credentials(**profile))
     return ConfluentConnectionManager.open(connection)
 
 
@@ -54,11 +53,7 @@ class TestOpenScopedCredentials:
         profile = {
             "flink_api_key": "flink-key",
             "flink_api_secret": "flink-secret",
-            "cloud_api_key": "cloud-key",
-            "cloud_api_secret": "cloud-secret",
-            "tableflow_api_key": "tableflow-key",
-            "tableflow_api_secret": "tableflow-secret",
-            "database_kafka_cluster_id": "lkc-abc123",
+            **{field: f"{field}-value" for field in SCOPED_FIELDS},
         }
 
         open_connection(profile)
@@ -71,11 +66,5 @@ class TestOpenScopedCredentials:
         open_connection({"flink_api_key": "my-key", "flink_api_secret": "my-secret"})
 
         kwargs = connect.call_args.kwargs
-        for field in (
-            "cloud_api_key",
-            "cloud_api_secret",
-            "tableflow_api_key",
-            "tableflow_api_secret",
-            "database_kafka_cluster_id",
-        ):
+        for field in SCOPED_FIELDS:
             assert kwargs[field] is None

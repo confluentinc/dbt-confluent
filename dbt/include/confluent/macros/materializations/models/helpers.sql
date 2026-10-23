@@ -5,6 +5,8 @@
      set of keys dbt-confluent itself defines (adapter.all_confluent_config_keys()),
      so a user's own custom config -- read by their own hooks/macros -- is
      never inspected, regardless of key name.
+     Also fails early if `tableflow` is set but the profile's credentials can't
+     use Tableflow (see the check at the end of this macro).
      Call this once at the top of each materialization, before other config
      reads, so a mistake here is the first thing a user sees. #}
   {% set observed_config = {} %}

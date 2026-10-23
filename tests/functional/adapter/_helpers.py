@@ -407,6 +407,24 @@ def sweep_stale_test_statements(
             project.adapter.delete_statement(statement.name)
 
 
+def delete_function_artifacts(project, function_name):
+    """Delete the artifacts dbt uploaded for `function_name` (best effort).
+
+    They are named `<statement prefix><project>-<function>-<digest>`, so match on that stem. A
+    name over 60 characters is truncated and wouldn't match: keep function names short.
+    """
+    prefix = project.adapter.config.credentials.statement_name_prefix
+    stem = f"{prefix}{project.adapter.config.project_name}-{function_name}-"
+    with project.adapter.connection_named("delete_function_artifacts"):
+        api = project.adapter.connections.get_thread_handle().get_artifacts_api()
+        for artifact in api.list():
+            if artifact.display_name.startswith(stem):
+                try:
+                    api.delete(artifact.id)
+                except Exception:
+                    pass
+
+
 def get_tableflow(project, name):
     """Live Tableflow state for `name`'s backing topic, or None if not enabled."""
     with project.adapter.connection_named("tableflow_check"):

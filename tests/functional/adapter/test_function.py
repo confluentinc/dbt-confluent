@@ -24,7 +24,7 @@ from confluent_sql import ArtifactNotFoundError
 from dbt.adapters.confluent import functions
 from dbt.adapters.confluent.connections import ConfluentConnectionManager
 from dbt.tests.util import run_dbt, run_dbt_and_capture, write_file
-from tests.functional.adapter._helpers import get_result_by_name
+from tests.functional.adapter._helpers import delete_function_artifacts, get_result_by_name
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 FLAG = "enable_experimental_function_materialization"
@@ -468,14 +468,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def delete_artifacts(self, project):
         yield
-        with project.adapter.connection_named("cleanup_artifacts"):
-            for artifact in self.our_artifacts(project):
-                try:
-                    project.adapter.connections.get_thread_handle().get_artifacts_api().delete(
-                        artifact.id
-                    )
-                except Exception:
-                    pass  # best effort
+        delete_function_artifacts(project, FUNCTION_NAME)
 
     def our_artifacts(self, project) -> list:
         prefix = project.adapter.config.credentials.statement_name_prefix
@@ -612,13 +605,7 @@ class TestFunctionEmptyRun(FunctionFixtures):
     def package(self, project):
         write_package(project, "empty-run")
         yield
-        prefix = project.adapter.config.credentials.statement_name_prefix
-        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
-        with project.adapter.connection_named("delete_artifacts"):
-            handle = project.adapter.connections.get_thread_handle()
-            for artifact in handle.get_artifacts_api().list():
-                if artifact.display_name.startswith(stem):
-                    handle.get_artifacts_api().delete(artifact.id)
+        delete_function_artifacts(project, FUNCTION_NAME)
 
     def test_empty_run_uploads_and_creates_the_function(self, project):
         run_dbt(["build", "--empty"])
