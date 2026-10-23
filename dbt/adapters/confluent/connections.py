@@ -69,6 +69,18 @@ class ConfluentCredentials(Credentials):
     global_api_secret: str | None = None
     flink_api_key: str | None = None
     flink_api_secret: str | None = None
+    # Scoped key pairs for the control-plane routes. Only consulted by the driver when no
+    # Global pair is supplied, and neither is a substitute for a Global or Flink key for SQL.
+    # `cloud_*` covers Flink artifacts (the `function` materialization); `tableflow_*` covers
+    # Tableflow's enable/get/disable routes.
+    cloud_api_key: str | None = None
+    cloud_api_secret: str | None = None
+    tableflow_api_key: str | None = None
+    tableflow_api_secret: str | None = None
+    # `lkc-...` id of the Kafka cluster backing `schema`. Pre-seeds the driver's cluster-id
+    # lookup, which otherwise needs a Global key or OAuth -- so Tableflow with a scoped
+    # `tableflow_api_key` needs this (#105).
+    database_kafka_cluster_id: str | None = None
     # Optional ("poolless"): when omitted, Confluent Cloud Flink runs statements
     # in the environment+region default compute pool (provisioning if necessary).
     compute_pool_id: str | None = None
@@ -85,6 +97,21 @@ class ConfluentCredentials(Credentials):
     def type(self):
         """Return name of adapter."""
         return "confluent"
+
+    @property
+    def can_use_artifact_api(self) -> bool:
+        """Whether these credentials can call Flink artifact routes: OAuth, or a Global or
+        Cloud API key (a Flink-region key can't)."""
+        return self.auth == "oauth" or bool(self.global_api_key or self.cloud_api_key)
+
+    @property
+    def can_use_tableflow(self) -> bool:
+        """Whether these credentials can call Tableflow routes: OAuth, a Global API key, or a
+        Tableflow API key. The Tableflow key can't look up the Kafka cluster id itself, so it
+        also needs `database_kafka_cluster_id` (#105)."""
+        return self.auth == "oauth" or bool(
+            self.global_api_key or (self.tableflow_api_key and self.database_kafka_cluster_id)
+        )
 
     @property
     def unique_field(self):
@@ -551,6 +578,11 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 global_api_secret=credentials.global_api_secret,
                 flink_api_key=credentials.flink_api_key,
                 flink_api_secret=credentials.flink_api_secret,
+                cloud_api_key=credentials.cloud_api_key,
+                cloud_api_secret=credentials.cloud_api_secret,
+                tableflow_api_key=credentials.tableflow_api_key,
+                tableflow_api_secret=credentials.tableflow_api_secret,
+                database_kafka_cluster_id=credentials.database_kafka_cluster_id,
                 environment_id=credentials.database,
                 compute_pool_id=credentials.compute_pool_id,
                 organization_id=credentials.organization_id,
