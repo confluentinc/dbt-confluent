@@ -67,8 +67,6 @@ pytestmark = pytest.mark.skipif(
 _RUN_TAG = format(int(time.time()), "08x")
 # `creds` is in test_tableflow.py's leftover-relation sweep pattern.
 TABLE = f"dbttest_tf_creds_{_RUN_TAG}"
-# Kept short: the uploaded artifact is named `<prefix><project>-<function>-<digest>` and a name
-# over 60 characters is truncated, which `delete_function_artifacts` could no longer match.
 FUNCTION = f"dbtt_creds_{_RUN_TAG}"
 
 TABLEFLOW_MODEL = f"""
@@ -147,8 +145,8 @@ class TestScopedCredentials(FunctionFixtures):
     @pytest.fixture(scope="class")
     def profiles_config_update(self, dbt_profile_target, scoped_keys, kafka_cluster_id):
         """A dbt target per credential set; each is the standard test target with only its
-        credentials swapped. The Global-key one is also `default`, which the test's own
-        connection (setup, assertions, teardown) uses."""
+        credentials swapped. The Global-key one is also `default`, which `project.run_sql` and
+        the class teardown use (see `class_clean_up`)."""
         base = {k: v for k, v in dbt_profile_target.items() if "_api_" not in k}
         base |= {
             "statement_name_prefix": "dbt-adapter-test-",
@@ -194,7 +192,16 @@ class TestScopedCredentials(FunctionFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def class_clean_up(self, project, dbt_profile_data):
         yield
+        # `project.adapter` is the adapter of the last dbt invocation, so it carries that run's
+        # `--target` credentials. Cleanup needs the Global key, so switch back to `default`
+        # first: it must not depend on which case happened to run last (or alone).
+        run_dbt(["parse", "--target", "default"])
         label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+
+        def disable_tableflow():
+            # Disabling a topic that was never created (the Tableflow cases didn't run) is a 400.
+            if TABLE in {row[0] for row in project.run_sql("show tables", fetch="all")}:
+                disable_tableflow_best_effort(project, TABLE)
 
         def drop_table_and_statements():
             if drop_any_relation(project, TABLE):
@@ -205,7 +212,7 @@ class TestScopedCredentials(FunctionFixtures):
         with ExitStack() as cleanup:
             cleanup.callback(delete_function_artifacts, project, FUNCTION)
             cleanup.callback(drop_table_and_statements)
-            cleanup.callback(disable_tableflow_best_effort, project, TABLE)
+            cleanup.callback(disable_tableflow)
 
     @pytest.mark.parametrize("target", CASES)
     def test_tableflow_model(self, project, submitted, target):

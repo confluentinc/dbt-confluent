@@ -264,6 +264,15 @@ class TestFileDigestAndName:
         assert name == f"proj-{function}-{digest}"
         assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
 
+    @pytest.mark.parametrize("length", [1, 12, 50, 200])
+    def test_the_stem_starts_every_name_however_long_the_names(self, length):
+        """Cleanup finds a function's artifacts by the stem, so it must match what upload names."""
+        names = ("p" * length, "j" * length, "f" * length)
+        stem = fa.artifact_name_stem(*names)
+        assert stem.endswith("-")
+        for digest in ("0" * 16, "f" * 16):
+            assert fa.artifact_display_name(*names, digest).startswith(stem)
+
     def test_a_long_name_is_deterministic(self):
         args = ("dbt-", "j" * 100, "f" * 100, "0123456789abcdef")
         assert fa.artifact_display_name(*args) == fa.artifact_display_name(*args)

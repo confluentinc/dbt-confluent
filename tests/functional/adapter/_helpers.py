@@ -18,6 +18,7 @@ from confluent_sql.exceptions import (
 )
 from confluent_sql.execution_mode import ExecutionMode
 
+from dbt.adapters.confluent.function_artifacts import artifact_name_stem
 from dbt.adapters.confluent.utils import fetch_from_cursor
 
 # Leftovers younger than this may belong to a session still running on the
@@ -410,11 +411,13 @@ def sweep_stale_test_statements(
 def delete_function_artifacts(project, function_name):
     """Delete the artifacts dbt uploaded for `function_name` (best effort).
 
-    They are named `<statement prefix><project>-<function>-<digest>`, so match on that stem. A
-    name over 60 characters is truncated and wouldn't match: keep function names short.
+    Every one starts with the stem dbt names them with, which is shortened when the names are long.
     """
-    prefix = project.adapter.config.credentials.statement_name_prefix
-    stem = f"{prefix}{project.adapter.config.project_name}-{function_name}-"
+    stem = artifact_name_stem(
+        project.adapter.config.credentials.statement_name_prefix,
+        project.adapter.config.project_name,
+        function_name,
+    )
     with project.adapter.connection_named("delete_function_artifacts"):
         api = project.adapter.connections.get_thread_handle().get_artifacts_api()
         for artifact in api.list():
