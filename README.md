@@ -49,6 +49,7 @@ You have several options for configuring your credentials:
 - **Use OAuth (interactive Confluent Cloud sign-in, no API key)**
   - Sets `auth: oauth` in your profile to use OAuth login (the default is `auth: api_key`).
   - Omit `global_api_key`/`global_api_secret`/`flink_api_key`/`flink_api_secret` when using `auth: oauth`.
+  - Works against every route used by this adapter, including Tableflow and artifacts.
 - **Use a Global API key**
   - Uses a single API key & secret pair that works against every Confluent Cloud route used by this adapter.
   - This is the simplest configuration for non-interactive use.
@@ -56,9 +57,45 @@ You have several options for configuring your credentials:
 - **Use a Flink-region API key**
   - Flink-region API keys allow non-interactive use similar to global API keys, but are more restricted in scope.
   - Some routes used by the adapter will not work with a Flink-region API key.
-    - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) and [function artifacts](MATERIALIZATIONS.md#uploading-the-artifact) require a global API key (or `auth: oauth`).
+    - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) needs OAuth, a global API key, or the scoped Tableflow key below.
+    - See [Fine-grained credentials](#fine-grained-credentials) below.
 
 `dbt init` will prompt you for a choice and ensure your profile is configured correctly.
+
+### Fine-grained credentials
+
+Using OAuth, or a Global API key, is the most convenient way to get started because those credentials cover all operations performed by this adapter.
+
+For security reasons, some may prefer to use more fine-grained credentials. If you've configured your initial profile with the scoped Flink-region API key,
+you will need to provide additional credentials to use some of the more advanced features like Tableflow and User-Defined Functions (UDFs).
+`dbt init` doesn't prompt for these, so add them to your target in `profiles.yml` yourself:
+
+- **Tableflow**
+  - Requires `tableflow_api_key` & `tableflow_api_secret` (created with `confluent api-key create --resource tableflow`).
+  - You must also set `database_kafka_cluster_id` to the `lkc-...` id of your Kafka cluster, since Tableflow needs it and a scoped key can't look it up.
+- **UDFs**
+  - Requires `cloud_api_key` & `cloud_api_secret` (created with `confluent api-key create --resource cloud`) to interact with the artifacts APIs.
+
+```yaml
+my_project:
+  target: dev
+  outputs:
+    dev:
+      type: confluent
+      # ... organization_id, environment_id, dbname, cloud_provider, cloud_region, etc.
+
+      flink_api_key: <flink key>             # runs your SQL
+      flink_api_secret: <flink secret>
+
+      tableflow_api_key: <tableflow key>     # only needed for models that set `tableflow`
+      tableflow_api_secret: <tableflow secret>
+      database_kafka_cluster_id: lkc-xxxxx   # required alongside the Tableflow key
+
+      cloud_api_key: <cloud key>             # only needed for building a `function` (UDF)
+      cloud_api_secret: <cloud secret>
+```
+
+These keys are ignored when `global_api_key` is set - a Global API key always takes precedence if given.
 
 ### Concept mapping
 
@@ -194,12 +231,20 @@ export CONFLUENT_FLINK_API_SECRET=xxx
 # The test is skipped when this is unset or equal to CONFLUENT_COMPUTE_POOL_ID.
 export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 
-# Optional: a Global API key, used only by the Tableflow and function (artifact upload)
-# functional tests (those control-plane routes require one regardless of the Flink-region
-# pair above -- see MATERIALIZATIONS.md#tableflow). The Tableflow tests and the function
-# tests that upload artifacts are skipped when either of these is unset.
+# Optional: a Global API key, used only by the Tableflow and function (artifact) functional
+# tests (those control-plane routes require one regardless of the Flink-region pair above --
+# see MATERIALIZATIONS.md#tableflow). The Tableflow tests and the function tests that use
+# artifacts are skipped when either of these is unset.
 export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
+
+# test_scoped_credentials.py also uses the Global key to mint (and afterwards delete) a Cloud
+# key and a Tableflow key, and runs models under each credential combination.
+
+# Optional: a Cloud key, which the function tests can use instead of the Global key. It is only
+# added to the test profile when no Global key is set, so unset the Global pair to test with it.
+export CONFLUENT_CLOUD_API_KEY=xxx
+export CONFLUENT_CLOUD_API_SECRET=xxx
 ```
 
 ```bash

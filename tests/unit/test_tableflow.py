@@ -626,6 +626,7 @@ class TestEnsureTableflowConfig:
             )
         assert exc_info.value.__cause__ is err
         assert "global_api_key" in str(exc_info.value)
+        assert "database_kafka_cluster_id" in str(exc_info.value)
         handle.enable_tableflow.assert_not_called()
 
     def test_enable_auth_error_names_profile_field(self, handle, rel):

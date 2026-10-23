@@ -11,9 +11,14 @@ from typing import Literal, TypedDict
 import agate
 import pytest
 from confluent_sql import Connection
-from confluent_sql.exceptions import OperationalError, StatementNotFoundError
+from confluent_sql.exceptions import (
+    OperationalError,
+    StatementNotFoundError,
+    TableflowTopicNotFoundError,
+)
 from confluent_sql.execution_mode import ExecutionMode
 
+from dbt.adapters.confluent.function_artifacts import artifact_name_stem
 from dbt.adapters.confluent.utils import fetch_from_cursor
 
 # Leftovers younger than this may belong to a session still running on the
@@ -401,3 +406,42 @@ def sweep_stale_test_statements(
                 continue
             # The adapter helper swallows missing-statement / pool-scoped 403s.
             project.adapter.delete_statement(statement.name)
+
+
+def delete_function_artifacts(project, function_name):
+    """Delete the artifacts dbt uploaded for `function_name` (best effort).
+
+    Every one starts with the stem dbt names them with, which is shortened when the names are long.
+    """
+    stem = artifact_name_stem(
+        project.adapter.config.credentials.statement_name_prefix,
+        project.adapter.config.project_name,
+        function_name,
+    )
+    with project.adapter.connection_named("delete_function_artifacts"):
+        api = project.adapter.connections.get_thread_handle().get_artifacts_api()
+        for artifact in api.list():
+            if artifact.display_name.startswith(stem):
+                try:
+                    api.delete(artifact.id)
+                except Exception:
+                    pass
+
+
+def get_tableflow(project, name):
+    """Live Tableflow state for `name`'s backing topic, or None if not enabled."""
+    with project.adapter.connection_named("tableflow_check"):
+        conn = project.adapter.connections.get_thread_connection()
+        try:
+            return conn.handle.get_tableflow(name)
+        except TableflowTopicNotFoundError:
+            return None
+
+
+def disable_tableflow_best_effort(project, name):
+    with project.adapter.connection_named("tableflow_teardown"):
+        conn = project.adapter.connections.get_thread_connection()
+        try:
+            conn.handle.disable_tableflow(name)
+        except TableflowTopicNotFoundError:
+            pass
