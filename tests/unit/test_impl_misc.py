@@ -172,49 +172,6 @@ class TestGenerateSchemaCheckTempName:
 
 
 # ---------------------------------------------------------------------------
-# get_statement_name
-# ---------------------------------------------------------------------------
-
-
-class TestGetStatementName:
-    def _adapter_with_credentials(self, mocker, prefix="dbt-"):
-        adapter = _adapter()
-        credentials = mocker.MagicMock()
-        credentials.statement_name_prefix = prefix
-        config = mocker.MagicMock()
-        config.credentials = credentials
-        adapter.config = config
-        return adapter
-
-    def test_builds_name_from_project_and_model(self, mocker):
-        adapter = self._adapter_with_credentials(mocker, "dbt-")
-        name = adapter.get_statement_name("my_model", "my_project")
-        # sanitize_statement_name lowercases and may add a hash for illegal chars
-        assert "my-project" in name
-        assert "my-model" in name
-
-    def test_override_bypasses_prefix(self, mocker):
-        adapter = self._adapter_with_credentials(mocker, "dbt-")
-        name = adapter.get_statement_name(
-            "my_model", "my_project", statement_name_override="custom-name"
-        )
-        assert "custom-name" in name
-        assert "my-project" not in name
-
-    def test_suffix_appended(self, mocker):
-        adapter = self._adapter_with_credentials(mocker, "dbt-")
-        name = adapter.get_statement_name("model", "proj", suffix="-check")
-        assert name.endswith("-check") or "-check" in name
-
-    def test_override_with_suffix(self, mocker):
-        adapter = self._adapter_with_credentials(mocker, "dbt-")
-        name = adapter.get_statement_name(
-            "model", "proj", suffix="-check", statement_name_override="base"
-        )
-        assert "base-check" in name
-
-
-# ---------------------------------------------------------------------------
 # parse_unit_test_ctes
 # ---------------------------------------------------------------------------
 

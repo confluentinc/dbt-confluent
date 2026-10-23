@@ -407,12 +407,14 @@ class ConfluentAdapter(SQLAdapter):
         """Build a deterministic, sanitized Flink statement name.
 
         Called from Jinja macros via adapter.get_statement_name().
-        Returns the final name ready for the Flink API.
+        Returns the final name ready for the Flink API. resource_name_prefix is
+        prepended to every name, statement_name_prefix only to generated ones.
         """
+        creds = self.config.credentials
         if statement_name_override:
-            name = f"{statement_name_override}{suffix}"
+            name = f"{creds.resource_name_prefix}{statement_name_override}{suffix}"
         else:
-            prefix = self.config.credentials.statement_name_prefix
+            prefix = f"{creds.resource_name_prefix}{creds.statement_name_prefix}"
             name = f"{prefix}{project_name}-{model_name}{suffix}"
         return sanitize_statement_name(name)
 
@@ -729,14 +731,16 @@ class ConfluentAdapter(SQLAdapter):
         Unit tests run in a separate manifest where graph.nodes is empty,
         so we can't look up nodes directly. Instead, we extract the model
         identifier from the unique_id (format: model.<package>.<name>)
-        and find the relation in the adapter's cache.
+        and find the relation in the adapter's cache. The prefix mirrors
+        confluent__generate_alias_name.
         """
         # unique_id format:
         #   non-versioned: model.<package>.<name>
         #   versioned:     model.<package>.<name>.v<version>
         _, _, name, *v = tested_node_unique_id.split(".")
         version = f"_{v[0]}" if v and v[0].startswith("v") else ""
-        identifier = f"{name}{version}"
+        prefix = self.config.credentials.resource_name_prefix.replace("-", "_")
+        identifier = f"{prefix}{name}{version}"
         relation = self.get_relation(database, schema, identifier)
         if relation is None:
             raise DbtDatabaseError(

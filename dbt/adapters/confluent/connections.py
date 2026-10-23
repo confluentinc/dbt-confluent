@@ -39,6 +39,11 @@ from dbt.adapters.events.types import (
 from dbt.adapters.sql import SQLConnectionManager
 
 from .__version__ import version
+from .naming import (
+    MAX_RESOURCE_NAME_PREFIX_LENGTH,
+    is_resource_name_prefix_valid,
+    sanitize_statement_name,
+)
 from .utils import fetch_from_cursor
 
 if TYPE_CHECKING:
@@ -78,6 +83,8 @@ class ConfluentCredentials(Credentials):
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
     statement_name_prefix: str = "dbt-"
     statement_label: str = "dbt-confluent"
+    # Isolates each data engineer's statements and topics in a shared cluster.
+    resource_name_prefix: str = ""
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}
 
@@ -101,11 +108,31 @@ class ConfluentCredentials(Credentials):
         """
         List of keys to display in the `dbt debug` output.
         """
-        keys = ("organization_id", "database", "schema", "compute_pool_id", "auth")
+        keys = (
+            "organization_id",
+            "database",
+            "schema",
+            "compute_pool_id",
+            "resource_name_prefix",
+            "auth",
+        )
         if self.endpoint:
             return (*keys, "endpoint")
         else:
             return (*keys, "cloud_provider", "cloud_region")
+
+    @classmethod
+    def __pre_deserialize__(cls, data):
+        """Reject an invalid `resource_name_prefix` when the profile loads."""
+        data = super().__pre_deserialize__(data)
+        prefix = data.get("resource_name_prefix", "")
+        if not is_resource_name_prefix_valid(prefix):
+            raise DbtRuntimeError(
+                f"Invalid resource_name_prefix '{prefix}': it may only contain lowercase "
+                "letters, digits and hyphens, must start with a letter or digit, and can be "
+                f"at most {MAX_RESOURCE_NAME_PREFIX_LENGTH} characters."
+            )
+        return data
 
 
 def _execute_query_with_retry(
@@ -476,8 +503,9 @@ class ConfluentConnectionManager(SQLConnectionManager):
 
             # Use deterministic name if provided, otherwise fall back to UUID
             if statement_name is None:
-                prefix = connection.credentials.statement_name_prefix
-                statement_name = f"{prefix}{uuid.uuid4()}"
+                creds = connection.credentials
+                prefix = f"{creds.resource_name_prefix}{creds.statement_name_prefix}"
+                statement_name = sanitize_statement_name(f"{prefix}{uuid.uuid4()}")
 
             cursor = connection.handle.cursor(mode=resolved_mode)
             _execute_query_with_retry(
