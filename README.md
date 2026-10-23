@@ -58,12 +58,44 @@ You have several options for configuring your credentials:
   - Flink-region API keys allow non-interactive use similar to global API keys, but are more restricted in scope.
   - Some routes used by the adapter will not work with a Flink-region API key.
     - E.g. [Tableflow](MATERIALIZATIONS.md#tableflow) needs OAuth, a global API key, or the scoped Tableflow key below.
-- **Add scoped control-plane keys alongside a Flink-region API key**
-  - `tableflow_api_key` / `tableflow_api_secret` (created with `confluent api-key create --resource tableflow`) authenticate Tableflow's routes. You must also set `database_kafka_cluster_id` to the `lkc-...` id of your `schema` cluster, since Tableflow needs it and a scoped key can't look it up.
-  - `cloud_api_key` / `cloud_api_secret` (created with `confluent api-key create --resource cloud`) authenticate Flink artifact routes, which the [`function` materialization](MATERIALIZATIONS.md#uploading-the-artifact) uses to upload and look up artifacts.
-  - These keys are ignored when `global_api_key` is set, and neither replaces a Global or Flink-region key for running SQL.
+    - See [Fine-grained credentials](#fine-grained-credentials) below.
 
 `dbt init` will prompt you for a choice and ensure your profile is configured correctly.
+
+### Fine-grained credentials
+
+Using OAuth, or a Global API key, is the most convenient way to get started because those credentials cover all operations performed by this adapter.
+
+For security reasons, some may prefer to use more fine-grained credentials. If you've configured your initial profile with the scoped Flink-region API key,
+you will need to provide additional credentials to use some of the more advanced features like Tableflow and User-Defined Functions (UDFs).
+`dbt init` doesn't prompt for these, so add them to your target in `profiles.yml` yourself:
+
+- **Tableflow**
+  - Requires `tableflow_api_key` & `tableflow_api_secret` (created with `confluent api-key create --resource tableflow`).
+  - You must also set `database_kafka_cluster_id` to the `lkc-...` id of your Kafka cluster, since Tableflow needs it and a scoped key can't look it up.
+- **UDFs**
+  - Requires `cloud_api_key` & `cloud_api_secret` (created with `confluent api-key create --resource cloud`) to interact with the artifacts APIs.
+
+```yaml
+my_project:
+  target: dev
+  outputs:
+    dev:
+      type: confluent
+      # ... organization_id, environment_id, dbname, cloud_provider, cloud_region, etc.
+
+      flink_api_key: <flink key>             # runs your SQL
+      flink_api_secret: <flink secret>
+
+      tableflow_api_key: <tableflow key>     # only needed for models that set `tableflow`
+      tableflow_api_secret: <tableflow secret>
+      database_kafka_cluster_id: lkc-xxxxx   # required alongside the Tableflow key
+
+      cloud_api_key: <cloud key>             # only needed for building a `function` (UDF)
+      cloud_api_secret: <cloud secret>
+```
+
+These keys are ignored when `global_api_key` is set - a Global API key always takes precedence if given.
 
 ### Concept mapping
 

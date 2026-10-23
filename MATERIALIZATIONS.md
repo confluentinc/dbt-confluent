@@ -73,7 +73,7 @@ The table below summarizes all materializations supported by the dbt-confluent a
 | [`table`](#table) | One-shot `CREATE TABLE ... AS SELECT` (CTAS). | Snapshot |
 | [`view`](#view) | A named query inlined into consumers, not a persisted result. | Inherited |
 | [`ephemeral`](#ephemeral) | Standard dbt CTE fragment. | Inherited |
-| [`function`](#function) | A scalar Java/Python UDF registered from an already-uploaded artifact. | n/a |
+| [`function`](#function) | A scalar Java/Python UDF registered from an artifact, either already uploaded or uploaded by dbt from a local package. | n/a |
 
 _Note: [`view`](#view) & [`ephemeral`](#ephemeral) inherit their execution mode from any job that queries them, since they run inline in those jobs and not as independent Flink statements._
 
@@ -553,10 +553,13 @@ flags:
   enable_experimental_function_materialization: true
 ```
 
+#### Credentials
+
+Every `function` needs credentials that can use the artifact API, whether it names an `artifact_id` or an `artifact_path`: one of `auth: oauth`, a [Global API key](#tableflow), or a Cloud API key (`cloud_api_key` / `cloud_api_secret`, from `confluent api-key create --resource cloud`) alongside your Flink-region key. A Flink-region key alone is not enough. dbt checks this before running anything for the function, and fails with a compile error if the profile can't use the artifact API.
+
 #### Uploading the artifact
 
-With `artifact_path`, dbt uploads the package as the function's artifact, which needs credentials that
-can use the artifact API: `auth: oauth`, a [Global API key](#tableflow) as for Tableflow, or a Cloud API key (`cloud_api_key` / `cloud_api_secret`) alongside your Flink-region key. The artifact is
+With `artifact_path`, dbt uploads the package as the function's artifact. The artifact is
 named after the package's content (`<statement prefix><project>-<function>-<digest>`), so
 the same package always maps to the same artifact. Artifact names are limited to 60 characters,
 so when the project and function names are too long to leave room for the digest, they are cut
@@ -584,7 +587,7 @@ artifact still in use: running and stopped statements stay bound to the artifact
 against, and dbt can't tell which statements those are.
 
 An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
-looked up (for example with only a Flink-region key), the run fails with the existing function untouched. The check only runs when replacing
+looked up, the run fails with the existing function untouched. The check only runs when replacing
 an existing function.
 
 #### Changing an existing function
