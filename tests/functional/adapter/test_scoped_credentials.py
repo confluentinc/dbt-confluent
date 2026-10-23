@@ -22,6 +22,7 @@ crashed session leaked are swept at the start of the next one, once they are ove
 
 import os
 import time
+from contextlib import ExitStack
 from typing import NamedTuple
 from uuid import uuid4
 
@@ -123,13 +124,13 @@ def scoped_keys(iam):
     owner = owner_id(iam, GLOBAL_API_KEY or "")
     sweep_stale_api_keys(iam, owner)
     keys: dict[str, ApiKey] = {}
-    try:
+    # Each key is registered for deletion as soon as it exists, and ExitStack runs every
+    # deletion even if an earlier one (or a later create) fails: a leaked key is a live secret.
+    with ExitStack() as cleanup:
         for resource in RESOURCES:
             keys[resource] = create_api_key(iam, owner, resource, _RUN_TAG)
+            cleanup.callback(delete_api_key, iam, keys[resource].id)
         yield keys
-    finally:
-        for key in keys.values():
-            delete_api_key(iam, key.id)
 
 
 @pytest.fixture(scope="class")
@@ -194,10 +195,17 @@ class TestScopedCredentials(FunctionFixtures):
     def class_clean_up(self, project, dbt_profile_data):
         yield
         label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-        disable_tableflow_best_effort(project, TABLE)
-        if drop_any_relation(project, TABLE):
-            delete_statements_by_label(project, label)
-        delete_function_artifacts(project, FUNCTION)
+
+        def drop_table_and_statements():
+            if drop_any_relation(project, TABLE):
+                delete_statements_by_label(project, label)
+
+        # Run in reverse order of registration, and all of them even if one fails, so a failed
+        # Tableflow disable can't leave the table, statements or uploaded artifact behind.
+        with ExitStack() as cleanup:
+            cleanup.callback(delete_function_artifacts, project, FUNCTION)
+            cleanup.callback(drop_table_and_statements)
+            cleanup.callback(disable_tableflow_best_effort, project, TABLE)
 
     @pytest.mark.parametrize("target", CASES)
     def test_tableflow_model(self, project, submitted, target):
