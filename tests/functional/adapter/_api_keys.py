@@ -10,6 +10,7 @@ Underscore-prefixed so pytest does not treat it as a test module.
 import logging
 import re
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, get_args
@@ -38,6 +39,20 @@ class ApiKey:
 
 def iam_client(global_key: str, global_secret: str) -> httpx.Client:
     return httpx.Client(base_url=BASE_URL, auth=(global_key, global_secret), timeout=30)
+
+
+def paged(
+    client: httpx.Client, url: str, params: dict[str, str | int] | None = None
+) -> Iterator[dict]:
+    """Every item of a Confluent list endpoint, across all of its pages."""
+    next_url: str | None = url
+    while next_url:
+        response = client.get(next_url, params=params)
+        response.raise_for_status()
+        page = response.json()
+        yield from page["data"]
+        # `next` is an absolute URL that already carries the query string.
+        next_url, params = page["metadata"].get("next"), None
 
 
 def owner_id(client: httpx.Client, key_id: str) -> str:
@@ -83,36 +98,25 @@ def sweep_stale_api_keys(
     deleted is logged and skipped.
     """
     now = time.time()
-    url: str | None = "/iam/v2/api-keys"
-    params: dict[str, str | int] | None = {"spec.owner": owner, "page_size": 100}
-    while url:
-        response = client.get(url, params=params)
-        response.raise_for_status()
-        page = response.json()
-        for key in page["data"]:
-            if key["spec"]["resource"]["id"] not in RESOURCES:
-                continue
-            if not _KEY_NAME_RE.match(key["spec"].get("display_name") or ""):
-                continue
-            created_at = datetime.fromisoformat(key["metadata"]["created_at"]).timestamp()
-            if now - created_at >= min_age:
-                try:
-                    delete_api_key(client, key["id"])
-                except httpx.HTTPError:
-                    # Best effort, like the suite's other sweeps: one stale key we can't
-                    # delete must not fail every test in the class.
-                    logger.warning("Could not delete stale test API key %s", key["id"])
-        # `next` is an absolute URL that already carries the query string.
-        url, params = page["metadata"].get("next"), None
+    for key in paged(client, "/iam/v2/api-keys", {"spec.owner": owner, "page_size": 100}):
+        if key["spec"]["resource"]["id"] not in RESOURCES:
+            continue
+        if not _KEY_NAME_RE.match(key["spec"].get("display_name") or ""):
+            continue
+        created_at = datetime.fromisoformat(key["metadata"]["created_at"]).timestamp()
+        if now - created_at >= min_age:
+            try:
+                delete_api_key(client, key["id"])
+            except httpx.HTTPError:
+                # Best effort, like the suite's other sweeps: one stale key we can't
+                # delete must not fail every test in the class.
+                logger.warning("Could not delete stale test API key %s", key["id"])
 
 
 def resolve_kafka_cluster_id(client: httpx.Client, environment_id: str, name: str) -> str:
-    """The `lkc-...` id of the Kafka cluster named `name` in the environment."""
-    response = client.get(
-        "/cmk/v2/clusters", params={"environment": environment_id, "page_size": 100}
-    )
-    response.raise_for_status()
-    ids = [c["id"] for c in response.json()["data"] if c["spec"]["display_name"] == name]
+    """The `lkc-...` id of the one Kafka cluster named `name` in the environment."""
+    clusters = paged(client, "/cmk/v2/clusters", {"environment": environment_id, "page_size": 100})
+    ids = [c["id"] for c in clusters if c["spec"]["display_name"] == name]
     if len(ids) != 1:
         raise LookupError(f"expected one Kafka cluster named {name!r}, found {ids}")
     return ids[0]
