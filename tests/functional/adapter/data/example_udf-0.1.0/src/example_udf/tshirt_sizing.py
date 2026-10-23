@@ -50,3 +50,18 @@ is_smaller = udf(
     input_types=_is_smaller_inp_types,
     result_type=DataTypes.BOOLEAN(),
 )
+
+
+def _f_is_larger(shirt1: str, shirt2: str) -> bool:
+    """
+    Returns True if shirt1 is a larger size than shirt2 based on standard T-shirt sizes.
+    If a size cannot be found, returns False.
+    """
+    return _f_is_smaller(shirt2, shirt1)
+
+
+is_larger = udf(
+    _f_is_larger,
+    input_types=_is_smaller_inp_types,
+    result_type=DataTypes.BOOLEAN(),
+)
