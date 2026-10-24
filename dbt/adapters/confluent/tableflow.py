@@ -14,6 +14,7 @@ being dropped.
 """
 
 import json
+import time
 from dataclasses import dataclass
 from typing import NoReturn
 
@@ -40,6 +41,7 @@ from confluent_sql.exceptions import (
     TableflowTopicAlreadyExistsError,
     TableflowTopicNotFoundError,
 )
+from confluent_sql.polling import sleep_with_backoff
 from confluent_sql.tableflow import Fields, normalize_table_formats
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 from dbt_common.ui import warning_tag
@@ -48,6 +50,12 @@ from dbt.adapters.base import BaseRelation
 from dbt.adapters.events.logging import AdapterLogger
 
 logger = AdapterLogger("Confluent")
+
+# How long `create_tableflow_topic` keeps retrying a create that the server rejects as "already
+# enabled". Every create follows a check (or a confirmed removal) that Tableflow is absent, so
+# that rejection means a stale record is still being torn down server-side (its removal can
+# lag the 404 `disable_tableflow` waits for) or something else is changing this topic.
+CREATE_ALREADY_EXISTS_TIMEOUT_SECS = 300
 
 # Each `tableflow.storage.kind`/`error_handling.mode` value, verbatim as the
 # API/driver name it (`ManagedStorage.kind`, `TableflowErrorHandlingSuspend.mode`,
@@ -381,19 +389,15 @@ def create_tableflow_topic(
         f"Enabling Tableflow for {relation} ({desired.to_spec()!r}) -- this can take a few minutes."
     )
     try:
-        return handle.enable_tableflow(
-            relation.identifier,
-            table_formats=desired.table_formats,
-            storage=desired.storage,
-            config=desired.config,
-        )
-    except TableflowTopicAlreadyExistsError:
-        # Narrow race: something else enabled it between our GET above and
-        # this call. The desired end state (enabled) already holds -- same
-        # "swallowed, not warning-worthy" treatment as the symmetric race in
-        # `patch_tableflow_topic` (disabled concurrently).
-        logger.debug(f"Tableflow was enabled concurrently for {relation}; leaving as-is.")
-        return probe_tableflow_state(handle, relation)
+        return _enable_retrying_while_exists(handle, relation, desired)
+    except TableflowTopicAlreadyExistsError as e:
+        raise DbtDatabaseError(
+            f"Error enabling Tableflow for {relation}: the server still reports Tableflow as "
+            f"enabled after {CREATE_ALREADY_EXISTS_TIMEOUT_SECS}s. Either a previous Tableflow "
+            f"teardown for this topic hasn't finished server-side, or something else is "
+            f"enabling Tableflow on it concurrently. "
+            f"Re-run this model; if it keeps failing, look for concurrent changes."
+        ) from e
     except ProgrammingError as e:
         reraise_tableflow_auth_error(e)
     except ConfluentSqlError as e:
@@ -420,6 +424,64 @@ def create_tableflow_topic(
         raise DbtDatabaseError(f"Error enabling Tableflow for {relation}: {e}") from e
 
 
+def _enable_retrying_while_exists(
+    handle: Connection, relation: BaseRelation, desired: TableflowDesiredState
+) -> TableflowTopic:
+    """`enable_tableflow`, retried for up to `CREATE_ALREADY_EXISTS_TIMEOUT_SECS` while the
+    server answers "already enabled"; raises that error if it never clears.
+
+    Safe to retry: that answer means nothing was created. Deliberately not treated as success:
+    the record may be a stale one still being deleted, or a concurrent enable with a different
+    config.
+    """
+
+    started_at = time.monotonic()
+
+    def enable() -> TableflowTopic:
+        return handle.enable_tableflow(
+            relation.identifier,
+            table_formats=desired.table_formats,
+            storage=desired.storage,
+            config=desired.config,
+        )
+
+    def log_conflict(attempt: int, error: TableflowTopicAlreadyExistsError) -> None:
+        # Diagnostic only: show what the server says exists, so a stale record can be told
+        # apart from a live one. Never lets a failing GET mask the conflict being handled.
+        try:
+            state = json.dumps(_describe_topic(handle.get_tableflow(relation.identifier)))
+        except TableflowTopicNotFoundError:
+            state = "GET found no Tableflow topic (404)"
+        except ConfluentSqlError as e:
+            state = f"GET failed: {e}"
+        logger.info(
+            f"Tableflow create for {relation} hit 'already exists' (attempt {attempt}, "
+            f"{time.monotonic() - started_at:.1f}s in): {error}. Current state: {state}. "
+            f"Retrying for up to {CREATE_ALREADY_EXISTS_TIMEOUT_SECS}s; if this dbt build "
+            f"times out, retry it later."
+        )
+
+    attempt = 1
+    try:
+        return enable()
+    except TableflowTopicAlreadyExistsError as e:
+        last_error = e
+    log_conflict(attempt, last_error)
+    for _ in sleep_with_backoff(CREATE_ALREADY_EXISTS_TIMEOUT_SECS, started_at=started_at):
+        attempt += 1
+        try:
+            return enable()
+        except TableflowTopicAlreadyExistsError as e:
+            last_error = e
+            log_conflict(attempt, e)
+    raise last_error
+
+
+def _describe_topic(topic: TableflowTopic) -> dict:
+    """The server-reported parts of `topic` worth logging, as plain JSON-able data."""
+    return {"phase": topic.phase.name, "status": topic.status.raw, "spec": topic.spec.raw}
+
+
 def patch_tableflow_topic(
     handle: Connection, relation: BaseRelation, patch: TableflowPatch
 ) -> TableflowTopic | None:
@@ -435,13 +497,14 @@ def patch_tableflow_topic(
         return handle.update_tableflow(
             relation.identifier, table_formats=patch.table_formats, config=patch.config
         )
-    except TableflowTopicNotFoundError:
-        # Narrow race: disabled concurrently between our GET above and this
-        # call. Leave it disabled -- the next run's GET will see that and
-        # enable fresh with the full desired config, same as any other
-        # not-yet-enabled model.
-        logger.debug(f"Tableflow was disabled concurrently for {relation}; leaving as-is.")
-        return None
+    except TableflowTopicNotFoundError as e:
+        # Disabled between our GET and this call. Returning success would report a model
+        # whose Tableflow config was never applied, so fail and let the user sort it out.
+        raise DbtDatabaseError(
+            f"Error updating Tableflow for {relation}: Tableflow was disabled between "
+            f"checking its state and updating it, so something else is changing this topic "
+            f"concurrently. Resolve the concurrent change, then re-run this model."
+        ) from e
     except ProgrammingError as e:
         reraise_tableflow_auth_error(e)
     except ConfluentSqlError as e:
