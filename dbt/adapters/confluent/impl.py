@@ -407,8 +407,9 @@ class ConfluentAdapter(SQLAdapter):
         """Build a deterministic, sanitized Flink statement name.
 
         Called from Jinja macros via adapter.get_statement_name().
-        Returns the final name ready for the Flink API. resource_name_prefix is
-        prepended to every name, statement_name_prefix only to generated ones.
+        Returns the final name ready for the Flink API. `resource_name_prefix` is
+        prepended to every name, while `statement_name_prefix` is prepended only when no
+        `statement_name_override` is provided.
         """
         creds = self.config.credentials
         if statement_name_override:

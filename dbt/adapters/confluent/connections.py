@@ -39,11 +39,7 @@ from dbt.adapters.events.types import (
 from dbt.adapters.sql import SQLConnectionManager
 
 from .__version__ import version
-from .naming import (
-    MAX_RESOURCE_NAME_PREFIX_LENGTH,
-    is_resource_name_prefix_valid,
-    sanitize_statement_name,
-)
+from .naming import sanitize_statement_name, validate_resource_name_prefix
 from .utils import fetch_from_cursor
 
 if TYPE_CHECKING:
@@ -83,7 +79,7 @@ class ConfluentCredentials(Credentials):
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
     statement_name_prefix: str = "dbt-"
     statement_label: str = "dbt-confluent"
-    # Isolates each data engineer's statements and topics in a shared cluster.
+    # Isolates statements and topics in a shared environment.
     resource_name_prefix: str = ""
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}
@@ -121,18 +117,12 @@ class ConfluentCredentials(Credentials):
         else:
             return (*keys, "cloud_provider", "cloud_region")
 
-    @classmethod
-    def __pre_deserialize__(cls, data):
+    def __post_init__(self):
         """Reject an invalid `resource_name_prefix` when the profile loads."""
-        data = super().__pre_deserialize__(data)
-        prefix = data.get("resource_name_prefix", "")
-        if not is_resource_name_prefix_valid(prefix):
-            raise DbtRuntimeError(
-                f"Invalid resource_name_prefix '{prefix}': it may only contain lowercase "
-                "letters, digits and hyphens, must start with a letter or digit, and can be "
-                f"at most {MAX_RESOURCE_NAME_PREFIX_LENGTH} characters."
-            )
-        return data
+        try:
+            validate_resource_name_prefix(self.resource_name_prefix)
+        except ValueError as e:
+            raise DbtRuntimeError(str(e)) from e
 
 
 def _execute_query_with_retry(
@@ -501,7 +491,10 @@ class ConfluentConnectionManager(SQLConnectionManager):
             if hidden:
                 labels.append(HIDDEN_LABEL)
 
-            # Use deterministic name if provided, otherwise fall back to UUID
+            # Use deterministic name if provided, otherwise fall back to UUID.
+            # statement_name_prefix is not validated on its own, only the whole built
+            # name can be checked, so the fallback is sanitized here, as in
+            # get_statement_name().
             if statement_name is None:
                 creds = connection.credentials
                 prefix = f"{creds.resource_name_prefix}{creds.statement_name_prefix}"

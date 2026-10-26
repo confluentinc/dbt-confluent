@@ -12,13 +12,17 @@ MAX_RESOURCE_NAME_PREFIX_LENGTH = 64
 _RESOURCE_NAME_PREFIX_RE = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 
-def is_resource_name_prefix_valid(prefix: str) -> bool:
-    """Return whether `prefix` is a valid resource_name_prefix; empty is valid."""
+def validate_resource_name_prefix(prefix: str) -> None:
+    """Raise ValueError if `prefix` is not a valid resource_name_prefix; empty is valid."""
     if not prefix:
-        return True
-    return len(prefix) <= MAX_RESOURCE_NAME_PREFIX_LENGTH and bool(
-        _RESOURCE_NAME_PREFIX_RE.fullmatch(prefix)
-    )
+        return
+    too_long = len(prefix) > MAX_RESOURCE_NAME_PREFIX_LENGTH
+    if too_long or not _RESOURCE_NAME_PREFIX_RE.fullmatch(prefix):
+        raise ValueError(
+            f"Invalid resource_name_prefix '{prefix}': it may only contain lowercase letters, "
+            "digits and hyphens, must start with a letter or digit, and can be at most "
+            f"{MAX_RESOURCE_NAME_PREFIX_LENGTH} characters."
+        )
 
 
 def truncate_with_hash(base: str, max_length: int, hash_source: str) -> str:
