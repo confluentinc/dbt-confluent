@@ -498,18 +498,20 @@ class TestEnsureTableflowConfig:
         logger.info.assert_called_once()
         assert "my_table" in logger.info.call_args.args[0]
 
-    def test_already_enabled_update_race_is_swallowed(self, handle, rel):
-        """Narrow race: disabled concurrently between our GET and this PATCH.
-        Must not raise -- the next run's GET will see it's disabled and
-        enable fresh with the full desired config."""
+    def test_already_enabled_update_race_fails_as_concurrent_change(self, handle, rel):
+        """Disabled concurrently between our GET and this PATCH. Must fail rather than
+        report success for a config that was never applied."""
         handle.get_tableflow.side_effect = None
         handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",))
-        handle.update_tableflow.side_effect = TableflowTopicNotFoundError(
-            "not enabled", table_name="my_table"
-        )
-        tableflow.reconcile_tableflow_config(
-            handle, rel, {"table_formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}}
-        )
+        err = TableflowTopicNotFoundError("not enabled", table_name="my_table")
+        handle.update_tableflow.side_effect = err
+        with pytest.raises(DbtDatabaseError, match="concurrently") as exc_info:
+            tableflow.reconcile_tableflow_config(
+                handle,
+                rel,
+                {"table_formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}},
+            )
+        assert exc_info.value.__cause__ is err
 
     def test_already_enabled_does_not_call_update_when_config_unset(self, handle, rel, logger):
         handle.get_tableflow.side_effect = None
@@ -596,17 +598,37 @@ class TestEnsureTableflowConfig:
         assert "--full-refresh" in message
         assert "wiping" in message
 
-    def test_already_exists_race_is_swallowed(self, handle, rel, logger):
-        """Narrow race: something else enabled it between our GET and this
-        call. The desired end state (enabled) already holds, so this must
-        not raise."""
-        handle.enable_tableflow.side_effect = TableflowTopicAlreadyExistsError(
-            "already enabled", table_name="my_table"
+    def test_already_exists_is_retried_until_it_clears(self, handle, rel, monkeypatch):
+        """A create right after a confirmed-absent check can hit a stale record that is
+        still being torn down; the create is retried and succeeds once it's gone."""
+        monkeypatch.setattr(
+            tableflow, "sleep_with_backoff", lambda timeout, started_at: iter(range(5))
         )
+        enabled = make_topic()
+        handle.enable_tableflow.side_effect = [
+            TableflowTopicAlreadyExistsError("already enabled", table_name="my_table"),
+            TableflowTopicAlreadyExistsError("already enabled", table_name="my_table"),
+            enabled,
+        ]
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
-        logger.info.assert_called_once()
+        assert handle.enable_tableflow.call_count == 3
+
+    def test_already_exists_that_never_clears_fails_telling_user_to_retry(
+        self, handle, rel, monkeypatch
+    ):
+        monkeypatch.setattr(
+            tableflow, "sleep_with_backoff", lambda timeout, started_at: iter(range(2))
+        )
+        err = TableflowTopicAlreadyExistsError("already enabled", table_name="my_table")
+        handle.enable_tableflow.side_effect = err
+        with pytest.raises(DbtDatabaseError, match="Re-run this model") as exc_info:
+            tableflow.reconcile_tableflow_config(
+                handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
+            )
+        assert exc_info.value.__cause__ is err
+        assert handle.enable_tableflow.call_count == 3  # first attempt + 2 retries
 
     # --- Tableflow control-plane auth errors -> actionable guidance ---
 
