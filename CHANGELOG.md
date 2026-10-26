@@ -4,6 +4,12 @@ All notable changes to this dbt adapter will be documented in this file.
 
 <!-- towncrier release notes start -->
 
+## dbt-confluent 0.4.1 (2026-10-26)
+
+### Bugfixes
+
+- Avoid reporting success erroneously when a tableflow replacement cannot complete due to cleanup delays.
+
 ## dbt-confluent 0.4.0 (2026-10-01)
 
 ### Features
