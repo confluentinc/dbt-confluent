@@ -980,7 +980,7 @@ Each materialization that submits statements creates Flink statements with deter
 {resource_name_prefix}{statement_name_prefix}{project_name}-{model_name}
 ```
 
-Both prefixes come from the profile: `statement_name_prefix` defaults to `dbt-`, and the optional `resource_name_prefix` is empty unless set (see [Isolating environments](README.md#isolating-environments)), giving `dbt-{project}-{model}` by default. For `streaming_table`, which creates two statements (a DDL and an INSERT), the DDL gets a `-ddl` suffix: `dbt-{project}-{model}-ddl`.
+Both prefixes come from the profile: `statement_name_prefix` defaults to `dbt-`, and the optional `resource_name_prefix` is empty unless set (see [Sharing an environment](README.md#sharing-an-environment)), giving `dbt-{project}-{model}` by default. For `streaming_table`, which creates two statements (a DDL and an INSERT), the DDL gets a `-ddl` suffix: `dbt-{project}-{model}-ddl`.
 
 `materialized_table` differs in two ways. Its defining `CREATE OR ALTER` statement completes immediately, since it is not a long-running maintainer (Flink maintains the table server-side), so the adapter reaps it like any other bounded statement; a failed submission is left in place for debugging (Confluent purges terminal statements after ~30 days). And each run submits under a unique per-run name (`dbt-{project}-{model}-{invocation_id}`), so a re-assert can never collide (409) with a statement lingering from a previous run.
 

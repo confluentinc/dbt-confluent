@@ -80,9 +80,9 @@ models:
     +schema: my-kafka-cluster
 ```
 
-### Isolating environments
+### Sharing an environment
 
-Because a schema is a whole Kafka cluster, several data engineers often build the same project into one cluster. To keep your topics and statements apart from everyone else's, set the optional `resource_name_prefix` in your own `profiles.yml`:
+Statement names are unique per Confluent Cloud environment, while topic names are unique per Kafka cluster. When several users build the same project into one environment, they share statement names even if each target uses its own cluster. Targets that also share a cluster write to the same topics. To keep your statements and topics apart from everyone else's, set the optional `resource_name_prefix` in your own `profiles.yml`:
 
 ```yaml
 # profiles.yml
@@ -98,7 +98,7 @@ It is empty by default, so names only change when you set it:
 
 | | Without | With `resource_name_prefix: alice-` |
 |---|---|---|
-| Statement | `dbt-my_project-orders` | `alice-dbt-my_project-orders` |
+| Statement | `dbt-my-project-orders-2bce76` | `alice-dbt-my-project-orders-f94953` |
 | Topic | `orders` | `alice_orders` |
 
 The prefix also applies to explicit `alias` and `statement_name` configs, sources are never prefixed. In topic names its hyphens become underscores, because dbt writes ephemeral model names into SQL unquoted. It may only contain lowercase letters, digits and hyphens, must start with a letter or digit, and can be at most 64 characters, otherwise the profile fails to load.
