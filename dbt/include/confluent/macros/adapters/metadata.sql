@@ -40,10 +40,12 @@
     {% for relation in relations %}
     {% if not loop.first %}union all{% endif %}
     select * from tbl
-    where table_schema = '{{ relation.schema }}' and table_name = '{{ relation.identifier }}'
+    where table_schema = '{{ adapter.escape_string_literal(relation.schema) }}'
+      and table_name = '{{ adapter.escape_string_literal(relation.identifier) }}'
     union all
     select * from col
-    where table_schema = '{{ relation.schema }}' and table_name = '{{ relation.identifier }}'
+    where table_schema = '{{ adapter.escape_string_literal(relation.schema) }}'
+      and table_name = '{{ adapter.escape_string_literal(relation.identifier) }}'
     {% endfor %}
     {% endcall %}
     {% set rows = [] %}
