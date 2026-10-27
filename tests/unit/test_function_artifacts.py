@@ -29,7 +29,6 @@ from dbt.adapters.confluent import function_artifacts as fa
 from dbt.adapters.confluent import function_artifacts_repo, functions, impl
 from dbt.adapters.confluent.function_artifacts_repo import FunctionArtifactsRepo
 from dbt.adapters.confluent.impl import ConfluentAdapter
-from dbt.adapters.confluent.singleflight import ComputeTimeout, SharedComputeError
 
 CATALOG = "env-1"
 DATABASE = "cluster-a"
@@ -672,9 +671,7 @@ class TestFunctionArtifactsRepo:
         outcomes = run_on_threads(lambda: artifacts.find(driver, "any-name"))
 
         assert len(calls) == 1
-        assert all(isinstance(o, Exception) for o in outcomes)
-        assert outcomes.count(listing_error) == 1
-        assert sum(isinstance(o, SharedComputeError) for o in outcomes) == THREADS - 1
+        assert outcomes == [listing_error] * THREADS
 
     def test_a_package_is_uploaded_once_however_many_threads_ask(self, driver, events, tmp_path):
         udf = package(tmp_path, b"v1")
@@ -742,8 +739,7 @@ class TestFunctionArtifactsRepo:
         outcomes = run_on_threads(lambda: artifacts.ensure(driver, artifact_of(udf)))
 
         assert len(attempts) == 1
-        assert all(isinstance(o, Exception) for o in outcomes)
-        assert sum(isinstance(o, SharedComputeError) for o in outcomes) == THREADS - 1
+        assert all(isinstance(o, OperationalError) for o in outcomes)
 
     def test_a_waiter_gives_up_when_the_upload_outlasts_its_timeout(self, driver, tmp_path):
         udf = package(tmp_path, b"v1")
@@ -761,7 +757,7 @@ class TestFunctionArtifactsRepo:
             leader = pool.submit(artifacts.ensure, driver, artifact_of(udf))
             assert leader_uploading.wait(5)
 
-            with pytest.raises(ComputeTimeout):
+            with pytest.raises(TimeoutError):
                 artifacts.ensure(driver, artifact_of(udf))
 
             release_leader.set()
@@ -882,7 +878,7 @@ class TestAdapterSharesPackageWork:
 
         for name in (FUNCTION, other):
             existing = adapter.describe_function(relation(name))
-            with pytest.raises((OperationalError, SharedComputeError)):
+            with pytest.raises(OperationalError):
                 adapter.apply_function(relation(name), udf, existing, None, "c", "d")
 
         assert not [e for e in events if e.startswith(("drop", "create"))]

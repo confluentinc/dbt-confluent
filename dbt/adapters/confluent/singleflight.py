@@ -16,26 +16,14 @@ K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")
 
 
-class SharedComputeError(Exception):
-    """Raised to a waiter when the caller that computed its value failed.
-
-    `__cause__` is the original error.
-    """
-
-
-class ComputeTimeout(TimeoutError):
-    """Raised to a waiter that gave up waiting for the value to be computed."""
-
-
 class SingleFlightCell(Generic[V]):
     """One value, filled in once by whichever caller asks first.
 
     `get(compute)`: the first caller (the leader) runs `compute()` on its own thread; later callers
     block until it finishes and receive the same value. The outcome is remembered for the life of
-    the object, a failure included, so nothing is retried. The leader sees the original error; each
-    waiter gets its own `SharedComputeError` chained to it, so every caller has its own traceback.
-    A waiter stops waiting `compute_timeout` seconds after computation began and raises
-    `ComputeTimeout` (the leader keeps running, and the value is still recorded if it later
+    the object, a failure included, so nothing is retried: every caller, leader or waiter, gets the
+    original error. A waiter stops waiting `compute_timeout` seconds after computation began and
+    raises `TimeoutError` (the leader keeps running, and the value is still recorded if it later
     finishes). `compute` must not call `get` on the same cell.
 
     `compute` is supplied per call, so only the leader's runs; the waiters' functions are discarded,
@@ -80,15 +68,12 @@ class SingleFlightCell(Generic[V]):
     def _wait(self) -> V:
         remaining = self._started_at + self._compute_timeout - time.monotonic()
         if not self._done.wait(max(remaining, 0)):
-            raise ComputeTimeout(
+            raise TimeoutError(
                 f"Gave up waiting after {self._compute_timeout:g}s for another thread to finish "
                 "computing this value"
             )
         if self._error is not None:
-            raise SharedComputeError(
-                f"Another thread failed to compute this value: "
-                f"{type(self._error).__name__}: {self._error}"
-            ) from self._error
+            raise self._error
         return self._value  # type: ignore[return-value]
 
 
