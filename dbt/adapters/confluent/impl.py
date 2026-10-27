@@ -28,8 +28,9 @@ from dbt.adapters.contracts.relation import Policy
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import function_artifacts, functions, tableflow
+from . import functions, tableflow
 from .dry_run_types import display_type, fitted_type
+from .function_artifacts_repo import FunctionArtifactsRepo
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
@@ -185,6 +186,9 @@ class ConfluentAdapter(SQLAdapter):
         # worker thread; _CleanupRegistry.__init__ gives each of those threads
         # its own empty list on first access.
         self._deferred_cleanups = _CleanupRegistry()
+        # Unlike the registry above, shared by every thread on purpose: it is how threads
+        # building functions from one package hash, list and upload it once between them.
+        self._artifacts_repo = FunctionArtifactsRepo()
 
     @property
     def _behavior_flags(self) -> list[BehaviorFlag]:
@@ -979,8 +983,8 @@ class ConfluentAdapter(SQLAdapter):
             relation.schema,
             project_root=Path(self.config.project_root),
             project=self.config.project_name,
-            name_prefix=self.config.credentials.statement_name_prefix,
             function=relation.identifier,
+            digest=self._artifacts_repo.digest,
         )
 
     @available
@@ -1006,10 +1010,8 @@ class ConfluentAdapter(SQLAdapter):
         against the artifact already uploaded for that content, if any.
         """
         if udf.artifact_config:
-            artifact = function_artifacts.find_artifact(
-                self.connections.get_thread_handle(),
-                udf.artifact_config.name,
-                udf.artifact_config.language,
+            artifact = self._artifacts_repo.find(
+                self.connections.get_thread_handle(), udf.artifact_config.name
             )
             udf = udf._replace(artifact_id=artifact.id if artifact else None)
         return functions.plan_function_change(existing, udf)
@@ -1069,7 +1071,7 @@ class ConfluentAdapter(SQLAdapter):
         conn = self.connections.get_thread_handle()
         execute = self._function_executor(compute_pool_id)
         if udf.artifact_config:
-            artifact_id = function_artifacts.ensure_artifact(conn, udf.artifact_config).id
+            artifact_id = self._artifacts_repo.ensure(conn, udf.artifact_config).id
         else:
             assert udf.artifact_id  # validation guarantees one or the other
             artifact_id = udf.artifact_id
