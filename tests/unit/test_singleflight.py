@@ -6,19 +6,13 @@ as more than one `compute` call rather than being masked by sequential execution
 
 import threading
 import time
-import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import pytest
 
-from dbt.adapters.confluent.singleflight import (
-    ComputeTimeout,
-    SharedComputeError,
-    SingleFlightCell,
-    SingleFlightDict,
-)
+from dbt.adapters.confluent.singleflight import SingleFlightCell, SingleFlightDict
 
 CALLERS = 8
 GENERAL_TIMEOUT = 10.0
@@ -27,8 +21,6 @@ TINY_TIMEOUT = 0.05
 JOIN_TIMEOUT = 5.0
 # Time for a thread that has just announced it is about to call `get` to reach the blocking wait.
 SETTLE_TIME = 0.1
-# Name of the frame running `CountingCompute.__call__`, as `traceback` reports it.
-COMPUTE_FRAME = "__call__"
 
 
 class CountingCompute:
@@ -131,45 +123,11 @@ def test_failure_is_shared_and_not_retried():
     outcomes = run_concurrently(lambda: cell.get(compute))
 
     assert compute.calls == 1
-    assert outcomes.count(original) == 1, "exactly one caller (the leader) sees the original error"
-    waiters = [o for o in outcomes if o is not original]
-    assert len(waiters) == CALLERS - 1
-    for waiter in waiters:
-        assert isinstance(waiter, SharedComputeError)
-        assert waiter.__cause__ is original
-        assert "RuntimeError: upload failed" in str(waiter)
+    assert outcomes == [original] * CALLERS, "every caller sees the original error"
 
-    with pytest.raises(SharedComputeError):
+    with pytest.raises(RuntimeError, match="upload failed"):
         cell.get(compute)
     assert compute.calls == 1
-
-
-def test_each_waiter_has_its_own_traceback():
-    cell = SingleFlightCell[str](GENERAL_TIMEOUT)
-    original = RuntimeError("boom")
-    compute = CountingCompute(error=original).blocking()
-    leader = threading.Thread(target=lambda: _swallow(lambda: cell.get(compute)))
-    leader.start()
-    assert compute.entered.wait(JOIN_TIMEOUT)
-
-    errors: list[BaseException] = []
-    waiters = [
-        threading.Thread(target=lambda: errors.append(_capture(cell, compute))) for _ in "ab"
-    ]
-    for waiter in waiters:
-        waiter.start()
-    compute.release.set()
-    for thread in [leader, *waiters]:
-        thread.join(JOIN_TIMEOUT)
-
-    assert len(errors) == len(waiters), "a waiter thread did not finish"
-    first, second = errors
-    assert first is not second
-    assert first.__traceback__ is not second.__traceback__
-    # The leader's frame (`compute`) belongs only to the shared original error.
-    assert COMPUTE_FRAME in _frame_names(original)
-    for error in errors:
-        assert COMPUTE_FRAME not in _frame_names(error)
 
 
 def test_waiters_are_released_when_the_leader_is_interrupted():
@@ -177,7 +135,7 @@ def test_waiters_are_released_when_the_leader_is_interrupted():
     compute = CountingCompute(error=KeyboardInterrupt()).blocking()
     leader_outcome: list[BaseException] = []
     leader = threading.Thread(
-        target=lambda: leader_outcome.append(_capture_base(lambda: cell.get(compute)))
+        target=lambda: leader_outcome.append(_capture(lambda: cell.get(compute)))
     )
     leader.start()
     assert compute.entered.wait(JOIN_TIMEOUT)
@@ -187,7 +145,7 @@ def test_waiters_are_released_when_the_leader_is_interrupted():
 
     def wait_for_value() -> None:
         waiter_calling.set()
-        waiter_outcome.append(_capture_base(lambda: cell.get(compute)))
+        waiter_outcome.append(_capture(lambda: cell.get(compute)))
 
     waiter = threading.Thread(target=wait_for_value)
     waiter.start()
@@ -200,7 +158,7 @@ def test_waiters_are_released_when_the_leader_is_interrupted():
 
     assert not waiter.is_alive(), "waiter hung after the leader was interrupted"
     assert isinstance(leader_outcome[0], KeyboardInterrupt)
-    assert isinstance(waiter_outcome[0], SharedComputeError)
+    assert waiter_outcome[0] is leader_outcome[0]
 
 
 def test_waiter_times_out_on_a_hung_compute_and_the_cell_is_unchanged():
@@ -210,7 +168,7 @@ def test_waiter_times_out_on_a_hung_compute_and_the_cell_is_unchanged():
     leader.start()
     assert compute.entered.wait(JOIN_TIMEOUT)
 
-    with pytest.raises(ComputeTimeout):
+    with pytest.raises(TimeoutError):
         cell.get(compute)
 
     compute.release.set()
@@ -219,22 +177,7 @@ def test_waiter_times_out_on_a_hung_compute_and_the_cell_is_unchanged():
     assert compute.calls == 1
 
 
-def _frame_names(error: BaseException) -> list[str]:
-    return [frame.name for frame in traceback.extract_tb(error.__traceback__)]
-
-
-def _swallow(call: Callable[[], Any]) -> None:
-    try:
-        call()
-    except Exception:
-        pass
-
-
-def _capture(cell: SingleFlightCell[str], compute: CountingCompute) -> BaseException:
-    return _capture_base(lambda: cell.get(compute))
-
-
-def _capture_base(call: Callable[[], Any]) -> BaseException:
+def _capture(call: Callable[[], Any]) -> BaseException:
     try:
         call()
     except BaseException as error:

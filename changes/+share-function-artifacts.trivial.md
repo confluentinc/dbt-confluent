@@ -1,0 +1,1 @@
+Functions that set `artifact_path` to the same package now share one artifact: dbt hashes, looks up and uploads each package once per run, however many functions use it or how many threads build them. The artifact is named `<prefix><project>-<digest>`, without the function name.
