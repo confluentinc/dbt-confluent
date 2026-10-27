@@ -40,8 +40,16 @@ def _database_error(http_status_code):
     return error
 
 
+def _macro_error(http_status_code):
+    """What `execute_macro` actually raises: the macro boundary wraps the adapter's
+    `DbtDatabaseError` (see `_database_error`) in a `DbtRuntimeError` again."""
+    error = DbtRuntimeError("Error running SQL 'macro get_catalog_relations': Database Error")
+    error.__cause__ = _database_error(http_status_code)
+    return error
+
+
 # What the backend returns when it gives up on a slow statement.
-BACKEND_ERROR = _database_error(500)
+BACKEND_ERROR = _macro_error(500)
 
 
 def _relations(count):
@@ -332,16 +340,17 @@ class TestQueryCatalogRows:
     def test_raises_the_error_once_the_reader_gives_up(self, get_catalog, sleep):
         macro = _FakeCatalogMacro([BACKEND_ERROR] * 100)
 
-        with pytest.raises(DbtDatabaseError) as exc_info:
+        with pytest.raises(DbtRuntimeError) as exc_info:
             get_catalog(macro, _relations(LARGE))
 
         assert exc_info.value is BACKEND_ERROR
         # No pointless wait before giving up: a backoff for every failure but the last.
         assert sleep.call_count == len(macro.calls) - 1
 
+    @pytest.mark.parametrize("wrap", [_database_error, _macro_error], ids=["bare", "nested"])
     @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
-    def test_retryable_errors_are_retried(self, get_catalog, status):
-        macro = _FakeCatalogMacro([_database_error(status)])
+    def test_retryable_errors_are_retried(self, get_catalog, status, wrap):
+        macro = _FakeCatalogMacro([wrap(status)])
 
         get_catalog(macro, _relations(LARGE))
 
@@ -353,6 +362,7 @@ class TestQueryCatalogRows:
             _database_error(400),
             _database_error(404),
             _database_error(None),
+            _macro_error(400),
             DbtDatabaseError("no driver error behind this one"),
             DbtRuntimeError("not a database error"),
             CompilationError("bad macro"),
@@ -361,6 +371,7 @@ class TestQueryCatalogRows:
             "http-400",
             "http-404",
             "no-status",
+            "nested-http-400",
             "no-cause",
             "runtime-error",
             "compilation-error",
@@ -381,6 +392,7 @@ class TestIsRetryableBackendError:
     @pytest.mark.parametrize("status", [429, 500, 501, 503, 599])
     def test_429_and_5xx_statuses_are_retryable(self, status):
         assert is_retryable_backend_error(_database_error(status))
+        assert is_retryable_backend_error(_macro_error(status))
 
     @pytest.mark.parametrize("status", [None, 200, 400, 404, 428, 430, 499, 600])
     def test_other_statuses_are_not(self, status):

@@ -12,7 +12,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar, cast
 
-from dbt_common.exceptions import DbtDatabaseError
+from dbt_common.exceptions import CompilationError, DbtRuntimeError
 
 from dbt.adapters.base import BaseRelation
 from dbt.adapters.base.impl import InformationSchema
@@ -64,7 +64,11 @@ def query_catalog_rows(
         )
 
     def is_retryable(error: Exception) -> bool:
-        return isinstance(error, DbtDatabaseError) and is_retryable_backend_error(error)
+        return (
+            isinstance(error, DbtRuntimeError)
+            and not isinstance(error, CompilationError)
+            and is_retryable_backend_error(error)
+        )
 
     def query_chunk(chunk: list[BaseRelation]) -> list[dict[str, Any]]:
         logger.info(f"Fetching schema for chunk of {len(chunk)} relation(s)")
@@ -161,13 +165,19 @@ class ThrottledChunkReader(Generic[Item]):
             yield from results
 
 
-def is_retryable_backend_error(error: DbtDatabaseError) -> bool:
+def is_retryable_backend_error(error: BaseException) -> bool:
     """Whether `error` is the backend answering a catalog query with an HTTP 429 (rate limited) or
     5xx: a 500 is how it reports giving up on a slow statement, the rest are brief outages.
 
-    The adapter wraps the driver's error, which carries the HTTP status, so it is on `__cause__`.
-    The driver retries these statuses itself for GETs, but never for the statement-submission POST
-    that this query goes through.
+    The driver's error, which carries the HTTP status, is somewhere down the `__cause__` chain:
+    the connection manager wraps it in a `DbtDatabaseError`, and the macro boundary wraps that
+    again in a `DbtRuntimeError`. The driver retries these statuses itself for GETs, but never
+    for the statement-submission POST that this query goes through.
     """
-    status = getattr(error.__cause__, "http_status_code", None)
-    return status is not None and (status == 429 or 500 <= status < 600)
+    cause: BaseException | None = error
+    while cause is not None:
+        status = getattr(cause, "http_status_code", None)
+        if status is not None:
+            return status == 429 or 500 <= status < 600
+        cause = cause.__cause__
+    return False
