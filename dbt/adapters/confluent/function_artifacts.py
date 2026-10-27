@@ -19,30 +19,44 @@ it, which tells an artifact dbt created from one it didn't.
 import hashlib
 import json
 from pathlib import Path
-from typing import NamedTuple
+from typing import NamedTuple, NewType
 
 from confluent_sql import (
-    ArtifactAlreadyExistsError,
     ArtifactContentFormat,
     ArtifactRuntimeLanguage,
-    Connection,
-    FlinkArtifact,
 )
 
 from .naming import truncate_with_hash
 
 MANAGED_BY = "dbt-confluent"
 
-# What a function's `language` implies about its package.
-ARTIFACT_FORMATS: dict[str, tuple[str, ArtifactContentFormat, ArtifactRuntimeLanguage]] = {
-    "java": (".jar", ArtifactContentFormat.JAR, ArtifactRuntimeLanguage.JAVA),
-    "python": (".zip", ArtifactContentFormat.ZIP, ArtifactRuntimeLanguage.PYTHON),
+
+class ArtifactFormat(NamedTuple):
+    """What a function's `language` implies about its package."""
+
+    file_suffix: str
+    content_format: ArtifactContentFormat
+    runtime_language: ArtifactRuntimeLanguage
+
+
+ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
+    "java": ArtifactFormat(".jar", ArtifactContentFormat.JAR, ArtifactRuntimeLanguage.JAVA),
+    "python": ArtifactFormat(".zip", ArtifactContentFormat.ZIP, ArtifactRuntimeLanguage.PYTHON),
 }
 
 _DIGEST_LENGTH = 16
 
 # The artifact API's limit on a display name (the driver rejects longer ones).
 MAX_ARTIFACT_NAME_LENGTH = 60
+
+# Seconds the driver allows for transferring the package, passed explicitly so the timeouts
+# that wait on an upload (see `function_artifacts_repo`) are sized from it rather than from a default.
+UPLOAD_TIMEOUT_SECS = 300
+
+# Times a package transfer that fails midway is re-sent (the driver's default is none, since it
+# re-sends the whole archive). One retry, so two attempts, rides out a transient blip; failures to
+# connect are retried by the driver's own default, as nothing was sent.
+UPLOAD_TRANSFER_RETRIES = 1
 
 
 class ArtifactConfig(NamedTuple):
@@ -59,54 +73,28 @@ def encode_description(project: str | None) -> str:
     return json.dumps({"managed_by": MANAGED_BY, "project": project}, separators=(",", ":"))
 
 
-def file_digest(path: Path) -> str:
+# The digest of a package file's content. Only `file_digest` makes one, so a value of this type
+# really is a content digest, and the places that key on "this content" accept nothing else.
+ArtifactDigest = NewType("ArtifactDigest", str)
+
+
+def file_digest(path: Path) -> ArtifactDigest:
     """A short, stable digest of a file's content."""
     sha = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             sha.update(chunk)
-    return sha.hexdigest()[:_DIGEST_LENGTH]
+    return ArtifactDigest(sha.hexdigest()[:_DIGEST_LENGTH])
 
 
-def artifact_display_name(prefix: str, project: str, function: str, digest: str) -> str:
-    """Name an artifact like a statement (`<prefix><project>-<function>`), plus the content digest.
+def artifact_display_name(project: str, digest: str) -> str:
+    """Name an artifact after the dbt `project`, plus the content digest.
 
     A label too long to leave room for the digest is cut short and ends in a hash of the full
     label. The digest is never cut, since it is what makes the name mean "this content".
     """
-    label = f"{prefix}{project}-{function}"
     max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for '-'
+    label = project
     if len(label) > max_label:
         label = truncate_with_hash(label, max_label, label)
     return f"{label}-{digest}"
-
-
-def find_artifact(conn: Connection, display_name: str, language: str) -> FlinkArtifact | None:
-    """The artifact with this exact name, if any."""
-    runtime_language = ARTIFACT_FORMATS[language][2]
-    for artifact in conn.get_artifacts_api().list(runtime_language=runtime_language):
-        if artifact.display_name == display_name:
-            return artifact
-    return None
-
-
-def ensure_artifact(conn: Connection, artifact: ArtifactConfig) -> FlinkArtifact:
-    """Upload the package as a new artifact unless one for this content exists; return it."""
-    name, language = artifact.name, artifact.language
-    existing = find_artifact(conn, name, language)
-    if existing is not None:
-        return existing
-    _, content_format, runtime_language = ARTIFACT_FORMATS[language]
-    try:
-        return conn.get_artifacts_api().create(
-            name,
-            file=artifact.path,
-            content_format=content_format,
-            runtime_language=runtime_language,
-            description=encode_description(artifact.project),
-        )
-    except ArtifactAlreadyExistsError:  # a concurrent run won the race
-        existing = find_artifact(conn, name, language)
-        if existing is None:
-            raise
-        return existing
