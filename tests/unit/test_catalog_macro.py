@@ -12,8 +12,8 @@ from tests.unit._helpers import relation
 METADATA_MACROS = Path(__file__).parents[2] / "dbt/include/confluent/macros/adapters/metadata.sql"
 
 
-def render_catalog_sql(relations):
-    """The SQL `confluent__get_catalog_relations` submits for `relations`."""
+def submitted_statements(relations):
+    """The SQL statements `confluent__get_catalog_relations` submits for `relations`."""
     submitted = []
 
     def statement(*args, caller, **kwargs):
@@ -29,7 +29,13 @@ def render_catalog_sql(relations):
     )
     module = environment.from_string(METADATA_MACROS.read_text()).make_module()
     module.confluent__get_catalog_relations(SimpleNamespace(database="env-1"), relations)
-    return submitted[0]
+    return submitted
+
+
+def render_catalog_sql(relations):
+    """The one SQL statement `confluent__get_catalog_relations` submits for `relations`."""
+    [sql] = submitted_statements(relations)
+    return sql
 
 
 class TestGetCatalogRelationsMacro:
@@ -40,3 +46,6 @@ class TestGetCatalogRelationsMacro:
         escaped = name.replace("'", "''")
         assert f"table_schema = '{escaped}'" in sql
         assert f"table_name = '{escaped}'" in sql
+
+    def test_no_relations_submits_no_statement(self):
+        assert submitted_statements([]) == []
