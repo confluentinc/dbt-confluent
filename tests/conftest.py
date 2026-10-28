@@ -8,6 +8,7 @@ from dbt_common.events.event_manager_client import cleanup_event_logger
 from dbt.deprecations import reset_deprecations
 from dbt.events.logging import setup_event_logger
 from dbt.tests.fixtures.project import TestProjInfo
+from tests.functional.adapter.isolation import ISOLATION_SLUG_ENV_VAR
 
 # Import the functional fixtures as a plugin
 # Note: fixtures with session scope need to be local
@@ -83,7 +84,10 @@ def dbt_profile_target(unique_schema):
 
 @pytest.fixture(scope="class")
 def schema_yml(unique_schema):
-    """Default schema.yml where we need to specify the schema"""
+    """Default schema.yml where we need to specify the schema.
+
+    Sources bypass `generate_alias_name`, so the seed's identifier applies the class's relation
+    namespace itself, to match the namespaced seed relation (see isolation.py)."""
     return dedent(f"""
         version: 2
         sources:
@@ -91,7 +95,7 @@ def schema_yml(unique_schema):
             schema: "{unique_schema}"
             tables:
               - name: seed
-                identifier: "{{{{ var('seed_name', 'base') }}}}"
+                identifier: "{{{{ env_var('{ISOLATION_SLUG_ENV_VAR}', '') }}}}{{{{ var('seed_name', 'base') }}}}"
     """)
 
 
