@@ -680,17 +680,17 @@ class TestInsertWritesByName(ClassScopedCleanup):
             )
 
     def test_create_writes_by_name(self, project):
-        """The create-path bug (probe 71ca3b81): each table is built in yml order, and the SELECT's
-        swapped columns still land by name, including the quoted `Order` (probe d2392b5a) and the
-        upsert stream through the wrapper."""
+        """The create-path bug: each table is built in yml order, and the SELECT's swapped columns
+        still land by name, including the quoted `Order` and the upsert stream through the
+        wrapper."""
         self._assert_rows_by_name(project, "by_name_table", "v1")
         self._assert_rows_by_name(project, "by_name_table_ignore", "v1")
         self._assert_rows_by_name(project, "by_name_quoted", "v1", tag_column="Order")
         self._assert_rows_by_name(project, "by_name_upsert", "v1")
 
     def test_restart_writes_by_name(self, project):
-        """The restart bug (probe dfee9a07): each re-submitted INSERT goes into the existing table,
-        whose order (the yml's) differs from the SELECT's, under 'fail' and 'ignore'."""
+        """The restart bug: each re-submitted INSERT goes into the existing table, whose order (the
+        yml's) differs from the SELECT's, under 'fail' and 'ignore'."""
         self._delete_inserts(project)
         results, logs = run_dbt_and_capture(["run", "--vars", "{tag: v2}"])
         assert all(r.status == "success" for r in results)
@@ -705,7 +705,7 @@ class TestInsertWritesByName(ClassScopedCleanup):
     def test_restart_after_yml_reorder_writes_by_name(self, project):
         """A yml-only reorder: the yml now lists (order_id, tag, id_str), the SELECT's order, but
         the table is still (order_id, id_str, tag). The re-projection alone would write in yml
-        order by position; the column list maps each value by name (probe 0a2858ad, R2 and R3)."""
+        order by position; the column list maps each value by name."""
         yml_path = (project.project_root, "models", "models.yml")
         self._delete_inserts(project)
         write_file(BY_NAME_MODELS_YML_REORDERED, *yml_path)
