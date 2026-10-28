@@ -438,9 +438,9 @@ class TestDeadStatementRestart(ClassScopedCleanup):
 
 # -- The INSERT writes by name (#184) --
 
-# The yml lists (order_id, id_str, tag), and the SELECT returns tag and id_str the other way round.
-# Both are STRING, so an INSERT without a column list wrote each into the other's column. Each run
-# tags its rows through the `tag` var, so a test can tell its own rows from earlier ones.
+# The yml lists (order_id, id_str, tag), and the SELECT returns tag and id_str the other way
+# around. Both are STRING, so an INSERT without a column list wrote each into the other's column.
+# Each run tags its rows through the `tag` var, so a test can tell its own rows from earlier ones.
 BY_NAME_TABLE = """
 {{ config(
     materialized='streaming_table',
