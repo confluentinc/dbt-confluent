@@ -701,7 +701,7 @@ class ConfluentAdapter(SQLAdapter):
         relations: list[BaseRelation],
         used_schemas: frozenset[tuple[str, str]],
     ) -> "agate.Table":
-        """Catalog for exactly `relations`; see `catalog.query_catalog_rows` for how it is queried."""
+        """Catalog for exactly `relations`; `catalog.query_catalog_rows` describes the querying."""
         catalog = list(query_catalog_rows(self.execute_macro, information_schema, relations))
         return self._assemble_catalog(catalog, used_schemas)
 
