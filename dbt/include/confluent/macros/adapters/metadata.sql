@@ -6,6 +6,9 @@
   relation only adds a short filtered SELECT per CTE rather than repeating the projections.
 #}
 {% macro confluent__get_catalog_relations(information_schema, relations) -%}
+    {% set rows = [] %}
+    {# With no relations there is nothing to select (the query would have no final SELECT). #}
+    {% if relations %}
     {% call statement('get_catalog_relations', fetch_result=True, hidden=True) %}
     with tbl as (
         select
@@ -48,13 +51,13 @@
       and table_name = '{{ adapter.escape_string_literal(relation.identifier) }}'
     {% endfor %}
     {% endcall %}
-    {% set rows = [] %}
     {% for result in load_result('get_catalog_relations').table %}
         {% set new_row = {} %}
         {% do new_row.update(result) %}
         {% do new_row.update({'table_type': map_table_type(result['table_type'])}) %}
         {% do rows.append(new_row) %}
     {% endfor %}
+    {% endif %}
     {{ return(rows) }}
 {%- endmacro %}
 
