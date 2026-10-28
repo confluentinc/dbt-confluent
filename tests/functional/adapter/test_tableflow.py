@@ -42,12 +42,13 @@ from unittest.mock import patch
 
 import pytest
 from confluent_sql import Connection
-from confluent_sql.exceptions import TableflowTopicNotFoundError
 
 from dbt.tests.util import run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
     delete_statements_by_label,
+    disable_tableflow_best_effort,
     drop_any_relation,
+    get_tableflow,
     relation,
     sweep_stale_test_relations,
     sweep_stale_test_statements,
@@ -63,32 +64,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 _RUN_TAG = format(int(time.time()), "08x")
-_TEST_RELATION_RE = re.compile(r"^dbttest_tf_(?:table|src|switch|noop)_(?P<tag>[0-9a-f]{8})$")
+_TEST_RELATION_RE = re.compile(
+    r"^dbttest_tf_(?:table|src|switch|noop|creds)_(?P<tag>[0-9a-f]{8})$"
+)
 
 _TABLEFLOW_CONFIG = "{'table_formats': 'ICEBERG', 'storage': {'kind': 'Managed'}}"
 
 
 def _statement_label(dbt_profile_data):
     return dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-
-
-def _get_tableflow(project, name):
-    """Live Tableflow state for `name`'s backing topic, or None if not enabled."""
-    with project.adapter.connection_named("tableflow_check"):
-        conn = project.adapter.connections.get_thread_connection()
-        try:
-            return conn.handle.get_tableflow(name)
-        except TableflowTopicNotFoundError:
-            return None
-
-
-def _disable_tableflow_best_effort(project, name):
-    with project.adapter.connection_named("tableflow_teardown"):
-        conn = project.adapter.connections.get_thread_connection()
-        try:
-            conn.handle.disable_tableflow(name)
-        except TableflowTopicNotFoundError:
-            pass
 
 
 @pytest.fixture(scope="session")
@@ -145,7 +129,7 @@ class TestTableTableflow(_TableflowFixtures):
     @pytest.fixture(autouse=True, scope="class")
     def class_clean_up(self, project, dbt_profile_data):
         yield
-        _disable_tableflow_best_effort(project, self.TABLE)
+        disable_tableflow_best_effort(project, self.TABLE)
         if drop_any_relation(project, self.TABLE):
             delete_statements_by_label(project, _statement_label(dbt_profile_data))
 
@@ -153,7 +137,7 @@ class TestTableTableflow(_TableflowFixtures):
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results)
 
-        topic = _get_tableflow(project, self.TABLE)
+        topic = get_tableflow(project, self.TABLE)
         assert topic is not None, "Tableflow was not enabled on create"
         assert topic.phase.name == "RUNNING"
 
@@ -163,7 +147,7 @@ class TestTableTableflow(_TableflowFixtures):
         results = run_dbt(["run", "--full-refresh"])
         assert all(r.status.name == "Success" for r in results)
 
-        topic = _get_tableflow(project, self.TABLE)
+        topic = get_tableflow(project, self.TABLE)
         assert topic is not None, "Tableflow was not re-enabled after --full-refresh"
         assert topic.phase.name == "RUNNING"
 
@@ -199,7 +183,7 @@ class TestNoSpuriousPatchOnDefaultErrorHandling(_TableflowFixtures):
     @pytest.fixture(autouse=True, scope="class")
     def class_clean_up(self, project, dbt_profile_data):
         yield
-        _disable_tableflow_best_effort(project, self.TABLE)
+        disable_tableflow_best_effort(project, self.TABLE)
         if drop_any_relation(project, self.TABLE):
             delete_statements_by_label(project, _statement_label(dbt_profile_data))
 
@@ -207,7 +191,7 @@ class TestNoSpuriousPatchOnDefaultErrorHandling(_TableflowFixtures):
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results)
 
-        topic = _get_tableflow(project, self.TABLE)
+        topic = get_tableflow(project, self.TABLE)
         assert topic is not None, "Tableflow was not enabled on create"
         assert topic.phase.name == "RUNNING"
         assert topic.spec.config is not None
@@ -294,7 +278,7 @@ class TestMaterializedTableTableflowSwitchAndRefresh(_TableflowFixtures):
     @pytest.fixture(autouse=True, scope="class")
     def class_clean_up(self, project, dbt_profile_data):
         yield
-        _disable_tableflow_best_effort(project, self.MT)
+        disable_tableflow_best_effort(project, self.MT)
         if drop_any_relation(project, self.MT):
             delete_statements_by_label(project, _statement_label(dbt_profile_data))
         project.run_sql(f"drop table if exists {self.SRC}")
@@ -303,7 +287,7 @@ class TestMaterializedTableTableflowSwitchAndRefresh(_TableflowFixtures):
         # Build as a regular table with tableflow enabled.
         results = run_dbt(["run"])
         assert all(r.status.name == "Success" for r in results)
-        topic = _get_tableflow(project, self.MT)
+        topic = get_tableflow(project, self.MT)
         assert topic is not None, "Tableflow was not enabled on the regular table"
 
         # Re-point the model at materialized_table, keeping tableflow set.
@@ -315,7 +299,7 @@ class TestMaterializedTableTableflowSwitchAndRefresh(_TableflowFixtures):
         # regular table, then the MT is created and Tableflow re-enabled.
         results = run_dbt(["run", "--full-refresh", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
-        topic = _get_tableflow(project, self.MT)
+        topic = get_tableflow(project, self.MT)
         assert topic is not None, "Tableflow was not enabled after the table->MT switch"
         assert topic.phase.name == "RUNNING"
 
@@ -324,6 +308,6 @@ class TestMaterializedTableTableflowSwitchAndRefresh(_TableflowFixtures):
         # it on the recreated MT.
         results = run_dbt(["run", "--full-refresh", "-s", self.MT])
         assert all(r.status.name == "Success" for r in results)
-        topic = _get_tableflow(project, self.MT)
+        topic = get_tableflow(project, self.MT)
         assert topic is not None, "Tableflow was not re-enabled after the MT --full-refresh"
         assert topic.phase.name == "RUNNING"

@@ -68,17 +68,29 @@ def file_digest(path: Path) -> str:
     return sha.hexdigest()[:_DIGEST_LENGTH]
 
 
+def artifact_name_stem(
+    prefix: str, project: str, function: str, digest_length: int = _DIGEST_LENGTH
+) -> str:
+    """The start of an artifact's name, `<prefix><project>-<function>-`, up to its digest.
+
+    A label too long to leave room for a digest of `digest_length` characters is cut short and
+    ends in a hash of the full label. Every artifact dbt uploads for a function starts with this
+    stem, whatever its content, so it is also how to find them.
+    """
+    label = f"{prefix}{project}-{function}"
+    max_label = MAX_ARTIFACT_NAME_LENGTH - digest_length - 1  # 1 for '-'
+    if len(label) > max_label:
+        label = truncate_with_hash(label, max_label, label)
+    return f"{label}-"
+
+
 def artifact_display_name(prefix: str, project: str, function: str, digest: str) -> str:
     """Name an artifact like a statement (`<prefix><project>-<function>`), plus the content digest.
 
-    A label too long to leave room for the digest is cut short and ends in a hash of the full
-    label. The digest is never cut, since it is what makes the name mean "this content".
+    The digest is never cut, since it is what makes the name mean "this content"; see
+    `artifact_name_stem` for how a long label is shortened to make room for it.
     """
-    label = f"{prefix}{project}-{function}"
-    max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for '-'
-    if len(label) > max_label:
-        label = truncate_with_hash(label, max_label, label)
-    return f"{label}-{digest}"
+    return f"{artifact_name_stem(prefix, project, function, len(digest))}{digest}"
 
 
 def find_artifact(conn: Connection, display_name: str, language: str) -> FlinkArtifact | None:

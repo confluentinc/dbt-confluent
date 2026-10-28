@@ -264,6 +264,15 @@ class TestFileDigestAndName:
         assert name == f"proj-{function}-{digest}"
         assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
 
+    @pytest.mark.parametrize("length", [1, 12, 50, 200])
+    def test_the_stem_starts_every_name_however_long_the_names(self, length):
+        """Cleanup finds a function's artifacts by the stem, so it must match what upload names."""
+        names = ("p" * length, "j" * length, "f" * length)
+        stem = fa.artifact_name_stem(*names)
+        assert stem.endswith("-")
+        for digest in ("0" * 16, "f" * 16):
+            assert fa.artifact_display_name(*names, digest).startswith(stem)
+
     def test_a_long_name_is_deterministic(self):
         args = ("dbt-", "j" * 100, "f" * 100, "0123456789abcdef")
         assert fa.artifact_display_name(*args) == fa.artifact_display_name(*args)
@@ -518,24 +527,6 @@ class TestAdapterValidateFunctionConfig:
     def test_an_artifact_id_has_no_artifact_config(self, tmp_path):
         udf = self.validate(tmp_path, artifact_id="cfa-abc123")
         assert udf.artifact_config is None
-
-
-class TestRequireArtifactCredentials:
-    """The artifact API needs a Global key or OAuth; fail up front without either."""
-
-    def check(self, adapter, auth: str = "api_key", global_api_key: str | None = None):
-        adapter.config = SimpleNamespace(  # type: ignore[assignment]
-            credentials=SimpleNamespace(auth=auth, global_api_key=global_api_key)
-        )
-        adapter.require_artifact_credentials()
-
-    def test_an_api_key_profile_needs_a_global_key(self, adapter):
-        with pytest.raises(CompilationError, match="global_api_key"):
-            self.check(adapter, global_api_key=None)
-        self.check(adapter, global_api_key="global-key")
-
-    def test_an_oauth_profile_needs_no_key(self, adapter):
-        self.check(adapter, auth="oauth", global_api_key=None)
 
 
 class TestAdapterPlanFunctionChange:

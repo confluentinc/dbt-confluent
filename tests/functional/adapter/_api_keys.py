@@ -1,0 +1,122 @@
+"""Create, delete and sweep the scoped API keys the credential tests mint at runtime.
+
+Uses Confluent's IAM API, authenticated with the suite's Global API key. Keys are owned by
+whoever owns that Global key, and carry a reserved display name (`dbt-adapter-test-<resource>-
+<hex epoch>`) so the sweep can tell them from anyone else's keys.
+
+Underscore-prefixed so pytest does not treat it as a test module.
+"""
+
+import logging
+import re
+import time
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal, get_args
+
+import httpx
+
+from tests.functional.adapter._helpers import SWEEP_MIN_AGE_SECONDS
+
+logger = logging.getLogger(__name__)
+
+BASE_URL = "https://api.confluent.cloud"
+KEY_NAME_PREFIX = "dbt-adapter-test-"
+
+Resource = Literal["cloud", "tableflow"]
+RESOURCES = get_args(Resource)
+
+# The only keys the sweep may delete: exactly the shape `create_api_key` names its keys.
+_KEY_NAME_RE = re.compile(rf"^{KEY_NAME_PREFIX}(?:cloud|tableflow)-(?P<tag>[0-9a-f]{{8}})$")
+
+
+@dataclass(frozen=True)
+class ApiKey:
+    id: str
+    secret: str
+
+
+def iam_client(global_key: str, global_secret: str) -> httpx.Client:
+    return httpx.Client(base_url=BASE_URL, auth=(global_key, global_secret), timeout=30)
+
+
+def paged(
+    client: httpx.Client, url: str, params: dict[str, str | int] | None = None
+) -> Iterator[dict]:
+    """Every item of a Confluent list endpoint, across all of its pages."""
+    next_url: str | None = url
+    while next_url:
+        response = client.get(next_url, params=params)
+        response.raise_for_status()
+        page = response.json()
+        yield from page["data"]
+        # `next` is an absolute URL that already carries the query string.
+        next_url, params = page["metadata"].get("next"), None
+
+
+def owner_id(client: httpx.Client, key_id: str) -> str:
+    """The user (or service account) that owns `key_id`: the owner of every key we create."""
+    response = client.get(f"/iam/v2/api-keys/{key_id}")
+    response.raise_for_status()
+    return response.json()["spec"]["owner"]["id"]
+
+
+def create_api_key(client: httpx.Client, owner: str, resource: Resource, tag: str) -> ApiKey:
+    """A new key for `resource` owned by `owner` (see `owner_id`), named for the sweep."""
+    response = client.post(
+        "/iam/v2/api-keys",
+        json={
+            "spec": {
+                "display_name": f"{KEY_NAME_PREFIX}{resource}-{tag}",
+                "description": "Temporary key made by dbt-confluent's functional tests",
+                "owner": {"id": owner},
+                "resource": {"id": resource},
+            }
+        },
+    )
+    response.raise_for_status()
+    body = response.json()
+    return ApiKey(id=body["id"], secret=body["spec"]["secret"])
+
+
+def delete_api_key(client: httpx.Client, key_id: str) -> None:
+    """Delete a key; one that is already gone is fine."""
+    response = client.delete(f"/iam/v2/api-keys/{key_id}")
+    if response.status_code != httpx.codes.NOT_FOUND:
+        response.raise_for_status()
+
+
+def sweep_stale_api_keys(
+    client: httpx.Client, owner: str, min_age: float = SWEEP_MIN_AGE_SECONDS
+) -> None:
+    """Delete test keys leaked by earlier sessions (a crashed run never reaches teardown).
+
+    Only touches keys that are the suite's own: owned by `owner` (see `owner_id`), for the cloud
+    or tableflow resource, and named exactly as `create_api_key` names them. Keys younger than
+    `min_age` may belong to a session still running, so they are left alone. A key that can't be
+    deleted is logged and skipped.
+    """
+    now = time.time()
+    for key in paged(client, "/iam/v2/api-keys", {"spec.owner": owner, "page_size": 100}):
+        if key["spec"]["resource"]["id"] not in RESOURCES:
+            continue
+        if not _KEY_NAME_RE.match(key["spec"].get("display_name") or ""):
+            continue
+        created_at = datetime.fromisoformat(key["metadata"]["created_at"]).timestamp()
+        if now - created_at >= min_age:
+            try:
+                delete_api_key(client, key["id"])
+            except httpx.HTTPError:
+                # Best effort, like the suite's other sweeps: one stale key we can't
+                # delete must not fail every test in the class.
+                logger.warning("Could not delete stale test API key %s", key["id"])
+
+
+def resolve_kafka_cluster_id(client: httpx.Client, environment_id: str, name: str) -> str:
+    """The `lkc-...` id of the one Kafka cluster named `name` in the environment."""
+    clusters = paged(client, "/cmk/v2/clusters", {"environment": environment_id, "page_size": 100})
+    ids = [c["id"] for c in clusters if c["spec"]["display_name"] == name]
+    if len(ids) != 1:
+        raise LookupError(f"expected one Kafka cluster named {name!r}, found {ids}")
+    return ids[0]
