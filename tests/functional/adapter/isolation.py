@@ -123,6 +123,14 @@ def _drop_view(project, name: str) -> None:
         pass  # give up; a later session's sweep reclaims it
 
 
+def _drop_function(project, name: str) -> None:
+    """Functions need DROP FUNCTION, which neither _drop_table nor _drop_view issues."""
+    try:
+        project.run_sql(f"drop function if exists `{name}`")
+    except Exception:
+        pass  # give up; a later session's sweep reclaims it
+
+
 class TestIsolation:
     """Per-class namespacing so concurrent test classes never share a relation or statement.
 
@@ -219,8 +227,9 @@ def sweep_test_resources(
 
     With `include_stale=False` only the class's own resources are swept.
 
-    Relations are tables, materialized tables and views. Materialized tables go first
-    (waiting out their transient establishing state), then views, then the other tables.
+    Relations are tables, materialized tables, views and user-defined functions. Materialized
+    tables go first (waiting out their transient establishing state), then views, then the other
+    tables, then functions.
     Statements are deleted afterwards, then function artifacts.
     """
     now = time.time()
@@ -251,10 +260,17 @@ def sweep_test_resources(
         for row in project.run_sql("show tables", fetch="all")
         if relation_selected(row[0]) and row[0] not in views
     ]
+    functions = [
+        row[0]
+        for row in project.run_sql("show user functions", fetch="all")
+        if relation_selected(row[0])
+    ]
     for view in views:
         _drop_view(project, view)
     for table in tables:
         drop_any_relation(project, table)
+    for function in functions:
+        _drop_function(project, function)
 
     def statement_selected(name: str) -> bool:
         return name.startswith(class_statement_prefix) or is_stale(STALE_STATEMENT_RE, name)
