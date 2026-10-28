@@ -236,7 +236,11 @@ def sweep_test_resources(
             and now - int(match.group("session"), 16) >= min_age
         )
 
+    # A schema-drift check's temp table is the namespaced model name behind this prefix.
+    schema_check_prefix = project.adapter.generate_schema_check_temp_name("")
+
     def relation_selected(name: str) -> bool:
+        name = name.removeprefix(schema_check_prefix)
         return name.startswith(class_relation_prefix) or is_stale(STALE_RELATION_RE, name)
 
     views = [
