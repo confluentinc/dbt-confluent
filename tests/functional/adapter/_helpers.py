@@ -197,56 +197,40 @@ def assert_tables_absent(project, *names):
 
 
 def drop_materialized_table_if_exists(project, name, attempts=16, interval=10):
-    """Best-effort drop of a materialized table; returns True if it's gone.
+    """Drop a materialized table, raising if it can't be dropped.
 
     MTs need the dedicated `DROP MATERIALIZED TABLE IF EXISTS` — a regular
     DROP TABLE phantom-drops them (see ConfluentAdapter.drop_relation). Waits
     out the transient rejection ("being modified" / "Could not execute
-    DropTable") while a prior CREATE OR ALTER is still establishing.
-
-    Callers gate statement deletion on the return value: if the drop kept
-    failing, leave the statements too and let the next run's teardown (or a
-    manual sweep) clean up the lot.
+    DropTable") while a prior CREATE OR ALTER is still establishing, and
+    raises the last error once the attempts run out.
     """
     for i in range(attempts):
         try:
             project.run_sql(f"drop materialized table if exists `{name}`")
-            return True
+            return
         except Exception as e:
             msg = str(e).lower()
             if i < attempts - 1 and ("being modified" in msg or "could not execute" in msg):
                 time.sleep(interval)
                 continue
-            return False  # give up; caller leaves statements for a later sweep
-
-
-def is_materialized(project, name):
-    """True if `name` is currently a materialized table in the test schema."""
-    rows = project.run_sql(
-        "select IS_MATERIALIZED from INFORMATION_SCHEMA.`TABLES` "
-        f"where TABLE_SCHEMA = '{project.test_schema}' and TABLE_NAME = '{name}'",
-        fetch="all",
-    )
-    return bool(rows) and str(rows[0][0]).upper() == "YES"
+            raise
 
 
 def drop_any_relation(project, name):
-    """Drop `name` whatever it currently is; returns True if it's gone.
+    """Drop `name` whatever it currently is, raising if it can't be dropped.
 
     Used by teardown in test classes where the name's kind depends on how far
     the test got — e.g. the MT switch-guard test ends with either a regular
     table (guard-error path) or a materialized table (--full-refresh path).
-    The IS_MATERIALIZED pre-check routes MTs to DROP MATERIALIZED TABLE — a
-    regular DROP TABLE would phantom-drop them without raising (see
-    ConfluentAdapter.drop_relation); DROP TABLE IF EXISTS handles the
-    absent/regular/inferred cases (and deletes the table's topic).
+    DROP MATERIALIZED TABLE IF EXISTS goes first and is a no-op on an absent or
+    regular table; if it raises, so does this, so the DROP TABLE that follows
+    can never phantom-drop an MT (see ConfluentAdapter.drop_relation). DROP
+    TABLE IF EXISTS then handles the absent/regular/inferred cases (and
+    deletes the table's topic).
     """
-    try:
-        drop_materialized_table_if_exists(project, name)
-        project.run_sql(f"drop table if exists `{name}`")
-        return True
-    except Exception:
-        return False  # give up; a later session's sweep reclaims the leftovers
+    drop_materialized_table_if_exists(project, name)
+    project.run_sql(f"drop table if exists `{name}`")
 
 
 class SubmittedStatement(TypedDict):
