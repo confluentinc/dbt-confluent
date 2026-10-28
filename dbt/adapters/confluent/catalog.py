@@ -50,9 +50,9 @@ def query_catalog_rows(
     Nothing is queried until the result is iterated, and errors surface then.
 
     Queries a few relations at a time (`ThrottledChunkReader`). A chunk that fails (typically a
-    backend timeout, sadly reported as a 500, another HTTP 5xx, or a 429) is retried after a backoff with half the chunk
-    size, and the remaining chunks keep that size rather than climbing back up. Once
-    `CATALOG_MAX_CONSECUTIVE_ERRORS` queries have failed in a row, the
+    backend timeout, sadly reported as a 500, another HTTP 5xx, or a 429) is retried after a
+    backoff with half the chunk size, and the remaining chunks keep that size rather than
+    climbing back up. Once `CATALOG_MAX_CONSECUTIVE_ERRORS` queries have failed in a row, the
     error is raised. `execute_macro` is the adapter's, used to run `get_catalog_relations`;
     `sleep` waits out the backoff.
     """
