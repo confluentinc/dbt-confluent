@@ -217,6 +217,7 @@ where price > 0
 ```
 
 `streaming_table` creates a table, then runs a separate, continuous `INSERT INTO ... SELECT` statement to populate it.
+The table's columns come from the model's yml `columns`. The INSERT names those columns and selects them from the model's SQL by name, so each value lands in the column of the same name, whatever order the SELECT returns its columns in. Before creating the table, and before re-submitting a missing or stopped INSERT, dbt checks that the SELECT returns the yml `columns` by name and data type (dbt's contract check), whether or not the model enforces a contract.
 This two-statement approach was the preferred way to build streaming pipelines before the introduction of [`materialized_table`](#materialized-table).
 
 See Confluent's [dynamic tables and continuous queries](https://docs.confluent.io/cloud/current/flink/concepts/dynamic-tables.html)
@@ -254,7 +255,8 @@ treated as healthy: the adapter does not interrupt it.
 
 ```sql
 CREATE TABLE <relation> [DISTRIBUTED BY (...)] [WITH (...)]     -- DDL, bounded, name suffixed "-ddl"
-INSERT INTO <relation> <model SELECT>                           -- DML, long-running
+INSERT INTO <relation> (<yml columns>)                          -- DML, long-running
+  SELECT <yml columns> FROM (<model SELECT>) AS model_subq
 ```
 
 The DDL completes immediately; the INSERT is a genuinely long-running, continuous statement.
@@ -294,7 +296,7 @@ Adoption is purely name-based: the adapter does not track which tool created a r
 
 - **Schema should match.** Under the default `on_schema_drift='fail'`, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT before adopting; any mismatch fails the run. With `config(on_schema_drift='ignore')`, enforcement depends on the adoption path:
     - **Healthy statement → skip:** the running statement is left untouched and nothing is re-submitted, so **no drift is enforced at all, including columns.** A mismatch is silently tolerated; you must align the model to the existing schema yourself.
-    - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs (a column mismatch would also be rejected by Flink); benign options/distribution drift is relaxed.
+    - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs, and so does dbt's contract check of the SELECT against the yml `columns` (the INSERT names only the yml columns, so Flink would fill any other table column with NULL); benign options/distribution drift is relaxed.
 - **Names are sanitized.** The `statement_name` you configure is normalized to Flink's constraints (see [Flink Naming Constraints](#flink-naming-constraints)) before lookup, so it must match the existing statement's actual name. Statements already named within those constraints (lowercase alphanumeric + hyphens) match verbatim.
 
 ---
@@ -925,7 +927,7 @@ select * from {{ ref('source') }}
 ```
 
 #### Column Drift
-- **table, streaming_table**: Compares the existing table's column names and data types with the SELECT query's, both resolved by dry-runs (or, with the temp-table fallback, from `INFORMATION_SCHEMA`). Raises an error if columns are added, removed, renamed, or if data types change. Column reordering is allowed (order doesn't matter for Kafka-backed tables).
+- **table, streaming_table**: Compares the existing table's column names and data types with the SELECT query's, both resolved by dry-runs (or, with the temp-table fallback, from `INFORMATION_SCHEMA`). Raises an error if columns are added, removed, renamed, or if data types change. Column reordering is allowed: a `streaming_table`'s INSERT writes its columns by name (see [Streaming Table](#streaming-table)), and a `table` keeps its existing column order until it's rebuilt.
 - **streaming_source**: Compares existing column names and data types with the column definitions in the model SQL. Raises an error if columns are added, removed, renamed, or if data types change. Uses a temporary table to infer schema from SQL column definitions.
 
 #### Distribution Drift
