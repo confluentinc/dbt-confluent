@@ -547,14 +547,13 @@ class TestStreamingRestartUnderIgnore(ClassScopedCleanup):
     """on_schema_drift='ignore' suppresses *benign* drift, not load-bearing
     column drift on the restart path.
 
-    The skip path (healthy statement) short-circuits before any drift check, so
-    'ignore' is total there — that's covered by TestIgnoreSchemaDrift on the
-    cheap CTAS table. But streaming_table is recoverable: when its INSERT is
-    missing or terminal, the materialization re-submits the INSERT against the
-    *existing* table. If the model's columns have actually drifted, that INSERT
-    would fail at Flink with a cryptic "Different number of columns" error. So
-    the restart path runs a columns-only drift check even under 'ignore' and
-    surfaces a clear dbt drift error instead.
+    The skip path (healthy statement) short-circuits before any drift check, so 'ignore' is total
+    there — that's covered by TestIgnoreSchemaDrift on the cheap CTAS table. But streaming_table is
+    recoverable: when its INSERT is missing or terminal, the materialization re-submits the INSERT
+    against the *existing* table. If the model's columns have actually drifted, that INSERT, which
+    names the yml columns, would either fail at Flink with a cryptic "Unknown target column" error
+    or write NULL into a table column the model no longer selects, without an error. So the restart
+    path runs a columns-only drift check even under 'ignore' and surfaces a clear dbt drift error.
     """
 
     TABLES = ["source_for_drift", "my_streaming_table"]
@@ -580,8 +579,8 @@ class TestStreamingRestartUnderIgnore(ClassScopedCleanup):
         yield
 
     def test_restart_under_ignore_raises_on_column_drift(self, project, dbt_profile_data):
-        """Regression: missing INSERT + drifted columns under 'ignore' must
-        surface a drift error, not a cryptic Flink failure on resubmit."""
+        """Regression: missing INSERT + drifted columns under 'ignore' must surface a drift error
+        before the INSERT is re-submitted."""
         # Force the missing-statement state deterministically so decide_action
         # takes the restart branch on the next run.
         label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]

@@ -200,11 +200,11 @@ WITH (
 
 
 {% macro _prepare_restart(existing_relation, has_select_query) %}
-  {# Side effects for the 'restart' action: re-verify the schema, then delete
-     the dead statement so the caller can re-submit it. Re-submitting INSERT
-     against the existing table is only safe if the columns still match (a
-     mismatch makes Flink reject the INSERT), so we enforce a columns check
-     even under on_schema_drift='ignore'. #}
+  {# Side effects for the 'restart' action: re-verify the schema, then delete the dead statement
+     so the caller can re-submit it. Re-submitting INSERT against the existing table is only safe
+     if the columns still match: the INSERT names the yml columns, so Flink rejects a column the
+     table lacks, and fills a table column the model no longer selects with NULL, without an
+     error. So we enforce a columns check even under on_schema_drift='ignore'. #}
   {{ _enforce_schema_drift(existing_relation, has_select_query, restart=true) }}
   {{ log("Statement for " ~ existing_relation ~ " is missing or in a terminal phase. Re-submitting (no full refresh required).", info=True) }}
   {# expect_exists=false: _classify_action already inspected this statement (and
@@ -225,9 +225,10 @@ WITH (
 {% macro _enforce_schema_drift(existing_relation, has_select_query, restart) %}
   {# Run the drift check appropriate to the on_schema_drift config:
        'fail'   — full check (columns + options + distribution); raises on any drift.
-       'ignore' — no check, except the restart path still needs a columns-only
-                  check (benign options/distribution drift is fine, but a column
-                  mismatch would make the re-submitted INSERT fail at Flink).
+       'ignore' — no check, except the restart path still needs a columns-only check (benign
+                  options/distribution drift is fine, but a column mismatch would make the
+                  re-submitted INSERT fail at Flink, or write NULL into a table column the model
+                  no longer selects).
      Validated here, the single place on_schema_drift is consumed. #}
   {% set on_schema_drift = config.get('on_schema_drift', 'fail') %}
   {% if on_schema_drift == 'fail' %}
