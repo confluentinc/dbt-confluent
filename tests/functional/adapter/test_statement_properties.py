@@ -12,8 +12,11 @@ import pytest
 from confluent_sql.exceptions import StatementNotFoundError
 
 from dbt.tests.util import relation_from_name, run_dbt
-from tests.functional.adapter._helpers import get_result_by_name
-from tests.functional.adapter.fixtures import ClassScopedCleanup
+from tests.functional.adapter._helpers import (
+    get_result_by_name,
+)
+from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 MY_STREAMING_SOURCE = """
 {{ config(
@@ -91,9 +94,8 @@ models:
 """
 
 
-class TestStatementProperties(ClassScopedCleanup):
+class TestStatementProperties(ConfluentFixtures):
     NAME = "stmtprops"
-    TABLES = ["my_tuned_streaming_table", "my_plain_streaming_table", "my_streaming_source"]
 
     @pytest.fixture(scope="class")
     def run_dbt_results(self, project):
@@ -127,7 +129,7 @@ class TestStatementProperties(ClassScopedCleanup):
             f"got properties: {stmt.properties}"
         )
 
-        relation = relation_from_name(project.adapter, "my_tuned_streaming_table")
+        relation = relation_from_name(project.adapter, physical_name("my_tuned_streaming_table"))
         result = project.run_sql(f"select * from {relation}", fetch="one")
         assert len(result[0]) == 2
 
@@ -147,7 +149,7 @@ class TestStatementProperties(ClassScopedCleanup):
         )
 
 
-class TestReservedStatementPropertyRejected(ClassScopedCleanup):
+class TestReservedStatementPropertyRejected(ConfluentFixtures):
     """A user-supplied reserved key (driver-owned) fails loudly rather than
     being silently ignored or overridden -- confirms dbt-confluent needs no
     adapter-side validation of its own for this; confluent_sql's own
@@ -159,7 +161,6 @@ class TestReservedStatementPropertyRejected(ClassScopedCleanup):
     # my_bad_properties_table's DDL (CREATE TABLE) succeeds -- only the INSERT
     # is rejected for the reserved property -- so it leaves a real table behind
     # and must be dropped too.
-    TABLES = ["my_streaming_source", "my_bad_properties_table"]
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
