@@ -38,6 +38,14 @@
   -- See comment above about calling hooks
   {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
+  {# dbt's contract check: the SELECT must return the yml `columns` by name,
+     count and type. It runs on 'restart' too, not just before the DDL: the
+     INSERT below names only the yml columns, and the drift check compares
+     the SELECT with the existing table, not with the yml. Without it, a
+     column dropped from the yml but still in the SELECT and the table would
+     be left out of the INSERT, and Flink would fill it with NULL. #}
+  {% do get_assert_columns_equivalent(sql) %}
+
   {% if action != 'restart' %}
     -- Create the table (transient DDL — gets '-ddl' suffix). On 'restart'
     -- the table is intact and the schema matches, so we skip the DDL and
@@ -45,7 +53,6 @@
     {% call statement('ddl', execution_mode="streaming_ddl",
                       statement_name=get_statement_name('-ddl')) -%}
       create table {{ target_relation }}
-      {{ get_assert_columns_equivalent(sql) }}
       {{ get_table_columns_and_constraints() }}
       {{ get_distributed_by_clause() }}
       {{ render_with_options(with_options) }}
@@ -55,10 +62,15 @@
   -- Long-running INSERT — registered as 'main' so its compiled SQL is the
   -- artifact written to disk for `dbt show` / debugging, and so the restart
   -- path satisfies dbt's "main result" contract without renaming.
+  -- It names the yml columns and selects them from the model's SQL by name
+  -- (dbt's get_select_subquery), so each value lands in the table column of
+  -- the same name whatever order the SELECT returns its columns in, or, on
+  -- 'restart', the existing table holds them in.
   {%- call statement('main', execution_mode="streaming_query",
                      statement_name=get_statement_name(),
                      statement_properties=config.get('statement_properties')) -%}
-    INSERT INTO {{ target_relation }} {{ sql }}
+    INSERT INTO {{ target_relation }} ({{ adapter.dispatch('get_column_names', 'dbt')() }})
+    {{ get_select_subquery(sql) }}
   {%- endcall -%}
 
   {# The table exists by this point either way -- freshly created just now
