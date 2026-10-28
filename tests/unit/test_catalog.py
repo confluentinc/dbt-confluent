@@ -13,7 +13,10 @@ from confluent_sql import OperationalError
 from dbt_common.exceptions import CompilationError, DbtDatabaseError, DbtRuntimeError
 
 from dbt.adapters.confluent.catalog import (
+    CATALOG_MAX_CONSECUTIVE_ERRORS,
     CATALOG_RELATIONS_CHUNK_SIZE,
+    CATALOG_RETRY_BASE_DELAY_SECS,
+    CATALOG_RETRY_MAX_DELAY_SECS,
     Backoff,
     ThrottledChunkReader,
     is_retryable_backend_error,
@@ -347,6 +350,24 @@ class TestQueryCatalogRows:
         # No pointless wait before giving up: a backoff for every failure but the last.
         assert sleep.call_count == len(macro.calls) - 1
 
+    def test_production_schedule_over_the_whole_failure_window(
+        self, get_catalog, sleep, no_jitter
+    ):
+        """`query_catalog_rows` is built from the production constants, not the test schedule's.
+        Every attempt fails here, so this walks the full window: the chunk halves down to one
+        relation, the delay doubles up to (at most) its cap, and there is no wait after the
+        last failure."""
+        macro = _FakeCatalogMacro([BACKEND_ERROR] * CATALOG_MAX_CONSECUTIVE_ERRORS)
+
+        with pytest.raises(DbtRuntimeError):
+            get_catalog(macro, _relations(CATALOG_RELATIONS_CHUNK_SIZE))
+
+        assert [len(call) for call in macro.calls] == [LARGE, HALF, 2, ONE, ONE, ONE]
+        assert [call.args[0] for call in sleep.call_args_list] == [
+            min(CATALOG_RETRY_BASE_DELAY_SECS * 2**n, CATALOG_RETRY_MAX_DELAY_SECS)
+            for n in range(CATALOG_MAX_CONSECUTIVE_ERRORS - 1)
+        ]
+
     @pytest.mark.parametrize("wrap", [_database_error, _macro_error], ids=["bare", "nested"])
     @pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
     def test_retryable_errors_are_retried(self, get_catalog, status, wrap):
@@ -417,3 +438,29 @@ class TestAdapterDelegation:
         )
         assemble.assert_called_once_with(rows, used_schemas)
         assert result is assemble.return_value
+
+    def test_get_catalog_scopes_the_whole_schema_fallback_to_the_given_relation_configs(
+        self, mocker
+    ):
+        """`dbt docs generate --no-compile` passes no selection, so dbt calls `get_catalog`, whose
+        default would read the whole schema. It must query just the given nodes instead."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.config = mocker.sentinel.config
+        nodes = [mocker.Mock(identifier="model_a"), mocker.Mock(identifier="source_b")]
+        created = mocker.patch.object(
+            ConfluentAdapter.Relation,
+            "create_from",
+            side_effect=lambda config, node: relation(node.identifier),
+        )
+        by_relations = mocker.patch.object(adapter, "get_catalog_by_relations")
+        used_schemas = frozenset({("env-1", "cluster-a")})
+
+        result = adapter.get_catalog(iter(nodes), used_schemas)
+
+        assert [call.args for call in created.call_args_list] == [
+            (mocker.sentinel.config, node) for node in nodes
+        ]
+        by_relations.assert_called_once_with(
+            used_schemas, {relation("model_a"), relation("source_b")}
+        )
+        assert result is by_relations.return_value
