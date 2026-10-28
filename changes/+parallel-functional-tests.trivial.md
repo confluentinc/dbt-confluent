@@ -1,0 +1,1 @@
+Make the functional tests safe to run in parallel with `pytest -n auto -m "not serial"`: each test class namespaces its relations and statements, sweeps them when it finishes, and `--keep-failed-resources` keeps a failed class's resources for debugging.
