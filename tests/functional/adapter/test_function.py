@@ -26,6 +26,7 @@ from dbt.adapters.confluent.connections import ConfluentConnectionManager
 from dbt.tests.util import run_dbt, run_dbt_and_capture, write_file
 from tests.functional.adapter._helpers import get_result_by_name
 from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 FLAG = "enable_experimental_function_materialization"
 FUNCTION_NAME = "udf"
@@ -117,7 +118,7 @@ class FunctionFixtures(ConfluentFixtures):
         yield
         for name in getattr(self, "FUNCTIONS", [FUNCTION_NAME]):
             try:
-                project.run_sql(f"drop function if exists `{name}`")
+                project.run_sql(f"drop function if exists `{physical_name(name)}`")
             except Exception:
                 pass  # best effort; nothing else to clean up for a function
 
@@ -300,7 +301,7 @@ class TestFunctionLifecycle(FunctionFixtures):
 
     @staticmethod
     def live_artifact_id(project) -> str:
-        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        rows = project.run_sql(f"describe function `{physical_name(FUNCTION_NAME)}`", fetch="all")
         return {str(name): str(value) for name, value in rows}["plugin id"]
 
     def test_1_create(self, project, plan_actions, udf_artifact_ids):
@@ -391,7 +392,7 @@ class TestFunctionRetryAfterFailedStatement(FunctionFixtures):
         self.configure(project, udf_artifact_ids[0], EXAMPLE_UDF_CLASS)
         run_dbt(["build"])
         assert plan_actions == ["create"]
-        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        rows = project.run_sql(f"describe function `{physical_name(FUNCTION_NAME)}`", fetch="all")
         assert {str(name): str(value) for name, value in rows}["plugin id"] == udf_artifact_ids[0]
 
 
@@ -474,12 +475,12 @@ class TestFunctionArtifactUpload(FunctionFixtures):
 
     def our_artifacts(self, project) -> list:
         prefix = project.adapter.config.credentials.statement_name_prefix
-        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
+        stem = prefix  # the class-and-session-unique prefix survives name truncation
         handle = project.adapter.connections.get_thread_handle()
         return [a for a in handle.get_artifacts_api().list() if a.display_name.startswith(stem)]
 
     def live_artifact_id(self, project) -> str:
-        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        rows = project.run_sql(f"describe function `{physical_name(FUNCTION_NAME)}`", fetch="all")
         return {str(name): str(value) for name, value in rows}["plugin id"]
 
     def artifacts(self, project) -> dict[str, str]:
@@ -608,7 +609,7 @@ class TestFunctionEmptyRun(FunctionFixtures):
         write_package(project, "empty-run")
         yield
         prefix = project.adapter.config.credentials.statement_name_prefix
-        stem = f"{prefix}{project.adapter.config.project_name}-{FUNCTION_NAME}-"
+        stem = prefix  # the class-and-session-unique prefix survives name truncation
         with project.adapter.connection_named("delete_artifacts"):
             handle = project.adapter.connections.get_thread_handle()
             for artifact in handle.get_artifacts_api().list():
@@ -617,5 +618,5 @@ class TestFunctionEmptyRun(FunctionFixtures):
 
     def test_empty_run_uploads_and_creates_the_function(self, project):
         run_dbt(["build", "--empty"])
-        rows = project.run_sql(f"describe function `{FUNCTION_NAME}`", fetch="all")
+        rows = project.run_sql(f"describe function `{physical_name(FUNCTION_NAME)}`", fetch="all")
         assert {str(name): str(value) for name, value in rows}["plugin id"].startswith("cfa-")

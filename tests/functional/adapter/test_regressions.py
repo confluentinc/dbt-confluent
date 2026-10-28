@@ -4,6 +4,7 @@ import pytest
 
 from dbt.tests.util import run_dbt
 from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 # Test for issue with window functions producing NOT NULL constraints
 # in FULL_DATA_TYPE which break CAST expressions in get_empty_schema_sql
@@ -89,12 +90,6 @@ class TestWindowFunctionConstraintsInDataType(ConfluentFixtures):
             "window_table.sql": STREAMING_TABLE_WITH_WINDOW_FUNCTIONS,
             "models.yml": WINDOW_TABLE_MODELS_YML,
         }
-
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        yield
-        project.run_sql("drop table if exists source_for_window_test")
-        project.run_sql("drop table if exists window_table")
 
     def test_constraint_in_data_type_error(self, project):
         """Should error with clear message when constraints are in data_type field."""
@@ -182,12 +177,6 @@ class TestModelLevelPrimaryKey(ConfluentFixtures):
             "models.yml": PK_MODELS_YML,
         }
 
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        yield
-        project.run_sql("drop table if exists pk_streaming_table")
-        project.run_sql("drop table if exists pk_source")
-
     def test_model_level_primary_key_renders_correctly(self, project):
         results = run_dbt(["run"])
         assert all(r.status == "success" for r in results), (
@@ -253,17 +242,13 @@ class TestDistributedByHash(ConfluentFixtures):
             "models.yml": DIST_MODELS_YML,
         }
 
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        yield
-        project.run_sql("drop table if exists dist_streaming_table")
-        project.run_sql("drop table if exists dist_source")
-
     def test_distributed_by_hash_clause_in_ddl(self, project):
         results = run_dbt(["run"])
         assert all(r.status == "success" for r in results), "dbt run failed"
 
-        ddl_rows = project.run_sql("SHOW CREATE TABLE dist_streaming_table", fetch="all")
+        ddl_rows = project.run_sql(
+            f"SHOW CREATE TABLE {physical_name('dist_streaming_table')}", fetch="all"
+        )
         ddl = ddl_rows[0][0]
         assert "DISTRIBUTED BY HASH(`order_id`) INTO 4 BUCKETS" in ddl, (
             f"DISTRIBUTED BY clause missing or malformed in created table DDL:\n{ddl}"

@@ -194,10 +194,9 @@ export CONFLUENT_FLINK_API_SECRET=xxx
 # The test is skipped when this is unset or equal to CONFLUENT_COMPUTE_POOL_ID.
 export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 
-# Optional: a Global API key, used only by the Tableflow and function (artifact upload)
-# functional tests (those control-plane routes require one regardless of the Flink-region
-# pair above -- see MATERIALIZATIONS.md#tableflow). The Tableflow tests and the function
-# tests that upload artifacts are skipped when either of these is unset.
+# A Global API key. The Tableflow and function (artifact upload) functional tests need one
+# (those control-plane routes require it regardless of the Flink-region pair above -- see
+# MATERIALIZATIONS.md#tableflow), and they are skipped if either of these is unset.
 export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
 ```
@@ -205,6 +204,48 @@ export CONFLUENT_GLOBAL_API_SECRET=xxx
 ```bash
 uv run pytest
 ```
+
+By default the functional tests run serially. They can run in parallel with
+[pytest-xdist](https://pytest-xdist.readthedocs.io/) by passing `-n`. Tests are distributed per
+module (`--dist=loadscope` is already configured), so classes in the same module share a worker.
+
+```bash
+uv run pytest tests/functional -n 4
+```
+
+Parallel runs have been validated at `-n 4`.
+
+All workers share one schema, so each test class gets its own namespace: its model relations are
+aliased with a `dbt_test_<session>_<class hash>_` prefix and its statement names start with
+`dbt-test-<session>-<class hash>-` (see `tests/functional/adapter/isolation.py`). When a test
+refers to a relation by its model name, it must go through `physical_name()` to get the prefixed
+name. At the end of each class its relations and statements are dropped, along with any
+`dbt_test_` / `dbt-test-` leftovers from earlier sessions that are more than two hours old.
+
+Two things opt out of this:
+
+- A test class can set `NAMESPACE_RELATIONS = False` to keep its literal model names (the unit test
+  materialization looks the tested model up by name, not alias, so `test_unit_materialization.py`
+  does this). Those names must be unique across the whole suite, and they are not swept if a run
+  is killed before teardown.
+
+- A test that can't run alongside others (for example, one that observes the whole shared
+  environment) can be marked `@pytest.mark.serial`. It fails immediately under `-n`, so run the
+  rest in parallel with:
+  
+  ```sh
+  uv run pytest -m "not serial" ./tests/functional
+  ```
+  
+  and the marked ones separately, without `-n`, with:
+  
+  ```sh
+  uv run pytest -m serial ./tests/functional
+  ```
+  
+  This is intended primarily for development purposes, and was used during the
+  introduction of parallel test runs to enable porting modules individually more easily.
+  We should not be committing new tests that cannot be run in parallel.
 
 ## Versioning
 
