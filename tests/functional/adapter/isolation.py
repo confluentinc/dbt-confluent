@@ -6,6 +6,7 @@ to a relation by literal name go through `physical_name`.
 """
 
 import hashlib
+import logging
 import os
 import re
 import time
@@ -16,6 +17,8 @@ from confluent_sql import ArtifactNotFoundError
 from tests.functional.adapter._helpers import (
     drop_any_relation,
 )
+
+logger = logging.getLogger(__name__)
 
 # Option (registered in tests/conftest.py) that leaves a class's resources in place when any of
 # its tests failed, so the failure can be inspected on the cluster.
@@ -115,22 +118,6 @@ STALE_RELATION_RE = _prefix_pattern(RELATION_PREFIX_TEMPLATE)
 STALE_STATEMENT_RE = _prefix_pattern(STATEMENT_PREFIX_TEMPLATE)
 
 
-def _drop_view(project, name: str) -> None:
-    """Views need DROP VIEW, which drop_any_relation (tables / MTs) does not issue."""
-    try:
-        project.run_sql(f"drop view if exists `{name}`")
-    except Exception:
-        pass  # give up; a later session's sweep reclaims it
-
-
-def _drop_function(project, name: str) -> None:
-    """Functions need DROP FUNCTION, which neither _drop_table nor _drop_view issues."""
-    try:
-        project.run_sql(f"drop function if exists `{name}`")
-    except Exception:
-        pass  # give up; a later session's sweep reclaims it
-
-
 class TestIsolation:
     """Per-class namespacing so concurrent test classes never share a relation or statement.
 
@@ -204,10 +191,6 @@ def physical_name(name: str) -> str:
     return os.environ.get(ISOLATION_SLUG_ENV_VAR, "") + name
 
 
-def _statement_label(dbt_profile_data: dict) -> str | None:
-    return dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-
-
 def sweep_test_resources(
     project,
     class_id: str,
@@ -266,11 +249,11 @@ def sweep_test_resources(
         if relation_selected(row[0])
     ]
     for view in views:
-        _drop_view(project, view)
+        _try_drop_view(project, view)
     for table in tables:
-        drop_any_relation(project, table)
+        _try_drop_table(project, table)
     for function in functions:
-        _drop_function(project, function)
+        _try_drop_function(project, function)
 
     def statement_selected(name: str) -> bool:
         return name.startswith(class_statement_prefix) or is_stale(STALE_STATEMENT_RE, name)
@@ -300,3 +283,43 @@ def sweep_test_resources(
                     api.delete(artifact.id)
                 except ArtifactNotFoundError:
                     pass  # another sweeper got there first
+
+
+def _statement_label(dbt_profile_data: dict) -> str | None:
+    return dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
+
+
+def _try_drop_table(project, name: str) -> None:
+    """Tables and materialized tables; drop_any_relation raises if it can't drop one."""
+    try:
+        drop_any_relation(project, name)
+    except Exception:
+        logger.warning(
+            "Could not drop table %s; a later session's sweep reclaims it",
+            name,
+            exc_info=True,
+        )
+
+
+def _try_drop_view(project, name: str) -> None:
+    """Views need DROP VIEW, which _drop_table (tables / MTs) does not issue."""
+    try:
+        project.run_sql(f"drop view if exists `{name}`")
+    except Exception:
+        logger.warning(
+            "Could not drop view %s; a later session's sweep reclaims it",
+            name,
+            exc_info=True,
+        )
+
+
+def _try_drop_function(project, name: str) -> None:
+    """Functions need DROP FUNCTION, which neither _drop_table nor _drop_view issues."""
+    try:
+        project.run_sql(f"drop function if exists `{name}`")
+    except Exception:
+        logger.warning(
+            "Could not drop function %s; a later session's sweep reclaims it",
+            name,
+            exc_info=True,
+        )
