@@ -130,6 +130,56 @@ def test_failure_is_shared_and_not_retried():
     assert compute.calls == 1
 
 
+def test_uncached_failure_is_shared_with_waiters_then_the_next_call_retries():
+    original = RuntimeError("list failed")
+    cell = SingleFlightCell[str](GENERAL_TIMEOUT, cache_errors=False)
+    failing = CountingCompute(error=original).blocking()
+    outcomes: list[BaseException] = []
+    threads = [
+        threading.Thread(target=lambda: outcomes.append(_capture(lambda: cell.get(failing))))
+        for _ in range(CALLERS)
+    ]
+    threads[0].start()
+    assert failing.entered.wait(JOIN_TIMEOUT)
+    for thread in threads[1:]:
+        thread.start()
+    time.sleep(SETTLE_TIME)  # let the waiters block on the failing attempt
+    failing.release.set()
+    for thread in threads:
+        thread.join(JOIN_TIMEOUT)
+
+    assert failing.calls == 1, "waiters share the attempt they were waiting on"
+    assert outcomes == [original] * CALLERS
+
+    recovered = CountingCompute(result="recovered")
+    assert cell.get(recovered) == "recovered"
+    assert cell.get(CountingCompute(result="ignored")) == "recovered"
+    assert recovered.calls == 1
+
+
+def test_after_an_uncached_failure_a_new_flight_is_shared_like_any_other():
+    cell = SingleFlightCell[str](GENERAL_TIMEOUT, cache_errors=False)
+    with pytest.raises(RuntimeError):
+        cell.get(CountingCompute(error=RuntimeError("first")))
+    second = CountingCompute(result="second").blocking()
+    leader = threading.Thread(target=lambda: cell.get(second))
+    leader.start()
+    assert second.entered.wait(JOIN_TIMEOUT)
+
+    # A fresh flight is under way; a caller now waits on it rather than starting a third.
+    late = CountingCompute(result="late")
+    waiter_results: list[str] = []
+    waiter = threading.Thread(target=lambda: waiter_results.append(cell.get(late)))
+    waiter.start()
+    time.sleep(SETTLE_TIME)
+    second.release.set()
+    leader.join(JOIN_TIMEOUT)
+    waiter.join(JOIN_TIMEOUT)
+
+    assert waiter_results == ["second"]
+    assert late.calls == 0
+
+
 def test_waiters_are_released_when_the_leader_is_interrupted():
     cell = SingleFlightCell[str](GENERAL_TIMEOUT)
     compute = CountingCompute(error=KeyboardInterrupt()).blocking()

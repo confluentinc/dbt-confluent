@@ -51,7 +51,9 @@ class FunctionArtifactsRepo:
         upload_timeout: float = UPLOAD_WAIT_TIMEOUT_SECS,
     ) -> None:
         self._digests = SingleFlightDict[Path, ArtifactDigest](digest_timeout)
-        self._listing = SingleFlightCell[dict[str, FlinkArtifact]](listing_timeout)
+        self._listing = SingleFlightCell[dict[str, FlinkArtifact]](
+            listing_timeout, cache_errors=False
+        )
         self._uploads = SingleFlightDict[ArtifactDigest, FlinkArtifact](upload_timeout)
         # Artifacts this build uploaded, by name.
         # Written once per name, by that name's upload leader, so it needs no lock.
@@ -118,8 +120,9 @@ class FunctionArtifactsRepo:
     def _list_artifacts(self, conn: Connection) -> dict[str, FlinkArtifact]:
         """All artifacts, by name (the server keeps a name unique per environment)."""
         logger.debug("Listing artifacts")
-        # No retry here: the driver already retries this GET. A failure that outlasts that is
-        # cached by `self._listing` and so fails every function in the build.
+        # No retry here: the driver already retries this GET. A failure that outlasts that is shared
+        # with the threads already waiting on it, but not remembered: `self._listing` lets the next
+        # caller try again, since listing is read-only and the failure may be transient.
         return {a.display_name: a for a in conn.get_artifacts_api().list()}
 
 
