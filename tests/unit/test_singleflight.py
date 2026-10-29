@@ -66,6 +66,27 @@ def run_concurrently(call: Callable[[], Any], callers: int = CALLERS) -> list[An
         return [f.result(JOIN_TIMEOUT) for f in futures]
 
 
+class WaitObservingCell(SingleFlightCell[str]):
+    """A cell that reports each caller that has joined a flight as a waiter.
+
+    `_wait` is only reached once a caller has taken its reference to the current flight under the
+    cell's lock, so seeing a caller there proves it will get that flight's outcome, however late
+    the leader finishes. Sleeping and hoping instead would let a slow thread start a new attempt.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._joined = threading.Semaphore(0)
+
+    def _wait(self, flight: Any) -> str:
+        self._joined.release()
+        return super()._wait(flight)
+
+    def wait_for_waiters(self, count: int) -> None:
+        for _ in range(count):
+            assert self._joined.acquire(timeout=JOIN_TIMEOUT), "a waiter never joined the flight"
+
+
 def test_compute_runs_once_for_simultaneous_callers():
     cell = SingleFlightCell[str](GENERAL_TIMEOUT)
     compute = CountingCompute(result="the-value")
@@ -128,6 +149,56 @@ def test_failure_is_shared_and_not_retried():
     with pytest.raises(RuntimeError, match="upload failed"):
         cell.get(compute)
     assert compute.calls == 1
+
+
+def test_uncached_failure_is_shared_with_waiters_then_the_next_call_retries():
+    original = RuntimeError("list failed")
+    cell = WaitObservingCell(GENERAL_TIMEOUT, cache_errors=False)
+    failing = CountingCompute(error=original).blocking()
+    outcomes: list[BaseException] = []
+    threads = [
+        threading.Thread(target=lambda: outcomes.append(_capture(lambda: cell.get(failing))))
+        for _ in range(CALLERS)
+    ]
+    threads[0].start()
+    assert failing.entered.wait(JOIN_TIMEOUT)
+    for thread in threads[1:]:
+        thread.start()
+    cell.wait_for_waiters(CALLERS - 1)  # all are on the failing attempt before it fails
+    failing.release.set()
+    for thread in threads:
+        thread.join(JOIN_TIMEOUT)
+
+    assert failing.calls == 1, "waiters share the attempt they were waiting on"
+    assert outcomes == [original] * CALLERS
+
+    recovered = CountingCompute(result="recovered")
+    assert cell.get(recovered) == "recovered"
+    assert cell.get(CountingCompute(result="ignored")) == "recovered"
+    assert recovered.calls == 1
+
+
+def test_after_an_uncached_failure_a_new_flight_is_shared_like_any_other():
+    cell = WaitObservingCell(GENERAL_TIMEOUT, cache_errors=False)
+    with pytest.raises(RuntimeError):
+        cell.get(CountingCompute(error=RuntimeError("first")))
+    second = CountingCompute(result="second").blocking()
+    leader = threading.Thread(target=lambda: cell.get(second))
+    leader.start()
+    assert second.entered.wait(JOIN_TIMEOUT)
+
+    # A fresh flight is under way; a caller now waits on it rather than starting a third.
+    late = CountingCompute(result="late")
+    waiter_results: list[str] = []
+    waiter = threading.Thread(target=lambda: waiter_results.append(cell.get(late)))
+    waiter.start()
+    cell.wait_for_waiters(1)
+    second.release.set()
+    leader.join(JOIN_TIMEOUT)
+    waiter.join(JOIN_TIMEOUT)
+
+    assert waiter_results == ["second"]
+    assert late.calls == 0
 
 
 def test_waiters_are_released_when_the_leader_is_interrupted():

@@ -657,21 +657,26 @@ class TestFunctionArtifactsRepo:
         assert [a.id for a in found] == [existing.id] * THREADS
         assert len(driver.listed_languages) == 1
 
-    def test_a_failed_listing_fails_every_caller_after_one_attempt(self, driver, tmp_path):
-        listing_error = RuntimeError("list failed")
+    def test_a_failed_listing_is_not_remembered(self, driver, tmp_path):
+        udf = package(tmp_path, b"v1")
+        existing = driver.add(artifact_of(udf).name, managed())
+        real_list = driver.list
         calls = []
 
-        def failing_list(runtime_language=None):
+        def flaky_list(runtime_language=None):
             calls.append(runtime_language)
-            raise listing_error
+            if len(calls) == 1:
+                raise RuntimeError("list failed")
+            return real_list(runtime_language=runtime_language)
 
-        driver.list = failing_list  # type: ignore[method-assign]
+        driver.list = flaky_list  # type: ignore[method-assign]
         artifacts = FunctionArtifactsRepo()
 
-        outcomes = run_on_threads(lambda: artifacts.find(driver, "any-name"))
+        with pytest.raises(RuntimeError, match="list failed"):
+            artifacts.find(driver, artifact_of(udf).name)
 
-        assert len(calls) == 1
-        assert outcomes == [listing_error] * THREADS
+        assert artifacts.find(driver, artifact_of(udf).name).id == existing.id
+        assert len(calls) == 2
 
     def test_a_package_is_uploaded_once_however_many_threads_ask(self, driver, events, tmp_path):
         udf = package(tmp_path, b"v1")
