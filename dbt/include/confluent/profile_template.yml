@@ -50,7 +50,7 @@ prompts:
     type: "string"
     default: "dbt-"
   resource_name_prefix:
-    hint: "Optional prefix isolating topics and statements, e.g. 'alice-'"
+    hint: "Optional prefix isolating tables and statements, e.g. 'alice-'"
     type: "string"
     default: ""
   statement_label:

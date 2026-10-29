@@ -82,7 +82,7 @@ models:
 
 ### Sharing an environment
 
-Statement names are unique per Confluent Cloud environment, while topic names are unique per Kafka cluster. When several users build the same project into one environment, they share statement names even if each target uses its own cluster. Targets that also share a cluster write to the same topics. To keep your statements and topics apart from everyone else's, set the optional `resource_name_prefix` in your own `profiles.yml`:
+Statement names are unique per Confluent Cloud environment, while table names are unique per Kafka cluster, since each table is backed by a Kafka topic. When several users build the same project into one environment, they share statement names even if each target uses its own cluster. Targets that also share a cluster write to the same tables. To keep your statements and tables apart from everyone else's, set the optional `resource_name_prefix` in your own `profiles.yml`:
 
 ```yaml
 # profiles.yml
@@ -99,15 +99,15 @@ It is empty by default, so names only change when you set it:
 | | Without | With `resource_name_prefix: alice-` |
 |---|---|---|
 | Statement | `dbt-my-project-orders-2bce76` | `alice-dbt-my-project-orders-f94953` |
-| Topic | `orders` | `alice_orders` |
+| Table | `orders` | `alice_orders` |
 
-The prefix also applies to explicit `alias` and `statement_name` configs, sources are never prefixed. In topic names its hyphens become underscores, because dbt writes ephemeral model names into SQL unquoted. It may only contain lowercase letters, digits and hyphens, must start with a letter or digit, and can be at most 64 characters, otherwise the profile fails to load.
+The prefix also applies to explicit `alias` and `statement_name` configs, sources are never prefixed. In table names its hyphens become underscores, because dbt writes ephemeral model names into SQL unquoted. It may only contain lowercase letters, digits and hyphens, must start with a letter or digit, and can be at most 64 characters, otherwise the profile fails to load.
 
-`statement_name_prefix` (default `dbt-`) is a separate setting: it names statements but leaves topic names alone, so it does not isolate anything.
+`statement_name_prefix` (default `dbt-`) is a separate setting: it names statements but leaves table names alone, so it does not isolate anything.
 
 > [!WARNING]
 > - Changing either prefix on a target with running statements starts new ones under the new names and leaves the old ones running. Stop the old statements first.
-> - Topic names get the prefix through the adapter's `generate_alias_name` macro. If your project overrides `generate_alias_name`, prepend `target.resource_name_prefix | replace('-', '_')` to the alias yourself, or topics lose the prefix while statements keep it.
+> - Table names get the prefix through the adapter's `generate_alias_name` macro. If your project overrides `generate_alias_name`, prepend `target.resource_name_prefix | replace('-', '_')` to the alias yourself, or tables lose the prefix while statements keep it.
 
 ## Usage
 

@@ -79,7 +79,7 @@ class ConfluentCredentials(Credentials):
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
     statement_name_prefix: str = "dbt-"
     statement_label: str = "dbt-confluent"
-    # Isolates statements and topics in a shared environment.
+    # Isolates statements and tables in a shared environment.
     resource_name_prefix: str = ""
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}

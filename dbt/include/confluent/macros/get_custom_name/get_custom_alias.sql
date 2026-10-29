@@ -1,4 +1,4 @@
-{#-- Prepend resource_name_prefix to every relation name to isolate each topic.
+{#-- Prepend resource_name_prefix to every relation name to isolate each table.
      Its hyphens become underscores because dbt writes ephemeral
      CTE names (__dbt__cte__<alias>) into SQL unquoted, where '-' parses as minus.
      ConfluentAdapter.get_tested_model_relation (impl.py) rebuilds this name in Python
