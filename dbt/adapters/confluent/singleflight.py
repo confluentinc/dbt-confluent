@@ -30,6 +30,13 @@ class SingleFlightCell(Generic[V]):
     along with anything they close over (a connection, a config). Callers sharing a cell must
     therefore be interchangeable: any one of their `compute` functions has to give the answer all
     of them want. If two callers could want different results, they belong in different cells.
+
+    A failure is shared as one exception instance, re-raised on every caller's thread, so its
+    `__traceback__` collects the frames of all of them. `compute` must therefore not raise
+    anything dbt mutates per node: dbt's task runner calls `DbtRuntimeError.add_node` only on an
+    error with no node yet, so the first thread to handle the shared error stamps its node on it
+    and every other function's failure is then reported against that one. Raise a plain or driver
+    exception here and let each caller translate it into a dbt error of its own.
     """
 
     def __init__(self, compute_timeout: float) -> None:
