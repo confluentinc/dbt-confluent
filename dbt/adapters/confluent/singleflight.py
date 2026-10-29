@@ -16,65 +16,88 @@ K = TypeVar("K", bound=Hashable)
 V = TypeVar("V")
 
 
+class _Flight(Generic[V]):
+    """One attempt at computing a cell's value: who started it, when, and how it ended."""
+
+    def __init__(self) -> None:
+        self.started_at = time.monotonic()
+        self.done = threading.Event()
+        self.value: V | None = None
+        self.error: BaseException | None = None
+
+
 class SingleFlightCell(Generic[V]):
     """One value, filled in once by whichever caller asks first.
 
     `get(compute)`: the first caller (the leader) runs `compute()` on its own thread; later callers
     block until it finishes and receive the same value. The outcome is remembered for the life of
-    the object, a failure included, so nothing is retried: every caller, leader or waiter, gets the
-    original error. A waiter stops waiting `compute_timeout` seconds after computation began and
-    raises `TimeoutError` (the leader keeps running, and the value is still recorded if it later
-    finishes). `compute` must not call `get` on the same cell.
+    the object, so nothing is computed twice. By default a failure is remembered too: every caller,
+    leader or waiter, gets the original error and nothing is retried. With `cache_errors=False`
+    a failure is shared only with the callers already waiting on that attempt; the next caller
+    after it starts a fresh attempt. That suits an idempotent read, where one transient failure
+    (or one thread's broken connection) should not fail the whole build. A waiter stops waiting
+    `compute_timeout` seconds after computation began and raises `TimeoutError` (the leader keeps
+    running, and the value is still recorded if it later finishes). A leader that hangs is never
+    replaced, whatever `cache_errors` says. `compute` must not call `get` on the same cell.
 
     `compute` is supplied per call, so only the leader's runs; the waiters' functions are discarded,
     along with anything they close over (a connection, a config). Callers sharing a cell must
     therefore be interchangeable: any one of their `compute` functions has to give the answer all
     of them want. If two callers could want different results, they belong in different cells.
+
+    A failure is shared as one exception instance, re-raised on every caller's thread, so its
+    `__traceback__` collects the frames of all of them. `compute` must therefore not raise
+    anything dbt mutates per node: `DbtRuntimeError.add_node` (called from dbt's task runner)
+    would overwrite one function's node onto the error another function is reporting. Raise a
+    plain or driver exception here and let each caller translate it into a dbt error of its own.
     """
 
-    def __init__(self, compute_timeout: float) -> None:
+    def __init__(self, compute_timeout: float, *, cache_errors: bool = True) -> None:
         self._compute_timeout = compute_timeout
-        # Held only to pick the leader, never while `compute` runs.
+        self._cache_errors = cache_errors
+        # Held only to pick the leader or retire a failed flight, never while `compute` runs.
         self._lock = threading.Lock()
-        self._started = False
-        self._started_at = 0.0
-        self._done = threading.Event()
-        self._value: V | None = None
-        self._error: BaseException | None = None
+        self._flight: _Flight[V] | None = None
 
     def get(self, compute: Callable[[], V]) -> V:
         with self._lock:
-            is_leader = not self._started
-            if is_leader:
-                self._started = True
-                self._started_at = time.monotonic()
+            flight = self._flight
+            is_leader = flight is None
+            if flight is None:
+                flight = self._flight = _Flight()
 
         if is_leader:
-            return self._lead(compute)
-        return self._wait()
+            return self._lead(flight, compute)
+        return self._wait(flight)
 
-    def _lead(self, compute: Callable[[], V]) -> V:
+    def _lead(self, flight: _Flight[V], compute: Callable[[], V]) -> V:
         try:
             value = compute()
-            self._value = value
+            flight.value = value
             return value
         except BaseException as error:
-            self._error = error
+            flight.error = error
+            if not self._cache_errors:
+                # Retire this flight so the next caller leads a new one. Callers already waiting
+                # hold `flight` itself and still get `error`.
+                with self._lock:
+                    if self._flight is flight:
+                        self._flight = None
             raise
         finally:
             # Even a KeyboardInterrupt on the leader's thread must wake the waiters.
-            self._done.set()
+            flight.done.set()
 
-    def _wait(self) -> V:
-        remaining = self._started_at + self._compute_timeout - time.monotonic()
-        if not self._done.wait(max(remaining, 0)):
+    def _wait(self, flight: _Flight[V]) -> V:
+        remaining = flight.started_at + self._compute_timeout - time.monotonic()
+        if not flight.done.wait(max(remaining, 0)):
             raise TimeoutError(
                 f"Gave up waiting after {self._compute_timeout:g}s for another thread to finish "
                 "computing this value"
             )
-        if self._error is not None:
-            raise self._error
-        return self._value  # type: ignore[return-value]
+        if flight.error is not None:
+            raise flight.error
+        return flight.value  # type: ignore[return-value]
 
 
 class SingleFlightDict(Generic[K, V]):
