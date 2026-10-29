@@ -2,8 +2,9 @@
 
 Every thread building a `function` shares one `FunctionArtifactsRepo`, so a package is hashed once,
 the artifacts are listed once and a package is uploaded at most once, however many functions
-(and threads) use it. Each result, a failure included, is shared by every caller (see
-`singleflight`). The pure helpers (`function_artifacts`) stay free of locks.
+(and threads) use it. Each result is shared by every caller, and so is a failure, except that a
+failed listing is not remembered, so a later caller lists again (see `singleflight`). The pure
+helpers (`function_artifacts`) stay free of locks.
 """
 
 from pathlib import Path

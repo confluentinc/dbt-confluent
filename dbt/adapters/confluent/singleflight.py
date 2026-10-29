@@ -2,7 +2,8 @@
 
 dbt runs models on several worker threads. When they all need the same slow result (a file hash, a
 listing, an upload), the first thread to ask computes it and the rest wait for that one answer
-instead of repeating the work. A failure is shared too: it is never retried.
+instead of repeating the work. A failure is shared too, and by default never retried; a cell can
+opt to forget it so that a later caller tries again.
 
 `SingleFlightCell` holds one value; `SingleFlightDict` holds one cell per key.
 """
@@ -47,9 +48,10 @@ class SingleFlightCell(Generic[V]):
 
     A failure is shared as one exception instance, re-raised on every caller's thread, so its
     `__traceback__` collects the frames of all of them. `compute` must therefore not raise
-    anything dbt mutates per node: `DbtRuntimeError.add_node` (called from dbt's task runner)
-    would overwrite one function's node onto the error another function is reporting. Raise a
-    plain or driver exception here and let each caller translate it into a dbt error of its own.
+    anything dbt mutates per node: dbt's task runner calls `DbtRuntimeError.add_node` only on an
+    error with no node yet, so the first thread to handle the shared error stamps its node on it
+    and every other function's failure is then reported against that one. Raise a plain or driver
+    exception here and let each caller translate it into a dbt error of its own.
     """
 
     def __init__(self, compute_timeout: float, *, cache_errors: bool = True) -> None:
