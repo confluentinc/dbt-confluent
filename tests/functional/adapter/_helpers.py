@@ -120,7 +120,7 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
         conn = project.adapter.connections.get_thread_connection()
         # closing_cursor auto-closes on exit (mode kept explicit even though
         # SNAPSHOT is its default) -- unlike a bare cursor.execute, it doesn't
-        # attach the test profile's statement_label or statement_name_prefix
+        # attach the test profile's statement_label or name prefixes
         # on its own:
         # - Without the label, delete_statements_by_label can't find these
         #   polling statements at normal teardown.
@@ -132,7 +132,10 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
         with conn.handle.closing_cursor(mode=ExecutionMode.SNAPSHOT) as cursor:
             cursor.execute(
                 sql,
-                statement_name=f"{conn.credentials.statement_name_prefix}{uuid.uuid4()}",
+                statement_name=(
+                    f"{conn.credentials.resource_name_prefix}"
+                    f"{conn.credentials.statement_name_prefix}{uuid.uuid4()}"
+                ),
                 statement_labels=[conn.credentials.statement_label],
             )
             if fetch == "one":

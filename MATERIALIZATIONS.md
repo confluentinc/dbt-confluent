@@ -295,6 +295,7 @@ Adoption is purely name-based: the adapter does not track which tool created a r
 - **Schema should match.** Under the default `on_schema_drift='fail'`, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT before adopting; any mismatch fails the run. With `config(on_schema_drift='ignore')`, enforcement depends on the adoption path:
     - **Healthy statement → skip:** the running statement is left untouched and nothing is re-submitted, so **no drift is enforced at all, including columns.** A mismatch is silently tolerated; you must align the model to the existing schema yourself.
     - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs (a column mismatch would also be rejected by Flink); benign options/distribution drift is relaxed.
+- **Same `resource_name_prefix`.** The prefix is prepended to `alias` and `statement_name` too, so adoption only finds resources created with the same prefix (or none). A target with a different prefix creates its own copies instead.
 - **Names are sanitized.** The `statement_name` you configure is normalized to Flink's constraints (see [Flink Naming Constraints](#flink-naming-constraints)) before lookup, so it must match the existing statement's actual name. Statements already named within those constraints (lowercase alphanumeric + hyphens) match verbatim.
 
 ---
@@ -984,10 +985,10 @@ If drift is detected, the run will fail with a compilation error. Use `--full-re
 Each materialization that submits statements creates Flink statements with deterministic names derived from the dbt project and model names. `ephemeral` submits no statement and therefore has no statement name:
 
 ```
-{prefix}{project_name}-{model_name}
+{resource_name_prefix}{statement_name_prefix}{project_name}-{model_name}
 ```
 
-The default prefix is `dbt-`. For `streaming_table`, which creates two statements (a DDL and an INSERT), the DDL gets a `-ddl` suffix: `dbt-{project}-{model}-ddl`.
+Both prefixes come from the profile: `statement_name_prefix` defaults to `dbt-`, and the optional `resource_name_prefix` is empty unless set (see [Sharing an environment](README.md#sharing-an-environment)), giving `dbt-{project}-{model}` by default. For `streaming_table`, which creates two statements (a DDL and an INSERT), the DDL gets a `-ddl` suffix: `dbt-{project}-{model}-ddl`.
 
 `materialized_table` differs in two ways. Its defining `CREATE OR ALTER` statement completes immediately, since it is not a long-running maintainer (Flink maintains the table server-side), so the adapter reaps it like any other bounded statement; a failed submission is left in place for debugging (Confluent purges terminal statements after ~30 days). And each run submits under a unique per-run name (`dbt-{project}-{model}-{invocation_id}`), so a re-assert can never collide (409) with a statement lingering from a previous run.
 
@@ -1006,6 +1007,8 @@ Override the generated name with the `statement_name` config:
 ```sql
 {{ config(materialized='streaming_table', statement_name='my-custom-name') }}
 ```
+
+`statement_name_prefix` is not applied to it, but `resource_name_prefix`, when set, is: `{resource_name_prefix}my-custom-name`.
 
 #### Statement Lifecycle
 

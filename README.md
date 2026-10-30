@@ -80,6 +80,35 @@ models:
     +schema: my-kafka-cluster
 ```
 
+### Sharing an environment
+
+Statement names are unique per Confluent Cloud environment, while table names are unique per Kafka cluster, since each table is backed by a Kafka topic. When several users build the same project into one environment, they share statement names even if each target uses its own cluster. Targets that also share a cluster write to the same tables. To keep your statements and tables apart from everyone else's, set the optional `resource_name_prefix` in your own `profiles.yml`:
+
+```yaml
+# profiles.yml
+my_project:
+  outputs:
+    dev:
+      type: confluent
+      # ...
+      resource_name_prefix: alice-
+```
+
+It is empty by default, so names only change when you set it:
+
+| | Without | With `resource_name_prefix: alice-` |
+|---|---|---|
+| Statement | `dbt-my-project-orders-2bce76` | `alice-dbt-my-project-orders-f94953` |
+| Table | `orders` | `alice_orders` |
+
+The prefix also applies to explicit `alias` and `statement_name` configs, sources are never prefixed. In table names its hyphens become underscores, because dbt writes ephemeral model names into SQL unquoted. It may only contain lowercase letters, digits and hyphens, must start with a letter or digit, and can be at most 60 characters, otherwise the profile fails to load.
+
+`statement_name_prefix` (default `dbt-`) is a separate setting: it names statements but leaves table names alone, so it does not isolate anything.
+
+> [!WARNING]
+> - Changing either prefix on a target with running statements starts new ones under the new names and leaves the old ones running. Stop the old statements first.
+> - Table names get the prefix through the adapter's `generate_alias_name` macro. If your project overrides `generate_alias_name`, prepend `target.resource_name_prefix | replace('-', '_')` to the alias yourself, or tables lose the prefix while statements keep it.
+
 ## Usage
 
 ### Streaming table

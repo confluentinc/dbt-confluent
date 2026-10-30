@@ -48,12 +48,14 @@ class TestProfileTemplate:
             "my-secret",  # flink_api_secret
             "streaming_query",  # execution_mode
             "dbt-confluent-",  # statement_name_prefix
+            "alice-",  # resource_name_prefix
             "dbt-confluent",  # statement_label
             1,  # threads
         ]
 
         target = _run_generate_target(template["prompts"], prompt_responses)
 
+        assert target["resource_name_prefix"] == "alice-"
         assert target["cloud_provider"] == "aws"
         assert target["cloud_region"] == "us-west-1"
         assert "endpoint" not in target
@@ -75,6 +77,7 @@ class TestProfileTemplate:
             "my-secret",  # flink_api_secret
             "streaming_query",  # execution_mode
             "dbt-confluent-",  # statement_name_prefix
+            "",  # resource_name_prefix
             "dbt-confluent",  # statement_label
             1,  # threads
         ]
@@ -101,6 +104,7 @@ class TestProfileTemplate:
             "my-secret",  # flink_api_secret
             "streaming_query",  # execution_mode
             "dbt-confluent-",  # statement_name_prefix
+            "",  # resource_name_prefix
             "dbt-confluent",  # statement_label
             1,  # threads
         ]
@@ -126,6 +130,7 @@ class TestProfileTemplate:
             "global-secret",  # global_api_secret
             "streaming_query",  # execution_mode
             "dbt-confluent-",  # statement_name_prefix
+            "",  # resource_name_prefix
             "dbt-confluent",  # statement_label
             1,  # threads
         ]

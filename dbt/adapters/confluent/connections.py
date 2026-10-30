@@ -39,6 +39,7 @@ from dbt.adapters.events.types import (
 from dbt.adapters.sql import SQLConnectionManager
 
 from .__version__ import version
+from .naming import sanitize_statement_name, validate_resource_name_prefix
 from .utils import fetch_from_cursor
 
 if TYPE_CHECKING:
@@ -78,6 +79,8 @@ class ConfluentCredentials(Credentials):
     execution_mode: ExecutionMode = ExecutionMode.STREAMING_QUERY
     statement_name_prefix: str = "dbt-"
     statement_label: str = "dbt-confluent"
+    # Isolates statements and tables in a shared environment.
+    resource_name_prefix: str = ""
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}
 
@@ -101,11 +104,25 @@ class ConfluentCredentials(Credentials):
         """
         List of keys to display in the `dbt debug` output.
         """
-        keys = ("organization_id", "database", "schema", "compute_pool_id", "auth")
+        keys = (
+            "organization_id",
+            "database",
+            "schema",
+            "compute_pool_id",
+            "resource_name_prefix",
+            "auth",
+        )
         if self.endpoint:
             return (*keys, "endpoint")
         else:
             return (*keys, "cloud_provider", "cloud_region")
+
+    def __post_init__(self):
+        """Reject an invalid `resource_name_prefix` when the profile loads."""
+        try:
+            validate_resource_name_prefix(self.resource_name_prefix)
+        except ValueError as e:
+            raise DbtRuntimeError(str(e)) from e
 
 
 def _execute_query_with_retry(
@@ -474,10 +491,14 @@ class ConfluentConnectionManager(SQLConnectionManager):
             if hidden:
                 labels.append(HIDDEN_LABEL)
 
-            # Use deterministic name if provided, otherwise fall back to UUID
+            # Use deterministic name if provided, otherwise fall back to UUID.
+            # statement_name_prefix is not validated on its own, only the whole built
+            # name can be checked, so the fallback is sanitized here, as in
+            # get_statement_name().
             if statement_name is None:
-                prefix = connection.credentials.statement_name_prefix
-                statement_name = f"{prefix}{uuid.uuid4()}"
+                creds = connection.credentials
+                prefix = f"{creds.resource_name_prefix}{creds.statement_name_prefix}"
+                statement_name = sanitize_statement_name(f"{prefix}{uuid.uuid4()}")
 
             cursor = connection.handle.cursor(mode=resolved_mode)
             _execute_query_with_retry(

@@ -5,6 +5,25 @@ MAX_STATEMENT_NAME_LENGTH = 100
 _HASH_LENGTH = 6
 _ILLEGAL_CHARS_RE = re.compile(r"[^a-z0-9-]")
 
+# resource_name_prefix lands in both Flink statement names ([a-z0-9-], starting
+# alphanumeric) and Kafka topic names ([a-zA-Z0-9._-]); this is the intersection,
+# so the prefix is valid in both. The length cap keeps ad-hoc statement names,
+# prefix + default statement_name_prefix "dbt-" (4) + UUID (36), within 100 chars.
+MAX_RESOURCE_NAME_PREFIX_LENGTH = 60
+
+
+def validate_resource_name_prefix(prefix: str) -> None:
+    """Raise ValueError if `prefix` is not a valid resource_name_prefix; empty is valid."""
+    if not prefix:
+        return
+    too_long = len(prefix) > MAX_RESOURCE_NAME_PREFIX_LENGTH
+    if too_long or _ILLEGAL_CHARS_RE.search(prefix) or prefix.startswith("-"):
+        raise ValueError(
+            f"Invalid resource_name_prefix '{prefix}': it may only contain lowercase letters, "
+            "digits and hyphens, must start with a letter or digit, and can be at most "
+            f"{MAX_RESOURCE_NAME_PREFIX_LENGTH} characters."
+        )
+
 
 def truncate_with_hash(base: str, max_length: int, hash_source: str) -> str:
     """Cut `base` to fit `max_length`, ending in `-<hash of hash_source>`."""
