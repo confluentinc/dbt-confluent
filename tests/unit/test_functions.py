@@ -8,18 +8,20 @@ false "changed" (needless drop) or a false "unchanged" (stale function) both mat
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
+from dbt.adapters.base.relation import BaseRelation
 from dbt.adapters.confluent import functions
 from dbt.adapters.confluent.function_artifacts import (
     ArtifactConfig,
     artifact_display_name,
     file_digest,
 )
+from dbt.adapters.confluent.function_artifacts_repo import FunctionArtifactsRepo
 from dbt.adapters.confluent.functions import FunctionState, QualifiedName
 from dbt.adapters.confluent.impl import FUNCTION_MATERIALIZATION_FLAG, ConfluentAdapter
 from dbt.adapters.contracts.connection import AdapterResponse
@@ -28,7 +30,7 @@ CATALOG = "env-1"
 DATABASE = "cluster-a"
 ARTIFACT_ID = "cfa-abc123"
 CLASS_NAME = "com.example.my.TShirtSizingIsSmaller"
-PREFIX, PROJECT, FUNCTION = "dbt-", "proj", "is_smaller"
+PROJECT, FUNCTION = "proj", "is_smaller"
 
 
 class FakeConfig(dict):
@@ -48,7 +50,6 @@ def validate(config: FakeConfig, project_root: Path | None = None) -> functions.
         DATABASE,
         project_root=project_root,
         project=PROJECT,
-        name_prefix=PREFIX,
         function=FUNCTION,
     )
 
@@ -90,7 +91,6 @@ class TestValidateFunctionConfig:
                 parts["catalog"],
                 parts["database"],
                 project=PROJECT,
-                name_prefix=PREFIX,
                 function=parts["function"],
             )
 
@@ -259,10 +259,10 @@ class TestDiffFunctionState:
 def test_adapter_delegates_validation_to_functions_module():
     # bypass __init__ — the wrapper only needs the method dispatch
     adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+    adapter._artifacts_repo = FunctionArtifactsRepo()
     adapter.config = SimpleNamespace(  # type: ignore[assignment]
         project_root="/unused",
         project_name=PROJECT,
-        credentials=SimpleNamespace(statement_name_prefix=PREFIX),
     )
 
     class Relation:
@@ -304,7 +304,7 @@ class TestPlanFunctionChange:
         return MagicMock(side_effect=raises, return_value=(None, SimpleNamespace(rows=returns)))
 
     def plan(self, execute: MagicMock) -> list[str] | None:
-        existing = functions.describe_function(execute, self.RELATION)
+        existing = functions.describe_function(execute, cast(BaseRelation, self.RELATION))
         return functions.plan_function_change(existing, validate(java_config()))
 
     def test_missing_function_is_none(self):
@@ -379,7 +379,7 @@ class TestFunctionMaterializationFlag:
 
     def adapter_with_flag(self, enabled: bool) -> ConfluentAdapter:
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
-        adapter._behavior = SimpleNamespace(
+        adapter._behavior = SimpleNamespace(  # type: ignore[has-type]
             **{FUNCTION_MATERIALIZATION_FLAG: SimpleNamespace(no_warn=enabled)}
         )
         return adapter
@@ -421,12 +421,12 @@ class TestValidateArtifactPath:
         assert udf.artifact_config.path == (project_root / self.PACKAGE).resolve()
         assert udf.artifact_id is None
 
-    def test_the_artifact_is_named_after_its_project_function_and_content(self, project_root):
+    def test_the_artifact_is_named_after_its_project_and_content(self, project_root):
         udf = self.validate_path(project_root, artifact_path=self.PACKAGE)
         digest = file_digest(project_root / self.PACKAGE)
         assert udf.artifact_config == ArtifactConfig(
             path=(project_root / self.PACKAGE).resolve(),
-            name=artifact_display_name(PREFIX, PROJECT, FUNCTION, digest),
+            name=artifact_display_name(PROJECT, digest),
             project=PROJECT,
             language="python",
         )

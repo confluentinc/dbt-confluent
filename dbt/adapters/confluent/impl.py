@@ -1,11 +1,12 @@
 import re
+import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, TypeVar, cast
+from typing import Any, Literal, NamedTuple, TypeVar
 
 import agate
 from confluent_sql import ArtifactNotFoundError, Connection
@@ -22,14 +23,17 @@ from dbt_common.ui import warning_tag
 
 from dbt.adapters.base import BaseRelation, available
 from dbt.adapters.base.impl import InformationSchema, _parse_callback_empty_table
+from dbt.adapters.capability import Capability, CapabilityDict, CapabilitySupport, Support
 from dbt.adapters.confluent import ConfluentColumn, ConfluentConnectionManager
 from dbt.adapters.contracts.connection import AdapterResponse
-from dbt.adapters.contracts.relation import Policy
+from dbt.adapters.contracts.relation import Policy, RelationConfig
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import function_artifacts, functions, tableflow
+from . import functions, tableflow
+from .catalog import query_catalog_rows
 from .dry_run_types import display_type, fitted_type
+from .function_artifacts_repo import FunctionArtifactsRepo
 from .naming import sanitize_statement_name
 from .utils import fetch_from_cursor
 
@@ -178,6 +182,13 @@ class ConfluentAdapter(SQLAdapter):
     Relation: type[ConfluentRelation] = ConfluentRelation
     Column: type[ConfluentColumn] = ConfluentColumn
 
+    _capabilities = CapabilityDict(
+        {Capability.SchemaMetadataByRelations: CapabilitySupport(support=Support.Full)}
+    )
+    # Scoped catalog queries are chunked, so there's no relation count at which the unscoped
+    # whole-environment catalog (which times out) is the better choice.
+    MAX_SCHEMA_METADATA_RELATIONS = sys.maxsize
+
     def __init__(self, config, mp_context) -> None:
         super().__init__(config, mp_context)
         # Deferred-cleanup registry, consumed by post_model_hook. Thread-local
@@ -185,6 +196,9 @@ class ConfluentAdapter(SQLAdapter):
         # worker thread; _CleanupRegistry.__init__ gives each of those threads
         # its own empty list on first access.
         self._deferred_cleanups = _CleanupRegistry()
+        # Unlike the registry above, shared by every thread on purpose: it is how threads
+        # building functions from one package hash, list and upload it once between them.
+        self._artifacts_repo = FunctionArtifactsRepo()
 
     @property
     def _behavior_flags(self) -> list[BehaviorFlag]:
@@ -669,31 +683,39 @@ class ConfluentAdapter(SQLAdapter):
         # Drop the original one
         self.execute(f"DROP VIEW {old_fqn}")
 
-    def _get_one_catalog(
+    def get_catalog(
+        self,
+        relation_configs: Iterable[RelationConfig],
+        used_schemas: frozenset[tuple[str, str]],
+    ) -> tuple["agate.Table", list[Exception]]:
+        """
+        Catalog for the project's own relations, taken from its DAG.
+
+        dbt only scopes the catalog to selected relations when it compiled first; otherwise
+        (e.g. `docs generate --no-compile`) it falls back to this method, whose default reads
+        the whole schema. That times out on Confluent Cloud and depends on every other relation
+        in the environment, so scope it to `relation_configs` (every relational node and source
+        in the manifest) and use the same chunked path as a selected catalog.
+        """
+        relations: set[BaseRelation] = {
+            self.Relation.create_from(self.config, node) for node in relation_configs
+        }
+        return self.get_catalog_by_relations(used_schemas, relations)
+
+    def _get_one_catalog_by_relations(
         self,
         information_schema: InformationSchema,
-        schemas: set[str],
+        relations: list[BaseRelation],
         used_schemas: frozenset[tuple[str, str]],
     ) -> "agate.Table":
-        """
-        Override catalog generation to work around Confluent Cloud's INFORMATION_SCHEMA limitations.
+        """Catalog for exactly `relations`; `catalog.query_catalog_rows` describes the querying."""
+        catalog = list(query_catalog_rows(self.execute_macro, information_schema, relations))
+        return self._assemble_catalog(catalog, used_schemas)
 
-        Confluent Cloud doesn't support JOINs on INFORMATION_SCHEMA, so we:
-        1. Query TABLES and COLUMNS with a single query
-        2. Split and then join them in Python
-        3. Return an agate.Table with the standard catalog structure
-        """
-        # Reuse the same default kwargs, although `schemas` is not used in the macro.
-        kwargs = {"information_schema": information_schema, "schemas": schemas}
-
-        # This query return both tables and columns, all with the same row structure.
-        # We distinguish between them by the presence (or lack) of "table_name"/"column_name"
-        # This allows us to get the catalog with a single query, which, given the
-        # overhead of each query, is a significant time saving move.
-        # `execute_macro` is typed as returning `AttrDict`, but a macro returning a
-        # list of rows (as `get_catalog` does) actually yields a plain list of dicts.
-        catalog = cast(list[dict[str, Any]], self.execute_macro("get_catalog", kwargs=kwargs))
-
+    def _assemble_catalog(
+        self, catalog: list[dict[str, Any]], used_schemas: frozenset[tuple[str, str]]
+    ) -> "agate.Table":
+        """Fold the table rows and column rows from the catalog macros into catalog rows."""
         # Sort by database.schema.name first, so we get all the rows (table and columns) for
         # any given table in the right order.
         # Then sort based on whether table_type is None.
@@ -984,8 +1006,8 @@ class ConfluentAdapter(SQLAdapter):
             relation.schema,
             project_root=Path(self.config.project_root),
             project=self.config.project_name,
-            name_prefix=self.config.credentials.statement_name_prefix,
             function=relation.identifier,
+            digest=self._artifacts_repo.digest,
         )
 
     @available
@@ -1011,10 +1033,8 @@ class ConfluentAdapter(SQLAdapter):
         against the artifact already uploaded for that content, if any.
         """
         if udf.artifact_config:
-            artifact = function_artifacts.find_artifact(
-                self.connections.get_thread_handle(),
-                udf.artifact_config.name,
-                udf.artifact_config.language,
+            artifact = self._artifacts_repo.find(
+                self.connections.get_thread_handle(), udf.artifact_config.name
             )
             udf = udf._replace(artifact_id=artifact.id if artifact else None)
         return functions.plan_function_change(existing, udf)
@@ -1074,7 +1094,7 @@ class ConfluentAdapter(SQLAdapter):
         conn = self.connections.get_thread_handle()
         execute = self._function_executor(compute_pool_id)
         if udf.artifact_config:
-            artifact_id = function_artifacts.ensure_artifact(conn, udf.artifact_config).id
+            artifact_id = self._artifacts_repo.ensure(conn, udf.artifact_config).id
         else:
             assert udf.artifact_id  # validation guarantees one or the other
             artifact_id = udf.artifact_id

@@ -10,7 +10,7 @@ from typing import Literal, TypedDict
 
 import agate
 import pytest
-from confluent_sql import Connection
+from confluent_sql import ArtifactNotFoundError, Connection
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
@@ -20,6 +20,16 @@ from dbt.adapters.confluent.utils import fetch_from_cursor
 # shared cluster (a full suite run takes minutes; two hours is a generous
 # margin), so the sweepers below leave them for a later sweep.
 SWEEP_MIN_AGE_SECONDS = 2 * 60 * 60
+
+# Function artifacts are named after the dbt project, so a test project's name starts with this,
+# which is how `sweep_stale_test_artifacts` finds leaks. It is short because artifact names are
+# capped (see `MAX_ARTIFACT_NAME_LENGTH`) and a truncated name would no longer start with it.
+TEST_PROJECT_PREFIX = "dbt_test_"
+
+
+def unique_test_project_name(name: str) -> str:
+    """A dbt project name for the test class `name`, which no concurrent run shares."""
+    return f"{TEST_PROJECT_PREFIX}{uuid.uuid4().hex[:6]}_{name}"
 
 
 def wait_for_absent(adapter, name, timeout=60):
@@ -404,3 +414,27 @@ def sweep_stale_test_statements(
                 continue
             # The adapter helper swallows missing-statement / pool-scoped 403s.
             project.adapter.delete_statement(statement.name)
+
+
+def sweep_stale_test_artifacts(project, prefix=TEST_PROJECT_PREFIX, min_age=SWEEP_MIN_AGE_SECONDS):
+    """Delete function artifacts leaked by previous test sessions.
+
+    Like `sweep_stale_test_statements`: everything under `prefix` older than `min_age` (creation
+    time from the artifact's metadata; artifacts without one are left alone) is deleted, so
+    artifacts of a session still running on the shared environment are spared.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - min_age
+    with project.adapter.connection_named("sweep_artifacts"):
+        api = project.adapter.connections.get_thread_handle().get_artifacts_api()
+        for artifact in api.list():
+            if not artifact.display_name.startswith(prefix):
+                continue
+            created_at = artifact.raw.get("metadata", {}).get("created_at")
+            if not created_at:
+                continue
+            if datetime.fromisoformat(created_at).timestamp() >= cutoff:
+                continue
+            try:
+                api.delete(artifact.id)
+            except ArtifactNotFoundError:
+                pass  # another sweeper got there first
