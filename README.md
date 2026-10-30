@@ -101,7 +101,7 @@ It is empty by default, so names only change when you set it:
 | Statement | `dbt-my-project-orders-2bce76` | `alice-dbt-my-project-orders-f94953` |
 | Table | `orders` | `alice_orders` |
 
-The prefix also applies to explicit `alias` and `statement_name` configs, sources are never prefixed. In table names its hyphens become underscores, because dbt writes ephemeral model names into SQL unquoted. It may only contain lowercase letters, digits and hyphens, must start with a letter or digit, and can be at most 64 characters, otherwise the profile fails to load.
+The prefix also applies to explicit `alias` and `statement_name` configs, sources are never prefixed. In table names its hyphens become underscores, because dbt writes ephemeral model names into SQL unquoted. It may only contain lowercase letters, digits and hyphens, must start with a letter or digit, and can be at most 60 characters, otherwise the profile fails to load.
 
 `statement_name_prefix` (default `dbt-`) is a separate setting: it names statements but leaves table names alone, so it does not isolate anything.
 

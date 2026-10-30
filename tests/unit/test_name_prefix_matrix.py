@@ -181,7 +181,7 @@ class TestNamePrefixDetails:
 
 
 class TestResourceNamePrefixValidation:
-    @pytest.mark.parametrize("prefix", ["a", "eng-a-", "dbt-adapter-test-", "0x", "a" * 64])
+    @pytest.mark.parametrize("prefix", ["a", "eng-a-", "dbt-adapter-test-", "0x", "a" * 60])
     def test_valid_prefix_accepted(self, prefix):
         assert _credentials({"resource_name_prefix": prefix}).resource_name_prefix == prefix
 
@@ -194,7 +194,7 @@ class TestResourceNamePrefixValidation:
             "-eng",  # statement names must start alphanumeric
             "eng a",
             "eng/a",
-            "a" * 65,  # over the length cap
+            "a" * 61,  # over the length cap
         ],
     )
     def test_invalid_prefix_rejected(self, prefix):
