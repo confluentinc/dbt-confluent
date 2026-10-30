@@ -22,8 +22,12 @@ from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.tests.util import relation_from_name, run_dbt, set_model_file
-from tests.functional.adapter._helpers import wait_for_absent, wait_for_running
-from tests.functional.adapter.fixtures import ClassScopedCleanup
+from tests.functional.adapter._helpers import (
+    wait_for_absent,
+    wait_for_running,
+)
+from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 # Names a previously-deployed pipeline would already be using. They deliberately
 # differ from dbt's defaults (model name / `dbt-...-<project>-<model>`) so the
@@ -89,9 +93,8 @@ select order_id from {{ ref('my_streaming_source') }}
 """
 
 
-class TestAdoptExistingPipeline(ClassScopedCleanup):
+class TestAdoptExistingPipeline(ConfluentFixtures):
     NAME = "adoptpipe"
-    TABLES = [ALIAS, "my_streaming_source"]
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -159,7 +162,7 @@ class TestAdoptExistingPipeline(ClassScopedCleanup):
         # statement_name.
         results = run_dbt(["run"])
         assert all(r.status == "success" for r in results)
-        adopted = relation_from_name(adapter, ALIAS)
+        adopted = relation_from_name(adapter, physical_name(ALIAS))
         project.run_sql(f"select * from {adopted} limit 1", fetch="one")
         assert self._statement_absent(adapter, self._default_insert_name(adapter)), (
             "INSERT exists under the default name — statement_name mapping was not applied"
@@ -173,7 +176,7 @@ class TestAdoptExistingPipeline(ClassScopedCleanup):
         with adapter.connection_named("simulate_external"):
             adapter.delete_statement(insert_name)
         wait_for_absent(adapter, insert_name)
-        source = relation_from_name(adapter, "my_streaming_source")
+        source = relation_from_name(adapter, physical_name("my_streaming_source"))
         with adapter.connection_named("plant_external"):
             conn = adapter.connections.get_thread_connection()
             cursor = conn.handle.cursor(mode=ExecutionMode.STREAMING_QUERY)
@@ -216,6 +219,7 @@ class TestAdoptExistingPipeline(ClassScopedCleanup):
         # MATERIALIZATIONS.md. Settle on a stably-healthy statement first so we
         # can prove the skip left it unchanged.
         healthy_id = wait_for_running(adapter, insert_name).statement_id
+        # set_model_file wants the model's file name, so the literal (un-namespaced) name.
         model = relation_from_name(adapter, "adopted_streaming_table")
         set_model_file(project, model, ADOPTED_STREAMING_TABLE_DRIFTED_IGNORE)
         results = run_dbt(["run"])

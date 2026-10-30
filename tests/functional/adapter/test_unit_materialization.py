@@ -19,7 +19,7 @@ MY_STREAMING_TABLE = """
 {{ config(
     materialized='streaming_table',
 ) }}
-select order_id, price, order_time from {{ ref('my_streaming_source') }}
+select order_id, price, order_time from {{ ref('unit_streaming_source') }}
 """
 
 # rows-per-second is high so all 100 rows arrive in ~1s instead of trickling at
@@ -45,9 +45,9 @@ PRIMARY KEY(`order_id`) NOT ENFORCED
 SCHEMA_YML = """
 unit_tests:
   - name: test_streaming_table
-    model: my_streaming_table
+    model: unit_streaming_table
     given:
-      - input: ref('my_streaming_source')
+      - input: ref('unit_streaming_source')
         rows:
           - order_id: 1
             price: 10.0
@@ -71,7 +71,7 @@ unit_tests:
           order_time: '2024-01-01 10:10:00'
 
 models:
-  - name: my_streaming_table
+  - name: unit_streaming_table
     columns:
       - name: order_id
         data_type: bigint
@@ -165,6 +165,10 @@ class TestJoinOnExplicitTimestamp(ConfluentFixtures):
     """Test that joining two streaming sources on explicit timestamp columns
     works correctly in unit tests (as opposed to $rowtime which is uncontrollable)."""
 
+    # The unit materialization looks the tested model up by name, not alias, so these
+    # models cannot be aliased; their names are module-specific instead.
+    NAMESPACE_RELATIONS = False
+
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {
@@ -187,19 +191,23 @@ class TestJoinOnExplicitTimestamp(ConfluentFixtures):
 
 
 class TestStreamingTests(ConfluentFixtures):
+    # The unit materialization looks the tested model up by name, not alias, so these
+    # models cannot be aliased; their names are module-specific instead.
+    NAMESPACE_RELATIONS = False
+
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {
-            "my_streaming_source.sql": MY_STREAMING_SOURCE,
-            "my_streaming_table.sql": MY_STREAMING_TABLE,
+            "unit_streaming_source.sql": MY_STREAMING_SOURCE,
+            "unit_streaming_table.sql": MY_STREAMING_TABLE,
             "schema.yml": SCHEMA_YML,
         }
 
     @pytest.fixture(scope="class", autouse=True)
     def custom_clean_up(self, project):
         yield
-        project.run_sql(f"drop table if exists my_streaming_source")
-        project.run_sql(f"drop table if exists my_streaming_table")
+        project.run_sql(f"drop table if exists unit_streaming_source")
+        project.run_sql(f"drop table if exists unit_streaming_table")
 
     def test_streaming_tests(self, project):
         results = run_dbt(["run"])
@@ -207,4 +215,4 @@ class TestStreamingTests(ConfluentFixtures):
         # Fixture tables are cleaned up by post_model_hook, not inline — prove
         # the wiring (the unit-test runner also fires the model hooks). The
         # fixture table is named after the input CTE dbt-core generates.
-        assert_tables_absent(project, "__dbt__cte__my_streaming_source")
+        assert_tables_absent(project, "__dbt__cte__unit_streaming_source")

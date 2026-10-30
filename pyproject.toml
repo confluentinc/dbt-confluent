@@ -53,6 +53,7 @@ test = [
   "pytest-cov>=6.0.0",
   "pytest-dotenv>=0.5.2",
   "pytest-mock>=3.15.1",
+  "pytest-xdist>=3.5.0",
   "dbt-tests-adapter>=1.10",
 ]
 
@@ -82,7 +83,10 @@ confluent-sql = { git = "https://github.com/confluentinc/confluent-sql", rev = "
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
-addopts = "-v --color=yes"
+addopts = "-v --color=yes --dist=loadscope"
+markers = [
+    "serial: must not run under pytest-xdist (e.g. it observes the whole shared environment, or uses fixed relation names); see tests/functional/conftest.py",
+]
 env_files = ["test.env"]
 
 [tool.ruff]
