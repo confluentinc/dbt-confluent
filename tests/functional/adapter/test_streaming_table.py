@@ -2,8 +2,14 @@ import pytest
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
-from dbt.tests.util import relation_from_name, run_dbt, run_dbt_and_capture
-from tests.functional.adapter._helpers import wait_for_absent, wait_for_terminal
+from dbt.tests.util import relation_from_name, run_dbt, run_dbt_and_capture, write_file
+from tests.functional.adapter._helpers import (
+    get_result_by_name,
+    relation,
+    wait_for_absent,
+    wait_for_snapshot_rows,
+    wait_for_terminal,
+)
 from tests.functional.adapter.fixtures import ClassScopedCleanup
 
 
@@ -428,3 +434,301 @@ class TestDeadStatementRestart(ClassScopedCleanup):
             current = conn.handle.get_statement(insert_name)
         assert current.statement_id != planted_id
         assert not current.phase.is_terminal
+
+
+# -- The INSERT writes by name (#184) --
+
+# The yml lists (order_id, id_str, tag), and the SELECT returns tag and id_str the other way
+# around. Both are STRING, so an INSERT without a column list wrote each into the other's column.
+# Each run tags its rows through the `tag` var, so a test can tell its own rows from earlier ones.
+BY_NAME_TABLE = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+) }}
+select order_id, cast('{{ var("tag", "v1") }}' as string) as tag,
+    cast(order_id as string) as id_str
+from {{ ref('my_streaming_source') }}
+"""
+
+BY_NAME_TABLE_IGNORE = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+    on_schema_drift='ignore',
+) }}
+select order_id, cast('{{ var("tag", "v1") }}' as string) as tag,
+    cast(order_id as string) as id_str
+from {{ ref('my_streaming_source') }}
+"""
+
+# The tag column is the reserved word Order, quoted in the yml, so get_column_names backticks it.
+BY_NAME_QUOTED = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+) }}
+select order_id, cast('{{ var("tag", "v1") }}' as string) as `Order`,
+    cast(order_id as string) as id_str
+from {{ ref('my_streaming_source') }}
+"""
+
+# An updating stream: the GROUP BY makes Flink upsert by order_id, the table's primary key. The
+# wrapper around the SELECT only projects its columns, so the upsert key must still reach the sink.
+# count(*) is BIGINT NOT NULL against the yml's bigint; dbt's contract check ignores nullability.
+BY_NAME_UPSERT = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'upsert'},
+) }}
+select order_id, cast('{{ var("tag", "v1") }}' as string) as tag,
+    cast(order_id as string) as id_str, count(*) as cnt
+from {{ ref('my_streaming_source') }}
+group by order_id
+"""
+
+BY_NAME_MODELS_YML = """
+models:
+  - name: by_name_table
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: id_str
+        data_type: string
+      - name: tag
+        data_type: string
+  - name: by_name_table_ignore
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: id_str
+        data_type: string
+      - name: tag
+        data_type: string
+  - name: by_name_quoted
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: id_str
+        data_type: string
+      - name: Order
+        data_type: string
+        quote: true
+  - name: by_name_upsert
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+          - type: primary_key
+            expression: "not enforced"
+      - name: id_str
+        data_type: string
+      - name: tag
+        data_type: string
+      - name: cnt
+        data_type: bigint
+"""
+
+# by_name_table's yml reordered to match its SELECT. Its table stays (order_id, id_str, tag).
+BY_NAME_MODELS_YML_REORDERED = """
+models:
+  - name: by_name_table
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: tag
+        data_type: string
+      - name: id_str
+        data_type: string
+  - name: by_name_table_ignore
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: id_str
+        data_type: string
+      - name: tag
+        data_type: string
+  - name: by_name_quoted
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: id_str
+        data_type: string
+      - name: Order
+        data_type: string
+        quote: true
+  - name: by_name_upsert
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+          - type: primary_key
+            expression: "not enforced"
+      - name: id_str
+        data_type: string
+      - name: tag
+        data_type: string
+      - name: cnt
+        data_type: bigint
+"""
+
+# by_name_table_ignore's yml drops tag. Its SELECT and its table still have it.
+BY_NAME_MODELS_YML_TAG_DROPPED = """
+models:
+  - name: by_name_table
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: id_str
+        data_type: string
+      - name: tag
+        data_type: string
+  - name: by_name_table_ignore
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: id_str
+        data_type: string
+  - name: by_name_quoted
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: id_str
+        data_type: string
+      - name: Order
+        data_type: string
+        quote: true
+  - name: by_name_upsert
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+          - type: primary_key
+            expression: "not enforced"
+      - name: id_str
+        data_type: string
+      - name: tag
+        data_type: string
+      - name: cnt
+        data_type: bigint
+"""
+
+
+class TestInsertWritesByName(ClassScopedCleanup):
+    """streaming_table's INSERT names the yml columns and re-projects the SELECT into them (#184),
+    so values land by name on create and on restart, and dbt's contract check guards the restart.
+
+    The tests run in file order and share the class's tables. Each restart test first deletes the
+    running INSERTs and waits until they're gone, so its run takes the restart path, and restores
+    models.yml in a finally.
+    """
+
+    NAME = "byname"
+    MODELS = ["by_name_table", "by_name_table_ignore", "by_name_quoted", "by_name_upsert"]
+    TABLES = [*MODELS, "my_streaming_source"]
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        # Restart only happens without --full-refresh; drop the shared
+        # +full_refresh: True (see _no_full_refresh_config).
+        return _no_full_refresh_config(self.NAME, unique_schema)
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "my_streaming_source.sql": MY_STREAMING_SOURCE,
+            "by_name_table.sql": BY_NAME_TABLE,
+            "by_name_table_ignore.sql": BY_NAME_TABLE_IGNORE,
+            "by_name_quoted.sql": BY_NAME_QUOTED,
+            "by_name_upsert.sql": BY_NAME_UPSERT,
+            "models.yml": BY_NAME_MODELS_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def first_run(self, project):
+        # Build the tables and their INSERTs once; class_clean_up tears down.
+        run_dbt(["run"])
+        yield
+
+    def _delete_inserts(self, project):
+        """Delete each model's INSERT and wait until it's gone, so the next run restarts it. A
+        statement still being deleted counts as healthy, and the run would skip instead."""
+        adapter = project.adapter
+        for model in self.MODELS:
+            name = adapter.get_statement_name(model_name=model, project_name=self.NAME)
+            with adapter.connection_named("delete_insert"):
+                adapter.delete_statement(name)
+            wait_for_absent(adapter, name)
+
+    def _assert_rows_by_name(self, project, model, tag, tag_column="tag"):
+        """Wait for rows tagged `tag` in either STRING column, then check each landed by name: the
+        tag in `tag_column`, and order_id's string in id_str."""
+        rows = wait_for_snapshot_rows(
+            project,
+            f"select order_id, id_str, `{tag_column}` from {relation(project, model)} "
+            f"where `{tag_column}` = '{tag}' or id_str = '{tag}'",
+            timeout=60,
+        )
+        assert len(rows) > 0, f"no rows tagged {tag!r} landed in {model}"
+        for order_id, id_str, row_tag in rows:
+            assert (id_str, row_tag) == (str(int(order_id)), tag), (
+                f"{model} was written by position, not by name: "
+                f"order_id={order_id}, id_str={id_str!r}, {tag_column}={row_tag!r}"
+            )
+
+    def test_create_writes_by_name(self, project):
+        """The create-path bug: each table is built in yml order, and the SELECT's swapped columns
+        still land by name, including the quoted `Order` and the upsert stream through the
+        wrapper."""
+        self._assert_rows_by_name(project, "by_name_table", "v1")
+        self._assert_rows_by_name(project, "by_name_table_ignore", "v1")
+        self._assert_rows_by_name(project, "by_name_quoted", "v1", tag_column="Order")
+        self._assert_rows_by_name(project, "by_name_upsert", "v1")
+
+    def test_restart_writes_by_name(self, project):
+        """The restart bug: each re-submitted INSERT goes into the existing table, whose order (the
+        yml's) differs from the SELECT's, under 'fail' and 'ignore'."""
+        self._delete_inserts(project)
+        results, logs = run_dbt_and_capture(["run", "--vars", "{tag: v2}"])
+        assert all(r.status == "success" for r in results)
+        assert "Re-submitting (no full refresh required)." in logs, (
+            "streaming_table did not take the restart path"
+        )
+        self._assert_rows_by_name(project, "by_name_table", "v2")
+        self._assert_rows_by_name(project, "by_name_table_ignore", "v2")
+        self._assert_rows_by_name(project, "by_name_quoted", "v2", tag_column="Order")
+        self._assert_rows_by_name(project, "by_name_upsert", "v2")
+
+    def test_restart_after_yml_reorder_writes_by_name(self, project):
+        """A yml-only reorder: the yml now lists (order_id, tag, id_str), the SELECT's order, but
+        the table is still (order_id, id_str, tag). The re-projection alone would write in yml
+        order by position; the column list maps each value by name."""
+        yml_path = (project.project_root, "models", "models.yml")
+        self._delete_inserts(project)
+        write_file(BY_NAME_MODELS_YML_REORDERED, *yml_path)
+        try:
+            results = run_dbt(["run", "--select", "by_name_table", "--vars", "{tag: v3}"])
+            assert all(r.status == "success" for r in results)
+            self._assert_rows_by_name(project, "by_name_table", "v3")
+        finally:
+            write_file(BY_NAME_MODELS_YML, *yml_path)
+
+    def test_restart_fails_when_yml_drops_a_selected_column(self, project):
+        """The yml drops tag, but the SELECT and the table still have it, so the drift check
+        (SELECT vs table) passes, even its columns-only form under 'ignore'. An INSERT naming only
+        the yml columns would fill tag with NULL, so dbt's contract check, which now runs on
+        restart too, fails the model instead."""
+        yml_path = (project.project_root, "models", "models.yml")
+        self._delete_inserts(project)
+        write_file(BY_NAME_MODELS_YML_TAG_DROPPED, *yml_path)
+        try:
+            results = run_dbt(["run", "--select", "by_name_table_ignore"], expect_pass=False)
+            result = get_result_by_name(results, "by_name_table_ignore")
+            assert result is not None, "by_name_table_ignore not found in results"
+            assert result.status.name == "Error", result.message
+            assert "enforced contract that failed" in result.message, result.message
+        finally:
+            write_file(BY_NAME_MODELS_YML, *yml_path)

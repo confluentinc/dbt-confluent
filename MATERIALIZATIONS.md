@@ -219,6 +219,8 @@ where price > 0
 `streaming_table` creates a table, then runs a separate, continuous `INSERT INTO ... SELECT` statement to populate it.
 This two-statement approach was the preferred way to build streaming pipelines before the introduction of [`materialized_table`](#materialized-table).
 
+The table's columns come from the model's yml `columns`. The INSERT names those columns and selects them from the model's SQL by name, so each value lands in the column of the same name, whatever order the SELECT returns its columns in. Before creating the table, and before re-submitting a missing or stopped INSERT, dbt checks that the SELECT returns the yml `columns` by name and data type (dbt's contract check), whether or not the model enforces a contract.
+
 See Confluent's [dynamic tables and continuous queries](https://docs.confluent.io/cloud/current/flink/concepts/dynamic-tables.html)
 concept page for the underlying execution model.
 
@@ -254,7 +256,8 @@ treated as healthy: the adapter does not interrupt it.
 
 ```sql
 CREATE TABLE <relation> [DISTRIBUTED BY (...)] [WITH (...)]     -- DDL, bounded, name suffixed "-ddl"
-INSERT INTO <relation> <model SELECT>                           -- DML, long-running
+INSERT INTO <relation> (<yml columns>)                          -- DML, long-running
+  SELECT <yml columns> FROM (<model SELECT>) AS model_subq
 ```
 
 The DDL completes immediately; the INSERT is a genuinely long-running, continuous statement.
@@ -282,6 +285,19 @@ that populates it). Map your model to each:
 select order_id, price from {{ ref('orders') }}
 ```
 
+The model's yml must also list every column the SELECT returns, with its `data_type` (see Preconditions below). For a model file `orders_enriched_model.sql`:
+
+```yaml
+# models/schema.yml
+models:
+  - name: orders_enriched_model
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: price
+        data_type: decimal(10, 2)
+```
+
 On the next `dbt run` (no `--full-refresh`), the adapter looks up both by name and takes over their lifecycle:
 
 - If the statement is **healthy** (`RUNNING`, an in-flight transition such as `PENDING`, `STOPPING`, or `DELETING`, or `DEGRADED`, i.e. any non-terminal phase), it is adopted as-is: the run skips creation and leaves the statement untouched.
@@ -294,7 +310,8 @@ Adoption is purely name-based: the adapter does not track which tool created a r
 
 - **Schema should match.** Under the default `on_schema_drift='fail'`, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT before adopting; any mismatch fails the run. With `config(on_schema_drift='ignore')`, enforcement depends on the adoption path:
     - **Healthy statement → skip:** the running statement is left untouched and nothing is re-submitted, so **no drift is enforced at all, including columns.** A mismatch is silently tolerated; you must align the model to the existing schema yourself.
-    - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs (a column mismatch would also be rejected by Flink); benign options/distribution drift is relaxed.
+    - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs, and so does dbt's contract check of the SELECT against the yml `columns` (the INSERT names only the yml columns, so Flink would fill any other table column with NULL); benign options/distribution drift is relaxed.
+- **The yml lists every column, with its type.** Before re-submitting a missing or terminal statement, dbt runs its contract check, whatever `on_schema_drift` is set to: the model's yml `columns` must list every column the SELECT returns, with its `data_type`. If any is missing, the restart fails with dbt's contract error, and nothing writes to the table until the yml is fixed. A healthy statement is skipped without the check.
 - **Names are sanitized.** The `statement_name` you configure is normalized to Flink's constraints (see [Flink Naming Constraints](#flink-naming-constraints)) before lookup, so it must match the existing statement's actual name. Statements already named within those constraints (lowercase alphanumeric + hyphens) match verbatim.
 
 ---
@@ -901,7 +918,7 @@ Drift detection also detects when the existing relation is a **materialized tabl
 
 To check a `table` or `streaming_table`, the adapter submits two Flink `sql.dry-run` statements: the model's SELECT, and `SELECT * FROM` the existing table. Flink validates and plans each query and answers with its result schema without running it or storing a statement, so there is nothing to clean up. The adapter compares the two schemas' column types as Flink reports them, with two adjustments for what a table stores. Top-level nullability is ignored, so, for example, a `streaming_table` column declared `not_null` in yml and fed by a nullable source column doesn't drift. And the model's `CHAR` or `VARCHAR` MAP keys and `MULTISET` elements pass if they fit in the table's, ignoring nullability: a `VARCHAR` at least as long, or the same `CHAR`. An Avro or JSON table (the default) stores any string key or element as `VARCHAR(2147483647) NOT NULL`, which every one fits in, while a Protobuf table (`'value.format' = 'proto-registry'`) keeps the declared type. So on a Protobuf table a longer `VARCHAR` key or element, or a different `CHAR` length, is drift, but a shorter `VARCHAR` isn't reported, since the table still holds every value; run with `--full-refresh` to rebuild the table with the new type. Nullability inside an `ARRAY`, `MULTISET`, `MAP` or `ROW` is compared, except at a string MAP key or `MULTISET` element. A column that `SELECT *` doesn't return, such as a `VIRTUAL` metadata column added to the table by hand, isn't compared. Before the dry-runs, the adapter issues one `UNION ALL` query against `INFORMATION_SCHEMA.TABLES` and `TABLE_OPTIONS` for the existing table's WITH options and distribution (adding its distribution columns from `INFORMATION_SCHEMA.COLUMNS` when `distributed_by` is set), so a Flink materialized table, or a table dropped outside dbt, gets its own error before any dry-run is submitted.
 
-**Known limitation.** For a `streaming_table` built from yml `columns`, or a `table` with an enforced contract, the check compares the SELECT's column types with the table's, not with the yml `data_type` values. So a SELECT type that differs from the yml type, such as a `DECIMAL(10, 2)` expression for a `decimal(12,2)` column, reports drift on every re-run even though the INSERT would accept it. dbt's own contract check ignores type parameters, so it doesn't catch this either, and a change to a yml `data_type` alone is never detected. The temp-table check behaved the same way.
+**Known limitation.** For a `streaming_table` built from yml `columns`, or a `table` with an enforced contract, the check compares the SELECT's column types with the table's, not with the yml `data_type` values. So a SELECT type that differs from the yml type, such as a `DECIMAL(10, 2)` expression for a `decimal(12,2)` column, reports drift on every re-run even though the INSERT would accept it. dbt's own contract check ignores type parameters, so it doesn't catch this either, and a change to a yml `data_type` alone isn't detected, except when a `streaming_table`'s INSERT is re-submitted: dbt's contract check then catches it, unless only the type's parameters changed. The temp-table check behaved the same way.
 
 The dry-runs evaluate the SELECTs in the mode the model is built in, whatever the profile's or the model's `execution_mode`: snapshot for `table` (its `CREATE TABLE ... AS SELECT` runs in `snapshot_ddl`), and `streaming_query` for `streaming_table` (its `INSERT` runs as a streaming query). So a `table` whose SELECT only works as a streaming query fails the drift check, just as its `--full-refresh` fails. A dry-run that fails (for example, invalid SQL) fails the run.
 
@@ -933,7 +950,7 @@ select * from {{ ref('source') }}
 ```
 
 #### Column Drift
-- **table, streaming_table**: Compares the existing table's column names and data types with the SELECT query's, both resolved by dry-runs (or, with the temp-table fallback, from `INFORMATION_SCHEMA`). Raises an error if columns are added, removed, renamed, or if data types change. Column reordering is allowed (order doesn't matter for Kafka-backed tables).
+- **table, streaming_table**: Compares the existing table's column names and data types with the SELECT query's, both resolved by dry-runs (or, with the temp-table fallback, from `INFORMATION_SCHEMA`). Raises an error if columns are added, removed, renamed, or if data types change. Column reordering is allowed: a `streaming_table`'s INSERT writes its columns by name (see [Streaming Table](#streaming-table)), and a `table` keeps its existing column order until it's rebuilt.
 - **streaming_source**: Compares existing column names and data types with the column definitions in the model SQL. Raises an error if columns are added, removed, renamed, or if data types change. Uses a temporary table to infer schema from SQL column definitions.
 
 #### Distribution Drift
