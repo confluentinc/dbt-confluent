@@ -3,7 +3,9 @@
 import pytest
 
 from dbt.tests.util import run_dbt
-from tests.functional.adapter._helpers import get_result_by_name
+from tests.functional.adapter._helpers import (
+    get_result_by_name,
+)
 from tests.functional.adapter.fixtures import ConfluentFixtures
 
 SIMPLE_TABLE = """
@@ -31,11 +33,6 @@ class TestTableMaterialization(ConfluentFixtures):
             "simple_table.sql": SIMPLE_TABLE,
             "models.yml": SIMPLE_TABLE_MODELS_YML,
         }
-
-    @pytest.fixture(scope="class", autouse=True)
-    def setup_and_teardown(self, project):
-        yield
-        project.run_sql("drop table if exists simple_table")
 
     def test_ctas_completes_in_snapshot_mode(self, project):
         """Regression for #77: the CTAS statement must run in snapshot mode,
