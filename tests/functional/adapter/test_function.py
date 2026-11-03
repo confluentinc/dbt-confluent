@@ -21,6 +21,7 @@ import pytest
 
 from dbt.adapters.confluent import functions
 from dbt.adapters.confluent.connections import ConfluentConnectionManager
+from dbt.adapters.confluent.function_artifacts import artifact_display_name
 from dbt.tests.util import run_dbt, run_dbt_and_capture, write_file
 from tests.functional.adapter._helpers import (
     get_result_by_name,
@@ -109,6 +110,22 @@ def our_artifacts(project) -> list:
     return [a for a in handle.get_artifacts_api().list() if a.display_name.startswith(stem)]
 
 
+def check_project_name_survives_artifact_naming(project_name: str) -> None:
+    """Fail fast if dbt would truncate `project_name` when naming its artifacts.
+
+    Artifacts are named `<project name>-<digest>`, but a project name too long to leave room for
+    the digest is cut short (see `artifact_display_name`). Everything here that finds a class's
+    artifacts by the project name (`our_artifacts`) would then silently match nothing.
+    """
+    if not artifact_display_name(project_name, "0" * 16).startswith(f"{project_name}-"):
+        pytest.fail(
+            f"Test project name {project_name!r} ({len(project_name)} chars) is too long: dbt "
+            "would truncate it when naming function artifacts. The name is the class's "
+            "isolation prefix plus its NAME, so shorten the class's NAME.",
+            pytrace=False,
+        )
+
+
 class FunctionFixtures(ConfluentFixtures):
     """Flag on by default (override `flags_enabled`).
 
@@ -121,10 +138,9 @@ class FunctionFixtures(ConfluentFixtures):
 
     @pytest.fixture(scope="class")
     def project_config_update(self, project_config_update, relation_namespace):
-        project_config_update = {
-            **project_config_update,
-            "name": f"{relation_namespace}{self.NAME}",
-        }
+        name = f"{relation_namespace}{self.NAME}"
+        check_project_name_survives_artifact_naming(name)
+        project_config_update = {**project_config_update, "name": name}
         if self.flags_enabled:
             return {**project_config_update, "flags": {FLAG: True}}
         return project_config_update
@@ -143,7 +159,7 @@ class TestFunctionRequiresBehaviorFlag(FunctionFixtures):
 
 
 class TestFunctionValidatesMaterializationConfig(FunctionFixtures):
-    NAME = "functionvalidateconfig"
+    NAME = "functionvalidate"
 
     @pytest.fixture(scope="class")
     def functions(self):
@@ -164,7 +180,7 @@ class TestFunctionConfigErrors(FunctionFixtures):
     """Each bad config fails its own node with a readable error, all in one `dbt build`.
     None reaches Flink: validation runs before any `CREATE FUNCTION` is submitted."""
 
-    NAME = "functionconfigerrors"
+    NAME = "functionconfig"
     # function name -> (config overrides, expected error substring)
     CASES = {
         "bad_language": ({"language": "sql"}, "'language' must be one of"),
@@ -206,7 +222,7 @@ class TestFunctionWithNonexistentArtifact(FunctionFixtures):
     then comes from the create. If Flink ever accepted the nonexistent artifact at create time,
     the run would pass and this test would fail, which is worth knowing."""
 
-    NAME = "functionghostartifact"
+    NAME = "functionghost"
 
     @pytest.fixture(scope="class")
     def functions(self):
@@ -365,7 +381,7 @@ class TestFunctionRetryAfterFailedStatement(FunctionFixtures):
     the dbt invocation id, so the retry's statement doesn't collide with the failed one that is
     still hanging around in Flink. Each test builds on the last."""
 
-    NAME = "functionretryafterfail"
+    NAME = "functionretry"
     WRONG_CLASS = "example_udf.tshirt_sizing.no_such_function"
 
     @pytest.fixture(scope="class")
