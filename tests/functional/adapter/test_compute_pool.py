@@ -15,7 +15,7 @@ import pytest
 from confluent_sql.exceptions import StatementNotFoundError
 
 from dbt.tests.util import run_dbt
-from tests.functional.adapter.fixtures import ClassScopedCleanup
+from tests.functional.adapter.fixtures import ConfluentFixtures
 
 DEFAULT_POOL = os.getenv("CONFLUENT_COMPUTE_POOL_ID")
 SECOND_POOL = os.getenv("CONFLUENT_COMPUTE_POOL_ID_2")
@@ -64,9 +64,8 @@ models:
 """
 
 
-class TestPerModelComputePool(ClassScopedCleanup):
+class TestPerModelComputePool(ConfluentFixtures):
     NAME = "computepool"
-    TABLES = ["my_pooled_table", "my_streaming_source"]
 
     @pytest.fixture(scope="class")
     def run_dbt_results(self, project):
