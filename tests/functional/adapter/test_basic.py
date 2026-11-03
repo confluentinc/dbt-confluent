@@ -30,6 +30,7 @@ from dbt.tests.util import (
     run_dbt,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
 
 def check_relations_equal(adapter, relation_names, compare_snapshot_cols=False):
@@ -42,7 +43,7 @@ def check_relations_equal(adapter, relation_names, compare_snapshot_cols=False):
 
     Instead, we fetch rows from each relation separately and compare in Python.
     """
-    relations = [relation_from_name(adapter, name) for name in relation_names]
+    relations = [relation_from_name(adapter, physical_name(name)) for name in relation_names]
     with get_connection(adapter):
         basis, compares = relations[0], relations[1:]
         column_names = [
@@ -78,6 +79,13 @@ def check_relations_equal(adapter, relation_names, compare_snapshot_cols=False):
                 f"Relations {basis} and {relation} are not equal: "
                 f"{len(basis_rows)} vs {len(compare_rows)} rows"
             )
+
+
+def check_physical_relation_types(adapter, relation_to_type):
+    """`check_relation_types` for model names: looks each up under its namespaced name."""
+    check_relation_types(
+        adapter, {physical_name(name): kind for name, kind in relation_to_type.items()}
+    )
 
 
 class TestSingularTestsConfluent(ConfluentFixtures, BaseSingularTests):
@@ -141,7 +149,7 @@ class TestEphemeralConfluent(ConfluentFixtures, BaseEphemeral):
         check_result_nodes_by_name(results, ["view_model", "table_model"])
 
         # base table rowcount
-        relation = relation_from_name(project.adapter, "base")
+        relation = relation_from_name(project.adapter, physical_name("base"))
         result = project.run_sql(f"select count(*) as num_rows from {relation}", fetch="all")
         assert result[0][0] == 10
 
@@ -216,10 +224,10 @@ class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMateriali
             "table_model": "table",
             "swappable": "table",
         }
-        check_relation_types(project.adapter, expected)
+        check_physical_relation_types(project.adapter, expected)
 
         # base table rowcount
-        relation = relation_from_name(project.adapter, "base")
+        relation = relation_from_name(project.adapter, physical_name("base"))
         result = project.run_sql(f"select count(*) as num_rows from {relation}", fetch="all")
         assert result[0][0] == 10
 
@@ -247,7 +255,7 @@ class TestSimpleMaterializationsConfluent(ConfluentFixtures, BaseSimpleMateriali
             "table_model": "table",
             "swappable": "view",
         }
-        check_relation_types(project.adapter, expected)
+        check_physical_relation_types(project.adapter, expected)
 
         # DO NOT TEST INCREMENTAL STRATEGY
         # # run_dbt changing materialized_var to incremental
