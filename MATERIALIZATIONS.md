@@ -508,6 +508,10 @@ CREATE VIEW <relation> AS (<model SELECT>)
 If that `CREATE VIEW` fails, no view is left until the model is fixed and run again. An enforced
 contract is still checked before the drop.
 
+The model's `full_refresh` config has the same effect as the flag. With `full_refresh: true`, set
+on the model or for every model (`+full_refresh: true` under `models:` in `dbt_project.yml`),
+every rerun drops and creates the view again instead of altering it.
+
 If something other than a view exists under the model's name (for example, the model was a
 `table`), it's dropped first and the view created, with or without `--full-refresh`.
 
