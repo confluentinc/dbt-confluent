@@ -4,6 +4,28 @@ All notable changes to this dbt adapter will be documented in this file.
 
 <!-- towncrier release notes start -->
 
+## dbt-confluent 0.5.0 (2026-11-06)
+
+### Breaking Changes
+
+- `streaming_table` now runs dbt's contract check before re-submitting a missing or stopped INSERT, as it already did before `create table`, whatever `on_schema_drift` is set to. A restart now fails with dbt's contract error if the SELECT and the yml `columns` disagree, including an adopted table whose yml lists no `columns`, only some of them, or a column without its `data_type`: list every SELECT column in the yml, with its `data_type`, to fix it. Each restart also makes two more schema queries. ([#184](https://github.com/confluentinc/dbt-confluent/issues/184))
+
+### Features
+
+- **Oauth** is now supported as an authentication mechanism. Add an `auth: oauth` profile config for browser-based interactive Confluent Cloud sign-in instead of any API keys!
+- **Much faster schema drift checks**: The schema drift check for `table` and `streaming_table` models now compares a Flink `sql.dry-run` of the model's SELECT with a dry-run of `SELECT * FROM` the existing table instead of creating and introspecting a temporary table. A re-run no longer creates (and later drops) a `__dbt_tmp_schema_check_<model>` table per model. Column types are compared as Flink reports them, ignoring top-level nullability as before, and letting the model's `CHAR` or `VARCHAR` MAP keys and `MULTISET` elements pass where they fit in the table's column definitions (an Avro or JSON table stores them as `VARCHAR(2147483647) NOT NULL`, as the temporary table did). Nullability inside composite types is compared, except at a string MAP key or `MULTISET` element. The dry-runs evaluate the SELECT in the mode the model is built in (snapshot for `table`, `streaming_query` for `streaming_table`), which changes behavior in three cases: a `table` whose SELECT only works as a streaming query now fails the drift check (its `--full-refresh` already fails); a `table` whose SELECT only works as a snapshot query no longer fails it; and the profile's or model's `execution_mode` no longer affects the drift check for these models. The temporary table remains the fallback for `streaming_source` models and wherever a dry-run can't stand in for it (ex. no result schema, or duplicate column names), and the dry-run path also reclaims a temp table leaked by an earlier run that died hard. See MATERIALIZATIONS.md#schema-drift-detection. ([#118](https://github.com/confluentinc/dbt-confluent/issues/118))
+
+### Bugfixes
+
+- `streaming_table` now inserts its columns by name. Its INSERT names the yml `columns` and selects them from the model's SQL (`INSERT INTO <table> (<columns>) SELECT <columns> FROM (<model SQL>)`). Before, Flink matched the INSERT to the table by position, so when the SELECT returned two columns of the same type in a different order from the yml (or, on a restart, from the existing table), each was written into the other's column without an error. Upgrading: a `streaming_table` whose SELECT listed its columns in a different order from its yml has been writing values into the wrong columns, and its running INSERT keeps doing so after the upgrade, because a run that skips leaves it alone. To fix it, run the model with `--full-refresh`, which drops the table and its data and rebuilds it from the source. Stopping the statement, so that the next run re-submits it, fixes new rows but keeps the rows already written. See MATERIALIZATIONS.md#streaming-table. ([#184](https://github.com/confluentinc/dbt-confluent/issues/184))
+- The schema drift check no longer reports drift on every re-run of a Protobuf (`'value.format' = 'proto-registry'`) `streaming_table` with a `CHAR` or `VARCHAR` MAP key or `MULTISET` element. At those positions, the model's type now passes if it fits in the table's definition (a `VARCHAR` at least as long, or the same `CHAR`), ignoring nullability. A longer `VARCHAR` key or element, or a different `CHAR` length, is still reported but a shorter `VARCHAR` isn't. See MATERIALIZATIONS.md#schema-drift-detection. ([#185](https://github.com/confluentinc/dbt-confluent/issues/185))
+- `dbt docs generate` now only reads catalog metadata for the project's own relations, in small retried chunks, instead of querying the whole environment's `INFORMATION_SCHEMA`, which often timed out.
+
+### Misc
+
+- The schema drift check now reads only what it needs from `INFORMATION_SCHEMA`: `table` and `streaming_table` models no longer read the existing table's columns (only its distribution columns, when `distributed_by` is set), and a model that falls back to the temporary table no longer reads `TABLES` and `TABLE_OPTIONS` twice. If `INFORMATION_SCHEMA.TABLES` doesn't have the existing table yet, the check now fails with a retriable error rather than reporting drift. ([#189](https://github.com/confluentinc/dbt-confluent/issues/189))
+
+
 ## dbt-confluent 0.4.1 (2026-10-26)
 
 ### Bugfixes
