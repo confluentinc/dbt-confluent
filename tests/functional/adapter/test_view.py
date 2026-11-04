@@ -46,6 +46,24 @@ CHILD_VIEW = """
 select id, rev from {{ ref('base_view') }}
 """
 
+# ALTER VIEW doesn't check the new columns against the old: this drops `rev` and retypes `id`.
+RESHAPED_VIEW = """
+{{ config(materialized='view', full_refresh=false) }}
+select cast('1' as string) as id
+"""
+
+# Drops `rev`, which CHILD_VIEW selects.
+COLUMN_REMOVED_VIEW = """
+{{ config(materialized='view', full_refresh=false) }}
+select cast(1 as int) as id
+"""
+
+# CHILD_VIEW without the column COLUMN_REMOVED_VIEW dropped.
+FIXED_CHILD_VIEW = """
+{{ config(materialized='view', full_refresh=false) }}
+select id from {{ ref('base_view') }}
+"""
+
 # Renames `rev`, so it no longer matches the contract's columns.
 DRIFTED_CONTRACT_VIEW = """
 {{ config(materialized='view', full_refresh=false) }}
@@ -159,6 +177,27 @@ class TestViewAlterPath(ViewFixtures):
         assert "missing_col" in results[0].message
         assert self.read(project, "base_view", "id, rev") == [(1, "v1")]
         assert self.read(project, "child_view", "id, rev") == [(1, "v1")]
+
+    def test_removed_and_retyped_columns_are_accepted(self, project):
+        run_dbt(["run", "--select", "base_view"])
+        write_file(RESHAPED_VIEW, project.project_root, "models", "base_view.sql")
+        run_dbt(["run", "--select", "base_view"])
+        assert self.read(project, "base_view", "id") == [("1",)]
+        with pytest.raises(Exception, match="rev"):
+            self.read(project, "base_view", "rev")
+
+    def test_downstream_view_fails_until_rebuilt(self, project):
+        """Flink accepts the ALTER even though `child_view` selects the column it drops. The child
+        isn't rebuilt, so it fails when queried, until its own SQL is fixed and it is rerun."""
+        run_dbt(["run"])
+        write_file(COLUMN_REMOVED_VIEW, project.project_root, "models", "base_view.sql")
+        run_dbt(["run", "--select", "base_view"])
+        with pytest.raises(Exception, match="rev"):
+            self.read(project, "child_view", "id, rev")
+
+        write_file(FIXED_CHILD_VIEW, project.project_root, "models", "child_view.sql")
+        run_dbt(["run", "--select", "child_view"])
+        assert self.read(project, "child_view", "id") == [(1,)]
 
 
 class TestViewContract(ViewFixtures):
