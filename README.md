@@ -62,9 +62,16 @@ You have several options for configuring your credentials:
 
 ### Organization ID
 
-`organization_id` may be omitted with `auth: oauth` or a Global API key, as long as your account belongs to only one organization. If it belongs to several, the connection fails rather than guess, and you must set `organization_id`. It is always required with a Flink-region API key, which cannot discover it.
+`organization_id` may be omitted with `auth: oauth` or a Global API key:
+
+- With a Global API key, it is inferred as long as the key can see only one organization. If it can see several, the connection fails rather than guess, and you must set `organization_id`.
+- With `auth: oauth`, Confluent Cloud uses your login's default organization. Set `organization_id` if you belong to several organizations and want a different one.
+
+It is always required with a Flink-region API key, which cannot discover it.
 
 If you do set it with either of those, the driver verifies that you are in that organization.
+
+These defaulting rules will be simplified in a future release, so that an omitted `organization_id` behaves the same way for both: it will be accepted only if you belong to exactly one organization, and otherwise be an error. If you belong to several organizations, setting `organization_id` explicitly now keeps your profile working unchanged.
 
 ### Concept mapping
 

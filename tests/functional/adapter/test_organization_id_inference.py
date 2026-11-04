@@ -8,6 +8,12 @@ rather than via a dbt project: all that is under test is what the driver makes o
 The OAuth tests open a browser, so they need `RUN_OAUTH_TESTS` set (see `skip_unless_oauth_tests_enabled`).
 The driver shares one OAuth login per process and refuses a later connection that names a
 different organization, so these tests reset it with `oauth_discard_login()` to isolate cases.
+
+Inference only works out to the test organization for an account that has just that one: a
+Global key that sees several organizations makes the driver refuse to guess, and an OAuth login
+uses the user's default organization, which may not be the test one. The tests that omit
+`organization_id` therefore skip, rather than fail, in either case (see
+`skip_unless_organization_inferred`). The tests that supply one are unaffected.
 """
 
 import os
@@ -35,6 +41,10 @@ requires_global_key_and_org = pytest.mark.skipif(
 )
 requires_org = pytest.mark.skipif(not ORG_ID, reason="Needs CONFLUENT_ORG_ID")
 
+# The driver's refusal to infer an organization when its credential sees several. It raises a
+# plain OperationalError, so the message text is all there is to match on.
+MULTIPLE_ORGANIZATIONS_ERROR = "Multiple organizations"
+
 
 def open_connection(**profile):
     """Open a real driver connection for a profile pointed at the test environment, with
@@ -51,6 +61,34 @@ def open_connection(**profile):
     )
     connection = Connection(type="confluent", name="org_id_test", credentials=credentials)
     return ConfluentConnectionManager.open(connection)
+
+
+def inferred_organization_id(handle) -> str:
+    """`handle.organization_id`, skipping the test if the account belongs to several
+    organizations. Opening the connection doesn't raise that: a global key's omitted organization
+    is only inferred on first access of this property."""
+    try:
+        return handle.organization_id
+    except OperationalError as e:
+        if MULTIPLE_ORGANIZATIONS_ERROR in str(e):
+            pytest.skip(f"Account belongs to several organizations, so none can be inferred: {e}")
+        raise
+
+
+def skip_unless_organization_inferred(**profile) -> None:
+    """Skip the calling fixture's tests unless `profile`, with no `organization_id`, infers the
+    test organization (`CONFLUENT_ORG_ID`): not for a Global key that sees several organizations
+    (skipped by `inferred_organization_id`), and not for an OAuth login whose default organization is a
+    different one. For the dbt-run classes, where either would otherwise surface from deep inside
+    the `project` fixture's setup rather than from a test body. The connection is closed straight
+    away."""
+    handle = open_connection(**profile).handle
+    try:
+        inferred = inferred_organization_id(handle)
+    finally:
+        handle.close()
+    if inferred != ORG_ID:
+        pytest.skip(f"Inferred organization {inferred} is not the test organization {ORG_ID}")
 
 
 @pytest.fixture
@@ -112,8 +150,21 @@ class TestGlobalKey:
     def test_omitted_organization_id_is_inferred(self, opened, statement_name):
         connection = opened(**GLOBAL_KEY_PROFILE)
 
-        assert connection.handle.organization_id == ORG_ID
+        assert inferred_organization_id(connection.handle) == ORG_ID
         assert_can_query(connection.handle, statement_name)
+
+    def test_omitted_organization_id_is_rejected_when_ambiguous(self, opened):
+        """The counterpart of the test above, for an account in several organizations: the
+        driver refuses to guess. Skips for a single-organization account, where there is
+        nothing ambiguous to reject, so each kind of account runs one of the pair."""
+        connection = opened(**GLOBAL_KEY_PROFILE)
+
+        try:
+            _ = connection.handle.organization_id
+        except OperationalError as e:
+            assert MULTIPLE_ORGANIZATIONS_ERROR in str(e)
+        else:
+            pytest.skip("Account belongs to a single organization, so there is nothing ambiguous")
 
     def test_supplied_organization_id_is_used(self, opened, statement_name):
         connection = opened(**GLOBAL_KEY_PROFILE, organization_id=ORG_ID)
@@ -156,6 +207,7 @@ class TestGlobalKeyDbtRunWithoutOrganizationId(_DbtRunWithoutOrganizationId):
     def dbt_profile_target(self, dbt_profile_target):
         target = {k: v for k, v in dbt_profile_target.items() if k != "organization_id"}
         assert "global_api_key" in target, "needs the Global key pair, not the Flink one"
+        skip_unless_organization_inferred(**GLOBAL_KEY_PROFILE)
         return target
 
 
@@ -174,6 +226,7 @@ class TestOAuthDbtRunWithoutOrganizationId(_DbtRunWithoutOrganizationId):
         target = {k: v for k, v in dbt_profile_target.items() if k not in keys}
         target.pop("flink_api_key", None)
         target.pop("flink_api_secret", None)
+        skip_unless_organization_inferred(auth="oauth")
         return {**target, "auth": "oauth"}
 
 
@@ -191,6 +244,10 @@ class TestOAuth:
     def test_omitted_organization_id_is_inferred(self, opened):
         connection = opened(auth="oauth")
 
+        # Omitted, the login's default organization is used, which for a user in several
+        # organizations needn't be the test one.
+        if connection.handle.organization_id != ORG_ID:
+            pytest.skip("The login's default organization is not the test organization")
         assert connection.handle.organization_id == ORG_ID
 
     def test_matching_organization_id_is_accepted(self, opened):
