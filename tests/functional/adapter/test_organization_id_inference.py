@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import pytest
 from confluent_sql import oauth_discard_login
-from confluent_sql.exceptions import InterfaceError, OperationalError
+from confluent_sql.exceptions import InterfaceError, OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.adapters.confluent.connections import ConfluentConnectionManager, ConfluentCredentials
@@ -23,6 +23,7 @@ from dbt.adapters.contracts.connection import Connection
 from dbt.tests.util import run_dbt
 from tests.functional.adapter._helpers import get_result_by_name
 from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import class_hash_for, statement_prefix
 
 GLOBAL_KEY = os.getenv("CONFLUENT_GLOBAL_API_KEY")
 GLOBAL_SECRET = os.getenv("CONFLUENT_GLOBAL_API_SECRET")
@@ -80,13 +81,27 @@ def clean_oauth_login(skip_unless_oauth_tests_enabled):
     oauth_discard_login()
 
 
-def assert_can_query(handle) -> None:
+@pytest.fixture
+def statement_name(request) -> str:
+    """A statement name in this test class's isolation namespace, so a statement leaked by a
+    killed run is swept as stale by a later session like any other test statement."""
+    class_hash = class_hash_for(request.module.__name__, request.cls.__name__)
+    return f"{statement_prefix(class_hash=class_hash)}{uuid4()}"
+
+
+def assert_can_query(handle, statement_name: str) -> None:
     """Run a statement over `handle`. The Flink base URL embeds the organization id, so this
-    proves the inferred id is actually usable and not just reported. The `dbt-test-` name
-    prefix gets any leftover statement swept by the functional suite's cleanup."""
+    proves the inferred id is actually usable and not just reported. The statement is deleted
+    afterwards; the namespaced name is the backstop if the run dies before that."""
     cursor = handle.cursor(mode=ExecutionMode.SNAPSHOT)
-    cursor.execute("SELECT 1", statement_name=f"dbt-test-org-id-{uuid4()}")
-    assert [tuple(row) for row in cursor.fetchall()] == [(1,)]
+    try:
+        cursor.execute("SELECT 1", statement_name=statement_name)
+        assert [tuple(row) for row in cursor.fetchall()] == [(1,)]
+    finally:
+        try:
+            handle.delete_statement(statement_name)
+        except StatementNotFoundError:
+            pass  # never created, or already gone
 
 
 GLOBAL_KEY_PROFILE = {"global_api_key": GLOBAL_KEY, "global_api_secret": GLOBAL_SECRET}
@@ -94,17 +109,17 @@ GLOBAL_KEY_PROFILE = {"global_api_key": GLOBAL_KEY, "global_api_secret": GLOBAL_
 
 @requires_global_key_and_org
 class TestGlobalKey:
-    def test_omitted_organization_id_is_inferred(self, opened):
+    def test_omitted_organization_id_is_inferred(self, opened, statement_name):
         connection = opened(**GLOBAL_KEY_PROFILE)
 
         assert connection.handle.organization_id == ORG_ID
-        assert_can_query(connection.handle)
+        assert_can_query(connection.handle, statement_name)
 
-    def test_supplied_organization_id_is_used(self, opened):
+    def test_supplied_organization_id_is_used(self, opened, statement_name):
         connection = opened(**GLOBAL_KEY_PROFILE, organization_id=ORG_ID)
 
         assert connection.handle.organization_id == ORG_ID
-        assert_can_query(connection.handle)
+        assert_can_query(connection.handle, statement_name)
 
 
 class _DbtRunWithoutOrganizationId(ConfluentFixtures):

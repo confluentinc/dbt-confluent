@@ -99,8 +99,18 @@ class ConfluentCredentials(Credentials):
         if self.endpoint:
             return self.endpoint
         else:
-            base = f"{self.cloud_provider}-{self.cloud_region}"
-            return f"{base}-{self.organization_id}" if self.organization_id else base
+            # organization_id is optional (oauth / a Global key can infer it), and inferring it
+            # needs the network (or a browser login), which is no business of a telemetry hash
+            # computed before any connection exists. So when it is omitted, fall back to the
+            # environment id, so unrelated users in one region don't share an identity.
+            #
+            # The environment id is stored in `self.database`: dbt's "database" level is a
+            # Confluent Cloud environment here, and the profile key `environment_id` is an
+            # alias for it (see `_ALIASES`; open() passes it to the driver as `environment_id`).
+            # It is always present, and globally unique.
+            environment_id = self.database
+            account = self.organization_id or environment_id
+            return f"{self.cloud_provider}-{self.cloud_region}-{account}"
 
     def _connection_keys(self):
         """

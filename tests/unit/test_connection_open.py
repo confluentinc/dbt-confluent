@@ -111,8 +111,13 @@ class TestCredentialsOrganizationId:
         assert credentials.organization_id is None
         assert credentials.auth == "api_key"
 
-    def test_unique_field_without_organization_id(self):
-        assert self.credentials().unique_field == "aws-us-west-1"
+    def test_unique_field_without_organization_id_uses_environment_id(self):
+        assert self.credentials().unique_field == "aws-us-west-1-env-xyz"
+
+    def test_unique_field_differs_per_environment_without_organization_id(self):
+        other = self.credentials(environment_id="env-other")
+
+        assert other.unique_field != self.credentials().unique_field
 
     def test_unique_field_with_organization_id(self):
         assert self.credentials(organization_id="org-123").unique_field == "aws-us-west-1-org-123"
