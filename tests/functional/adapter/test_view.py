@@ -48,7 +48,8 @@ DRIFTED_CONTRACT_VIEW = """
 select cast(1 as int) as id, cast('v1' as string) as rev2
 """
 
-# No `full_refresh=false`, so it keeps ConfluentFixtures' `+full_refresh: True`.
+# No `full_refresh` config, and its test class drops ConfluentFixtures' `+full_refresh: True`, so
+# only the --full-refresh flag can send it down the drop path.
 REFRESHED_VIEW = """
 {{ config(materialized='view') }}
 select cast(1 as int) as id, cast('v1' as string) as rev
@@ -131,11 +132,24 @@ class TestContractFailureKeepsView(ViewFixtures):
 
 class TestFullRefreshRecreatesView(ViewFixtures):
     @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        """ConfluentFixtures' project config without `+full_refresh: True`, so the --full-refresh
+        flag alone decides between ALTER and drop-and-create."""
+        return {
+            "tests": {"+schema": unique_schema},
+            "models": {"+schema": unique_schema},
+            "seeds": {"+schema": unique_schema},
+        }
+
+    @pytest.fixture(scope="class")
     def models(self):
         return {"refreshed_view.sql": REFRESHED_VIEW}
 
     def test_full_refresh_drops_and_creates(self, project):
         run_dbt(["run"])
+        _, logs = run_dbt_and_capture(["--debug", "run"])
+        assert "alter view" in logs.lower()
+        assert "drop view" not in logs.lower()
         _, logs = run_dbt_and_capture(["--debug", "run", "--full-refresh"])
         assert "drop view if exists" in logs.lower()
         assert "create view" in logs.lower()
