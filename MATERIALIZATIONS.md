@@ -481,20 +481,45 @@ Setting any of dbt-confluent's other config keys on a `view` model fails at comp
 
 #### View: Statements Emitted
 
-On a rerun, `view` submits two statements. On a first run, there is no existing view to drop, so
-only `CREATE VIEW` is submitted. Unlike every other materialization on this page, there is no
-diffing and no skip-if-unchanged path here:
+On a first run, `view` creates the view:
+
+```sql
+CREATE VIEW <relation> AS (<model SELECT>)
+```
+
+On a rerun, it updates the existing view in place, since Flink has no `CREATE OR REPLACE VIEW`:
+
+```sql
+ALTER VIEW <relation> AS (<model SELECT>)
+```
+
+If the server rejects the new SQL, or the model's enforced contract no longer matches, the run
+fails and the existing view is left as it was. Unlike every other materialization on this page,
+there is no diffing and no skip-if-unchanged path: every run submits the statement. A downstream
+view that uses a column the new SQL removes fails when queried, until it's rebuilt.
+
+With `--full-refresh`, an existing view is dropped and created again instead:
 
 ```sql
 DROP VIEW IF EXISTS <relation>
 CREATE VIEW <relation> AS (<model SELECT>)
 ```
 
-Both are short-lived, completing statements, not long-running jobs.
-See the [`CREATE VIEW`](https://docs.confluent.io/cloud/current/flink/reference/statements/create-view.html)
+If that `CREATE VIEW` fails, no view is left until the model is fixed and run again. An enforced
+contract is still checked before the drop.
+
+The model's `full_refresh` config has the same effect as the flag. With `full_refresh: true`, set
+on the model or for every model (`+full_refresh: true` under `models:` in `dbt_project.yml`),
+every rerun drops and creates the view again instead of altering it.
+
+If something other than a view exists under the model's name (for example, the model was a
+`table`), it's dropped first and the view created, with or without `--full-refresh`.
+
+These are short-lived, completing statements, not long-running jobs.
+See the [`CREATE VIEW`](https://docs.confluent.io/cloud/current/flink/reference/statements/create-view.html),
+[`ALTER VIEW`](https://docs.confluent.io/cloud/current/flink/reference/statements/alter-view.html)
 and [`DROP VIEW`](https://docs.confluent.io/cloud/current/flink/reference/statements/drop-view.html)
 references.
-`--full-refresh` behaves identically to a plain run, since a plain run already drops and recreates.
 
 ---
 
