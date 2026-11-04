@@ -55,7 +55,11 @@ class ConfluentCredentials(Credentials):
     """
 
     # Add credentials members here, like:
-    organization_id: str
+    # Optional under `auth: oauth` or with a Global API key pair, where the driver infers it
+    # (and, if supplied, verifies the user really is in that organization). Required with a
+    # Flink-region key, which can't discover it: the driver raises InterfaceError in that case.
+    # An empty string (what `dbt init` writes for a blank prompt) means omitted.
+    organization_id: str | None = None
     # Authentication mode passed straight through to confluent_sql.connect()'s own `auth`
     # parameter. "api_key" (default) uses the key pairs below; "oauth" opens a browser for
     # interactive Confluent Cloud sign-in instead, and no key pair should be configured.
@@ -95,7 +99,18 @@ class ConfluentCredentials(Credentials):
         if self.endpoint:
             return self.endpoint
         else:
-            return f"{self.cloud_provider}-{self.cloud_region}-{self.organization_id}"
+            # organization_id is optional (oauth / a Global key can infer it), and inferring it
+            # needs the network (or a browser login), which is no business of a telemetry hash
+            # computed before any connection exists. So when it is omitted, fall back to the
+            # environment id, so unrelated users in one region don't share an identity.
+            #
+            # The environment id is stored in `self.database`: dbt's "database" level is a
+            # Confluent Cloud environment here, and the profile key `environment_id` is an
+            # alias for it (see `_ALIASES`; open() passes it to the driver as `environment_id`).
+            # It is always present, and globally unique.
+            environment_id = self.database
+            account = self.organization_id or environment_id
+            return f"{self.cloud_provider}-{self.cloud_region}-{account}"
 
     def _connection_keys(self):
         """
@@ -553,7 +568,9 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 flink_api_secret=credentials.flink_api_secret,
                 environment_id=credentials.database,
                 compute_pool_id=credentials.compute_pool_id,
-                organization_id=credentials.organization_id,
+                # "" = omitted: the driver infers it (oauth / global key), or rejects it (Flink
+                # key). A supplied value makes the driver verify the user is in that org.
+                organization_id=credentials.organization_id or "",
                 cloud_provider=credentials.cloud_provider,
                 cloud_region=credentials.cloud_region,
                 endpoint=credentials.endpoint,

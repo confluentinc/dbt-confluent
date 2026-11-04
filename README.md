@@ -60,6 +60,19 @@ You have several options for configuring your credentials:
 
 `dbt init` will prompt you for a choice and ensure your profile is configured correctly.
 
+### Organization ID
+
+`organization_id` may be omitted with `auth: oauth` or a Global API key:
+
+- With a Global API key, it is inferred as long as the key can see only one organization. If it can see several, the connection fails rather than guess, and you must set `organization_id`.
+- With `auth: oauth`, Confluent Cloud uses your login's default organization. Set `organization_id` if you belong to several organizations and want a different one.
+
+It is always required with a Flink-region API key, which cannot discover it.
+
+If you do set it with either of those, the driver verifies that you are in that organization.
+
+These defaulting rules will be simplified in a future release, so that an omitted `organization_id` behaves the same way for both: it will be accepted only if you belong to exactly one organization, and otherwise be an error. If you belong to several organizations, setting `organization_id` explicitly now keeps your profile working unchanged.
+
 ### Concept mapping
 
 Confluent Cloud Flink uses different terminology than traditional databases. Here's how dbt concepts map to Flink and Confluent Cloud:
@@ -199,6 +212,10 @@ export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 # MATERIALIZATIONS.md#tableflow), and they are skipped if either of these is unset.
 export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
+
+# Optional: also run the tests that use `auth: oauth`. They open a browser for an interactive
+# Confluent Cloud sign-in, so they are skipped unless this is set.
+export RUN_OAUTH_TESTS=1
 ```
 
 ```bash
