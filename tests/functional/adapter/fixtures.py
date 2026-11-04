@@ -6,12 +6,12 @@ from tests.functional.adapter.isolation import TestIsolation
 
 
 class ConfluentFixtures(TestIsolation):
+    # Unprefixed by default, set by tests covering resource_name_prefix isolation.
+    RESOURCE_NAME_PREFIX = ""
+
     @pytest.fixture(scope="class")
     def macros(self, alias_macros: dict[str, str]) -> dict[str, str]:
         return alias_macros
-
-    # Unprefixed by default, set by tests covering resource_name_prefix isolation.
-    RESOURCE_NAME_PREFIX = ""
 
     @pytest.fixture(scope="class")
     def dbt_profile_data(

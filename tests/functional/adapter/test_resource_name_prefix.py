@@ -4,16 +4,13 @@ in tests/unit/test_name_prefix_matrix.py."""
 import pytest
 
 from dbt.tests.util import run_dbt
-from tests.functional.adapter._helpers import delete_statements_by_label
 from tests.functional.adapter.fixtures import ConfluentFixtures
+from tests.functional.adapter.isolation import physical_name
 
-# Starts like the suite's statement_name_prefix, so sweep_stale_test_statements
-# still finds leaked statements.
+# Statement names start with this prefix, so the sweep's name-prefix match misses them;
+# it still deletes them by the class's statement_label.
 PREFIX = "dbt-adapter-test-ns-"
 TOPIC_PREFIX = PREFIX.replace("-", "_")
-
-# Model names are unique to this file: the suite shares one cluster, and other
-# tests create the same models unprefixed.
 
 SOURCE_SQL = """
 {{ config(
@@ -70,8 +67,6 @@ select * from {{ ref('prefix_test_ephemeral') }}
 class TestResourceNamePrefix(ConfluentFixtures):
     NAME = "prefix"
     RESOURCE_NAME_PREFIX = PREFIX
-    TABLES = ["prefix_test_table", "prefix_test_source"]
-    VIEWS = ["prefix_test_view"]
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
@@ -83,28 +78,6 @@ class TestResourceNamePrefix(ConfluentFixtures):
             "models.yml": MODELS_YML,
         }
 
-    @pytest.fixture(autouse=True)
-    def clean_up(self, project, dbt_profile_data):
-        # Suppress the per-test statement cleanup; class_clean_up handles teardown.
-        yield
-
-    def _drop_relations(self, project):
-        # Unprefixed names too: a leftover from an earlier run would fail the
-        # "bare name does not exist" check, so it must be gone before dbt runs.
-        for prefix in (TOPIC_PREFIX, ""):
-            for name in self.VIEWS:
-                project.run_sql(f"drop view if exists `{prefix}{name}`")
-            for name in self.TABLES:
-                project.run_sql(f"drop table if exists `{prefix}{name}`")
-
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        self._drop_relations(project)
-        yield
-        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-        delete_statements_by_label(project, label)
-        self._drop_relations(project)
-
     @pytest.fixture(scope="class")
     def run_dbt_results(self, project):
         return run_dbt(["run"])
@@ -115,7 +88,7 @@ class TestResourceNamePrefix(ConfluentFixtures):
 
     def test_all_models_succeed(self, run_dbt_results):
         # Includes prefix_test_view, whose SQL inlines the ephemeral CTE
-        # __dbt__cte__dbt_adapter_test_ns_prefix_test_ephemeral
+        # __dbt__cte__<class namespace>dbt_adapter_test_ns_prefix_test_ephemeral
         assert {r.node.name: r.status.name for r in run_dbt_results} == {
             "prefix_test_source": "Success",
             "prefix_test_table": "Success",
@@ -124,11 +97,14 @@ class TestResourceNamePrefix(ConfluentFixtures):
 
     @pytest.mark.parametrize("model", ["prefix_test_source", "prefix_test_table"])
     def test_topic_names_use_underscore_prefix(self, project, run_dbt_results, model):
-        assert self._get_relation(project, f"{TOPIC_PREFIX}{model}") is not None
-        assert self._get_relation(project, model) is None
+        assert self._get_relation(project, physical_name(f"{TOPIC_PREFIX}{model}")) is not None
+        assert self._get_relation(project, physical_name(model)) is None
 
     def test_view_name_uses_underscore_prefix(self, project, run_dbt_results):
-        assert self._get_relation(project, f"{TOPIC_PREFIX}prefix_test_view") is not None
+        assert (
+            self._get_relation(project, physical_name(f"{TOPIC_PREFIX}prefix_test_view"))
+            is not None
+        )
 
     def test_statement_name_uses_hyphen_prefix(self, project, run_dbt_results):
         """The streaming_table INSERT keeps running, so its statement still exists."""
