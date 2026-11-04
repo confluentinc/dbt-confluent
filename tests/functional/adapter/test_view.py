@@ -59,6 +59,12 @@ REFRESHED_VIEW = """
 select cast(1 as int) as id, cast('v1' as string) as rev
 """
 
+# `full_refresh=true` on the model itself: every rerun drops and creates, with no flag.
+FORCED_REFRESH_VIEW = """
+{{ config(materialized='view', full_refresh=true) }}
+select cast(1 as int) as id, cast('v1' as string) as rev
+"""
+
 # Same columns and types as CONTRACT_YML declares, different values.
 MATCHING_CONTRACT_VIEW_V2 = """
 {{ config(materialized='view', full_refresh=false) }}
@@ -184,7 +190,8 @@ class TestViewContract(ViewFixtures):
 
 class TestViewFullRefresh(ViewFixtures):
     """--full-refresh drops and creates a view instead of altering it, and still checks an
-    enforced contract before the drop."""
+    enforced contract before the drop. A model's own `full_refresh` config takes precedence over
+    the flag, in both directions."""
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -201,6 +208,8 @@ class TestViewFullRefresh(ViewFixtures):
         return {
             "refreshed_view.sql": REFRESHED_VIEW,
             "contract_view.sql": REFRESHED_VIEW,
+            "forced_view.sql": FORCED_REFRESH_VIEW,
+            "pinned_view.sql": BASE_VIEW,  # `full_refresh=false`
             "schema.yml": CONTRACT_YML,
         }
 
@@ -228,6 +237,23 @@ class TestViewFullRefresh(ViewFixtures):
         assert "contract" in results[0].message.lower()
         assert "drop view" not in logs.lower()
         assert self.read(project, "contract_view", "id, rev") == [(1, "v1")]
+
+    def test_model_full_refresh_true_recreates_without_the_flag(self, project):
+        run_dbt(["run", "--select", "forced_view"])
+        _, logs = run_dbt_and_capture(["--debug", "run", "--select", "forced_view"])
+        assert "drop view if exists" in logs.lower()
+        assert "create view" in logs.lower()
+        assert "alter view" not in logs.lower()
+        assert self.read(project, "forced_view", "id, rev") == [(1, "v1")]
+
+    def test_model_full_refresh_false_beats_the_flag(self, project):
+        run_dbt(["run", "--select", "pinned_view"])
+        _, logs = run_dbt_and_capture(
+            ["--debug", "run", "--select", "pinned_view", "--full-refresh"]
+        )
+        assert "alter view" in logs.lower()
+        assert "drop view" not in logs.lower()
+        assert self.read(project, "pinned_view", "id, rev") == [(1, "v1")]
 
 
 class TestTableToViewSwitch(ViewFixtures):
