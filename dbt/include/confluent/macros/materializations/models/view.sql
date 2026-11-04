@@ -30,7 +30,10 @@
     {% do get_assert_columns_equivalent(sql) %}
   {% endif %}
 
-  -- delete the existing statement: the new one reuses its deterministic name.
+  -- delete the existing statement: the new one reuses its deterministic name,
+  -- so it has to be freed first. This happens before the ALTER, so if the ALTER
+  -- is rejected the old CREATE VIEW statement record is gone but the view itself
+  -- is untouched and keeps serving. Only the record is lost, which is harmless.
   -- If there's no existing relation, the statement probably doesn't exist either,
   -- so suppress the loud warning the adapter emits for a pool-scoped 403.
   {{ delete_statement_if_exists(get_statement_name(), expect_exists=(existing_relation is not none)) }}
