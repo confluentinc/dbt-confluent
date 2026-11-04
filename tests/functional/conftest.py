@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from tests.functional.adapter.isolation import record_failure
@@ -27,3 +29,12 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     print how to use it with every failure."""
     report = (yield).get_result()
     record_failure(item, report)
+
+
+@pytest.fixture(scope="session")
+def skip_unless_oauth_tests_enabled() -> None:
+    """Gate for tests that need an `auth: oauth` login, which opens a browser and wants a human
+    to sign in: skipped unless `RUN_OAUTH_TESTS` is set. Request this (directly, or from a
+    fixture that must not run before the gate) in every OAuth test."""
+    if not os.getenv("RUN_OAUTH_TESTS"):
+        pytest.skip("OAuth tests open a browser to sign in; set RUN_OAUTH_TESTS=1 to run them")

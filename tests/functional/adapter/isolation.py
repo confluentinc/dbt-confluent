@@ -98,6 +98,12 @@ def statement_prefix(*, class_hash: str, session_tag: str = SESSION_TAG) -> str:
     return STATEMENT_PREFIX_TEMPLATE.format(class_hash=class_hash, session_tag=session_tag)
 
 
+def class_hash_for(module_name: str, class_name: str) -> str:
+    """Stable hash (`CLASS_HASH_LENGTH` hex digits) of a test class's module and class name
+    (`hash()` is salted per process, and xdist workers must agree)."""
+    return hashlib.sha1(f"{module_name}.{class_name}".encode()).hexdigest()[:CLASS_HASH_LENGTH]
+
+
 def _prefix_pattern(template: str) -> re.Pattern:
     """A regex matching any rendering of `template`, with the session tag in group `session`."""
     placeholders = {
@@ -132,8 +138,7 @@ class TestIsolation:
     def class_hash(self, request: pytest.FixtureRequest) -> str:
         """Stable hash (`CLASS_HASH_LENGTH` hex digits) of the test class's module and class
         name (`hash()` is salted per process, and xdist workers must agree)."""
-        qualified_name = f"{request.module.__name__}.{request.cls.__name__}"
-        return hashlib.sha1(qualified_name.encode()).hexdigest()[:CLASS_HASH_LENGTH]
+        return class_hash_for(request.module.__name__, request.cls.__name__)
 
     @pytest.fixture(scope="class")
     def relation_namespace(self, class_hash: str):
