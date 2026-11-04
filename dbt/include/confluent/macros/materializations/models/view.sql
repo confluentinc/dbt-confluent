@@ -34,9 +34,11 @@
   -- so it has to be freed first. This happens before the ALTER, so if the ALTER
   -- is rejected the old CREATE VIEW statement record is gone but the view itself
   -- is untouched and keeps serving. Only the record is lost, which is harmless.
-  -- If there's no existing relation, the statement probably doesn't exist either,
-  -- so suppress the loud warning the adapter emits for a pool-scoped 403.
-  {{ delete_statement_if_exists(get_statement_name(), expect_exists=(existing_relation is not none)) }}
+  -- If there's no existing view (nothing there, or a table that a `view` model is
+  -- replacing), this model's statement probably doesn't exist either, so suppress
+  -- the loud warning the adapter emits for a pool-scoped 403.
+  {{ delete_statement_if_exists(get_statement_name(),
+                                expect_exists=(existing_relation is not none and existing_relation.is_view)) }}
   {% if not alter_existing_view %}
     {{ drop_relation_if_exists(existing_relation) }}
   {% endif %}

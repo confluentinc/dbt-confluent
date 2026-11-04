@@ -5,8 +5,12 @@ Flink has no `CREATE OR REPLACE VIEW`, so an existing view is updated in place w
 that no longer matches, leaves the previous view serving instead of dropping it first.
 """
 
+from functools import wraps
+from unittest.mock import patch
+
 import pytest
 
+from dbt.adapters.confluent.impl import ConfluentAdapter
 from dbt.tests.util import (
     check_relation_types,
     relation_from_name,
@@ -53,6 +57,17 @@ select cast(1 as int) as id, cast('v1' as string) as rev2
 REFRESHED_VIEW = """
 {{ config(materialized='view') }}
 select cast(1 as int) as id, cast('v1' as string) as rev
+"""
+
+# The same model name as a table, then as a view.
+SWITCHING_TABLE = """
+{{ config(materialized='table', full_refresh=false) }}
+select cast(1 as int) as id, cast('a' as string) as name
+"""
+
+SWITCHING_VIEW = """
+{{ config(materialized='view', full_refresh=false) }}
+select cast(1 as int) as id, cast('a' as string) as name
 """
 
 CONTRACT_YML = """
@@ -155,3 +170,44 @@ class TestFullRefreshRecreatesView(ViewFixtures):
         assert "create view" in logs.lower()
         assert "alter view" not in logs.lower()
         assert self.read(project, "refreshed_view", "id, rev") == [(1, "v1")]
+
+
+class TestTableToViewSwitch(ViewFixtures):
+    """A model switching from `table` to `view` without --full-refresh drops the table and creates
+    the view (no ALTER, nothing to alter). The view's statement can't exist yet, so the stale
+    statement cleanup must not expect it (a pool-scoped 403 there would warn loudly); once the
+    view exists, a rerun does expect it."""
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {"switching.sql": SWITCHING_TABLE}
+
+    @staticmethod
+    def run_recording_delete_statement_expectations():
+        """Run dbt, returning the `expect_exists` of each adapter.delete_statement call made."""
+        expectations = []
+        original = ConfluentAdapter.delete_statement
+
+        @wraps(original)  # keeps the `@available` marker dbt's jinja wrapper looks for
+        def spy(self, statement_name, expect_exists=True):
+            expectations.append(expect_exists)
+            return original(self, statement_name, expect_exists=expect_exists)
+
+        with patch.object(ConfluentAdapter, "delete_statement", spy):
+            run_dbt(["run"])
+        return expectations
+
+    def test_switch_drops_table_and_creates_view(self, project):
+        run_dbt(["run"])
+        check_relation_types(project.adapter, {physical_name("switching"): "table"})
+
+        write_file(SWITCHING_VIEW, project.project_root, "models", "switching.sql")
+        expectations = self.run_recording_delete_statement_expectations()
+        check_relation_types(project.adapter, {physical_name("switching"): "view"})
+        assert self.read(project, "switching", "id, name") == [(1, "a")]
+        assert expectations == [False]
+
+        # Now it is a view, so the rerun alters it, and its statement is expected to exist.
+        expectations = self.run_recording_delete_statement_expectations()
+        check_relation_types(project.adapter, {physical_name("switching"): "view"})
+        assert expectations == [True]
