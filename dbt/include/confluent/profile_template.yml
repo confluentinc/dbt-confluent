@@ -12,8 +12,6 @@ prompts:
     "Use a custom endpoint":
       endpoint:
         hint: "eg: https://flink.us-east-2.aws.private.confluent.cloud"
-  organization_id:
-    hint: "eg: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
   _choose_compute_pool:
     "Use a specific compute pool":
       compute_pool_id:
@@ -33,14 +31,22 @@ prompts:
       global_api_secret:
         hint: "Global API secret"
         hide_input: true
+      organization_id:
+        hint: "Optional, inferred if blank. eg: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        default: ""
     "Use a Flink-region API key":
       flink_api_key:
         hint: "Flink API key"
       flink_api_secret:
         hint: "Flink API secret"
         hide_input: true
+      organization_id:
+        hint: "Required with a Flink API key. eg: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
     "Use OAuth (interactive Confluent Cloud sign-in, no API key)":
       _fixed_auth: oauth
+      organization_id:
+        hint: "Optional, inferred from the login if blank. eg: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        default: ""
   execution_mode:
     hint: "One of: 'snapshot', 'snapshot_ddl', 'streaming_query', 'streaming_ddl'"
     type: "string"

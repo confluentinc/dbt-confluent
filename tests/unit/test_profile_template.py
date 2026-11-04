@@ -38,7 +38,6 @@ class TestProfileTemplate:
             1,  # _choose_backend_url: "Use cloud_provider and cloud_region"
             "aws",  # cloud_provider
             "us-west-1",  # cloud_region
-            "org-123",  # organization_id
             1,  # _choose_compute_pool: "Use a specific compute pool"
             "lfcp-abc",  # compute_pool_id
             "env-xyz",  # environment_id
@@ -46,6 +45,7 @@ class TestProfileTemplate:
             2,  # _choose_api_credentials: "Use a Flink-region API key"
             "my-key",  # flink_api_key
             "my-secret",  # flink_api_secret
+            "org-123",  # organization_id
             "streaming_query",  # execution_mode
             "dbt-confluent-",  # statement_name_prefix
             "dbt-confluent",  # statement_label
@@ -65,7 +65,6 @@ class TestProfileTemplate:
         prompt_responses = [
             2,  # _choose_backend_url: "Use a custom endpoint"
             endpoint_url,  # endpoint
-            "org-123",  # organization_id
             1,  # _choose_compute_pool: "Use a specific compute pool"
             "lfcp-abc",  # compute_pool_id
             "env-xyz",  # environment_id
@@ -73,6 +72,7 @@ class TestProfileTemplate:
             2,  # _choose_api_credentials: "Use a Flink-region API key"
             "my-key",  # flink_api_key
             "my-secret",  # flink_api_secret
+            "org-123",  # organization_id
             "streaming_query",  # execution_mode
             "dbt-confluent-",  # statement_name_prefix
             "dbt-confluent",  # statement_label
@@ -92,13 +92,13 @@ class TestProfileTemplate:
             1,  # _choose_backend_url: "Use cloud_provider and cloud_region"
             "aws",  # cloud_provider
             "us-west-1",  # cloud_region
-            "org-123",  # organization_id
             2,  # _choose_compute_pool: "Use the environment+region default compute pool"
             "env-xyz",  # environment_id
             "my_db",  # dbname
             2,  # _choose_api_credentials: "Use a Flink-region API key"
             "my-key",  # flink_api_key
             "my-secret",  # flink_api_secret
+            "org-123",  # organization_id
             "streaming_query",  # execution_mode
             "dbt-confluent-",  # statement_name_prefix
             "dbt-confluent",  # statement_label
@@ -116,7 +116,6 @@ class TestProfileTemplate:
             1,  # _choose_backend_url: "Use cloud_provider and cloud_region"
             "aws",  # cloud_provider
             "us-west-1",  # cloud_region
-            "org-123",  # organization_id
             1,  # _choose_compute_pool: "Use a specific compute pool"
             "lfcp-abc",  # compute_pool_id
             "env-xyz",  # environment_id
@@ -124,6 +123,7 @@ class TestProfileTemplate:
             1,  # _choose_api_credentials: "Use a Global API key"
             "global-key",  # global_api_key
             "global-secret",  # global_api_secret
+            "org-123",  # organization_id
             "streaming_query",  # execution_mode
             "dbt-confluent-",  # statement_name_prefix
             "dbt-confluent",  # statement_label
@@ -136,6 +136,60 @@ class TestProfileTemplate:
         assert target["global_api_secret"] == "global-secret"
         assert "flink_api_key" not in target
         assert "flink_api_secret" not in target
+
+    def _prompt_responses(self, auth_choice, *auth_answers):
+        """A full prompt run: cloud provider/region, default pool, then `auth_choice`'s answers."""
+        return [
+            1,  # _choose_backend_url: "Use cloud_provider and cloud_region"
+            "aws",  # cloud_provider
+            "us-west-1",  # cloud_region
+            2,  # _choose_compute_pool: default pool
+            "env-xyz",  # environment_id
+            "my_db",  # dbname
+            auth_choice,  # _choose_api_credentials
+            *auth_answers,
+            "streaming_query",  # execution_mode
+            "dbt-confluent-",  # statement_name_prefix
+            "dbt-confluent",  # statement_label
+            1,  # threads
+        ]
+
+    def test_flink_key_prompts_for_organization_id(self):
+        template = load_profile_template()
+        responses = self._prompt_responses(2, "key", "secret", "org-123")
+
+        target = _run_generate_target(template["prompts"], responses)
+
+        assert target["organization_id"] == "org-123"
+
+    def test_organization_id_is_optional_with_global_key(self):
+        """A blank organization_id prompt (its default) is left to the driver to infer."""
+        template = load_profile_template()
+        responses = self._prompt_responses(1, "key", "secret", "")
+
+        target = _run_generate_target(template["prompts"], responses)
+
+        assert not target["organization_id"]
+
+    def test_organization_id_is_optional_with_oauth(self):
+        template = load_profile_template()
+        responses = self._prompt_responses(3, "")
+
+        target = _run_generate_target(template["prompts"], responses)
+
+        assert target["auth"] == "oauth"
+        assert not target["organization_id"]
+
+    def test_organization_id_prompt_defaults_blank_only_where_inferable(self):
+        """Only the Global key and OAuth prompts may be left blank; a Flink key can't infer it."""
+        choices = load_profile_template()["prompts"]["_choose_api_credentials"]
+        defaults = {
+            label: options["organization_id"].get("default") for label, options in choices.items()
+        }
+
+        assert [label for label, default in defaults.items() if default == ""] == [
+            label for label in choices if "Flink" not in label
+        ]
 
     def test_choose_prompt_message_contains_option_labels(self):
         """Verify the _choose_ prompt displays the human-readable option labels."""
