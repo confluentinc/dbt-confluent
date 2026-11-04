@@ -20,7 +20,12 @@
   {# dbt's contract check, before any DDL when something already exists.
      CREATE VIEW runs it itself, but only after the drop below, and ALTER VIEW
      doesn't run it at all. Gated on `enforced`: unlike a `streaming_table`, a
-     view needn't declare yml columns, and the check fails without them. #}
+     view needn't declare yml columns, and the check fails without them.
+     On the drop-and-create paths (--full-refresh, or a non-view under this
+     name) CREATE VIEW then runs the check a second time, a redundant
+     schema-probe statement. It's deliberate: this early run is what fails the
+     model before the drop, so the existing relation survives a contract
+     mismatch. #}
   {% if existing_relation is not none and config.get('contract').enforced %}
     {% do get_assert_columns_equivalent(sql) %}
   {% endif %}
