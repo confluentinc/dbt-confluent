@@ -641,10 +641,21 @@ class TestFunctionsSharingOnePackage(FunctionFixtures):
         rows = project.run_sql(f"describe function `{function}`", fetch="all")
         return {str(name): str(value) for name, value in rows}
 
+    def assert_absent(self, project, function: str) -> None:
+        """Fail if `function` already exists, which would let the test pass without creating it."""
+        with pytest.raises(Exception, match="doesn't exist"):
+            self.live_properties(project, function)
+
     def test_functions_share_an_artifact_but_keep_their_own_class(self, project):
+        for name in self.CLASS_BY_FUNCTION:
+            self.assert_absent(project, physical_name(name))
+
         run_dbt(["build", "--threads", str(self.THREADS)])
 
-        live = {name: self.live_properties(project, name) for name in self.CLASS_BY_FUNCTION}
+        live = {
+            name: self.live_properties(project, physical_name(name))
+            for name in self.CLASS_BY_FUNCTION
+        }
 
         assert len({properties["plugin id"] for properties in live.values()}) == 1
         assert {name: properties["class name"] for name, properties in live.items()} == (
