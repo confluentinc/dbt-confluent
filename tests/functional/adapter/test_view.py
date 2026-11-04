@@ -59,6 +59,12 @@ REFRESHED_VIEW = """
 select cast(1 as int) as id, cast('v1' as string) as rev
 """
 
+# Same columns and types as CONTRACT_YML declares, different values.
+MATCHING_CONTRACT_VIEW_V2 = """
+{{ config(materialized='view', full_refresh=false) }}
+select cast(1 as int) as id, cast('v2' as string) as rev
+"""
+
 # The same model name as a table, then as a view.
 SWITCHING_TABLE = """
 {{ config(materialized='table', full_refresh=false) }}
@@ -143,6 +149,25 @@ class TestContractFailureKeepsView(ViewFixtures):
         results = run_dbt(["run"], expect_pass=False)
         assert "contract" in results[0].message.lower()
         assert self.read(project, "contract_view", "id, rev") == [(1, "v1")]
+
+
+class TestMatchingContractView(ViewFixtures):
+    """An enforced contract the SQL satisfies must not get in the way: the first run creates the
+    view (CREATE VIEW checks the contract itself), and a rerun passes the early check and alters it."""
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {"contract_view.sql": BASE_VIEW, "schema.yml": CONTRACT_YML}
+
+    def test_matching_contract_creates_then_alters(self, project):
+        run_dbt(["run"])
+        assert self.read(project, "contract_view", "id, rev") == [(1, "v1")]
+
+        write_file(MATCHING_CONTRACT_VIEW_V2, project.project_root, "models", "contract_view.sql")
+        _, logs = run_dbt_and_capture(["--debug", "run"])
+        assert "alter view" in logs.lower()
+        assert "drop view" not in logs.lower()
+        assert self.read(project, "contract_view", "id, rev") == [(1, "v2")]
 
 
 class TestFullRefreshRecreatesView(ViewFixtures):
