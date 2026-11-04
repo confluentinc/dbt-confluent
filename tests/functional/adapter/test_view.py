@@ -55,6 +55,19 @@ REFRESHED_VIEW = """
 select cast(1 as int) as id, cast('v1' as string) as rev
 """
 
+# Its pre-hook creates the view its SELECT reads, so on a rerun the contract check, which runs the
+# SELECT, passes only if the pre-hooks have run first. The helper is named after this model's
+# relation, so it's in the test class's namespace and the class sweep drops it.
+HOOKED_VIEW = """
+{{ config(
+    materialized='view',
+    full_refresh=false,
+    pre_hook="create view if not exists {{ this.incorporate(path={'identifier': this.identifier ~ '_src'}) }}
+              as select cast(1 as int) as id, cast('v2' as string) as rev",
+) }}
+select id, rev from {{ this.incorporate(path={'identifier': this.identifier ~ '_src'}) }}
+"""
+
 CONTRACT_YML = """
 models:
   - name: contract_view
@@ -128,6 +141,18 @@ class TestContractFailureKeepsView(ViewFixtures):
         results = run_dbt(["run"], expect_pass=False)
         assert "contract" in results[0].message.lower()
         assert self.read(project, "contract_view", "id, rev") == [(1, "v1")]
+
+
+class TestPreHookRunsBeforeContractCheck(ViewFixtures):
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {"contract_view.sql": BASE_VIEW, "schema.yml": CONTRACT_YML}
+
+    def test_pre_hook_prepares_what_the_new_sql_reads(self, project):
+        run_dbt(["run"])
+        write_file(HOOKED_VIEW, project.project_root, "models", "contract_view.sql")
+        run_dbt(["run"])
+        assert self.read(project, "contract_view", "id, rev") == [(1, "v2")]
 
 
 class TestFullRefreshRecreatesView(ViewFixtures):
