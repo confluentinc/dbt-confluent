@@ -1,28 +1,34 @@
-import logging
 from uuid import uuid4
 
 import pytest
 
-from tests.functional.adapter._helpers import delete_statements_by_label, drop_tables
-
-logger = logging.getLogger(__name__)
+from tests.functional.adapter.isolation import TestIsolation
 
 
-class ConfluentFixtures:
+class ConfluentFixtures(TestIsolation):
+    @pytest.fixture(scope="class")
+    def macros(self, alias_macros: dict[str, str]) -> dict[str, str]:
+        return alias_macros
+
     # Unprefixed by default, set by tests covering resource_name_prefix isolation.
     RESOURCE_NAME_PREFIX = ""
 
     @pytest.fixture(scope="class")
-    def dbt_profile_data(self, unique_schema, dbt_profile_target, profiles_config_update):
-        # Every test class gets the suite-reserved `statement_name_prefix`
-        # (so sweep_stale_test_statements can find leaked statements) and a
-        # unique `statement_label` (so we can cleanup its statements at the end).
+    def dbt_profile_data(
+        self,
+        unique_schema,
+        dbt_profile_target,
+        profiles_config_update,
+        statement_name_prefix,
+        relation_namespace,
+    ):
+        # A unique `statement_label` per class lets us clean up all created statements.
         profile = {
             "test": {
                 "outputs": {
                     "default": {
                         **dbt_profile_target,
-                        "statement_name_prefix": "dbt-adapter-test-",
+                        "statement_name_prefix": statement_name_prefix,
                         "resource_name_prefix": self.RESOURCE_NAME_PREFIX,
                         "statement_label": f"dbt-test-{uuid4()}",
                     },
@@ -59,45 +65,3 @@ class ConfluentFixtures:
                 "+full_refresh": True,
             },
         }
-
-    @pytest.fixture(autouse=True)
-    def clean_up(self, project, dbt_profile_data):
-        """
-        This adapter does not support creating and dropping whole schemas.
-        After each test, we clean up any lingering statements (e.g. CTAS
-        streaming jobs) created during the test to free compute pool resources.
-        """
-        yield
-
-        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-        if not label:
-            logger.warning(
-                "No statement_label set in profile target. "
-                "Skipping statement cleanup — lingering statements may remain."
-            )
-            return
-        delete_statements_by_label(project, label)
-
-
-class ClassScopedCleanup(ConfluentFixtures):
-    """For tests that manipulate statements inside the test body and want
-    teardown once at class scope rather than after every test.
-
-    Subclasses set TABLES to the model relation names to drop. The default
-    per-test clean_up only deletes statements (it can't drop schemas); these
-    tests additionally need their tables dropped, which class_clean_up does.
-    """
-
-    TABLES: list[str] = []
-
-    @pytest.fixture(autouse=True)
-    def clean_up(self, project, dbt_profile_data):
-        # Suppress the per-test statement cleanup; class_clean_up handles teardown.
-        yield
-
-    @pytest.fixture(autouse=True, scope="class")
-    def class_clean_up(self, project, dbt_profile_data):
-        yield
-        label = dbt_profile_data["test"]["outputs"]["default"]["statement_label"]
-        delete_statements_by_label(project, label)
-        drop_tables(project, *self.TABLES)

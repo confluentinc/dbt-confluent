@@ -8,11 +8,22 @@ from dbt_common.events.event_manager_client import cleanup_event_logger
 from dbt.deprecations import reset_deprecations
 from dbt.events.logging import setup_event_logger
 from dbt.tests.fixtures.project import TestProjInfo
+from tests.functional.adapter.isolation import ISOLATION_SLUG_ENV_VAR
 
 # Import the functional fixtures as a plugin
 # Note: fixtures with session scope need to be local
 
 pytest_plugins = ["dbt.tests.fixtures.project"]
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--keep-failed-resources",
+        action="store_true",
+        default=False,
+        help="Skip the end-of-class sweep of relations and statements for functional test "
+        "classes with a failed test, so the failure can be inspected on the cluster.",
+    )
 
 
 @pytest.fixture(scope="class")
@@ -73,7 +84,10 @@ def dbt_profile_target(unique_schema):
 
 @pytest.fixture(scope="class")
 def schema_yml(unique_schema):
-    """Default schema.yml where we need to specify the schema"""
+    """Default schema.yml where we need to specify the schema.
+
+    Sources bypass `generate_alias_name`, so the seed's identifier applies the class's relation
+    namespace itself, to match the namespaced seed relation (see isolation.py)."""
     return dedent(f"""
         version: 2
         sources:
@@ -81,7 +95,7 @@ def schema_yml(unique_schema):
             schema: "{unique_schema}"
             tables:
               - name: seed
-                identifier: "{{{{ var('seed_name', 'base') }}}}"
+                identifier: "{{{{ env_var('{ISOLATION_SLUG_ENV_VAR}', '') }}}}{{{{ var('seed_name', 'base') }}}}"
     """)
 
 
