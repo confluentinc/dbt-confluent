@@ -99,7 +99,20 @@ models:
 
 class ViewFixtures(ConfluentFixtures):
     """Reads back the views a test class builds. ConfluentFixtures namespaces each model's
-    relation and sweeps the class's views when the class finishes."""
+    relation and sweeps the class's views when the class finishes.
+
+    A class's tests share its model files and relations, and most of them rewrite a model or leave
+    a view altered or broken. So before each test the class's `models` are written back to disk
+    and its views dropped: every test starts from the class's baseline models with nothing built,
+    whatever order the tests run in."""
+
+    @pytest.fixture(autouse=True)
+    def reset_models_and_views(self, project, models):
+        for filename, content in models.items():
+            write_file(content, project.project_root, "models", filename)
+            if filename.endswith(".sql"):
+                view = relation_from_name(project.adapter, physical_name(filename[: -len(".sql")]))
+                project.run_sql(f"drop view if exists {view}")
 
     def read(self, project, name, columns):
         """The rows `columns` select from the view of the model `name`, as tuples."""
@@ -108,7 +121,10 @@ class ViewFixtures(ConfluentFixtures):
         return [tuple(row) for row in rows]
 
 
-class TestViewRerunAltersInPlace(ViewFixtures):
+class TestViewAlterPath(ViewFixtures):
+    """Reruns of existing views: ALTER in place, new SQL taking effect through a child view, and
+    new SQL the server rejects leaving the previous views serving."""
+
     @pytest.fixture(scope="class")
     def models(self):
         return {"base_view.sql": BASE_VIEW, "child_view.sql": CHILD_VIEW}
@@ -130,12 +146,6 @@ class TestViewRerunAltersInPlace(ViewFixtures):
         assert self.read(project, "base_view", "id, rev, extra") == [(1, "v2", "x")]
         assert self.read(project, "child_view", "id, rev") == [(1, "v2")]
 
-
-class TestRejectedSqlKeepsView(ViewFixtures):
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {"base_view.sql": BASE_VIEW, "child_view.sql": CHILD_VIEW}
-
     def test_rejected_sql_keeps_previous_view(self, project):
         run_dbt(["run"])
         write_file(BROKEN_VIEW, project.project_root, "models", "base_view.sql")
@@ -145,7 +155,11 @@ class TestRejectedSqlKeepsView(ViewFixtures):
         assert self.read(project, "child_view", "id, rev") == [(1, "v1")]
 
 
-class TestContractFailureKeepsView(ViewFixtures):
+class TestViewContract(ViewFixtures):
+    """An enforced contract on a view: a mismatch fails the run and leaves the previous view
+    serving, and a match creates the view (CREATE VIEW checks the contract itself) and then
+    passes the early check on a rerun and alters it."""
+
     @pytest.fixture(scope="class")
     def models(self):
         return {"contract_view.sql": BASE_VIEW, "schema.yml": CONTRACT_YML}
@@ -156,15 +170,6 @@ class TestContractFailureKeepsView(ViewFixtures):
         results = run_dbt(["run"], expect_pass=False)
         assert "contract" in results[0].message.lower()
         assert self.read(project, "contract_view", "id, rev") == [(1, "v1")]
-
-
-class TestMatchingContractView(ViewFixtures):
-    """An enforced contract the SQL satisfies must not get in the way: the first run creates the
-    view (CREATE VIEW checks the contract itself), and a rerun passes the early check and alters it."""
-
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {"contract_view.sql": BASE_VIEW, "schema.yml": CONTRACT_YML}
 
     def test_matching_contract_creates_then_alters(self, project):
         run_dbt(["run"])
@@ -177,7 +182,10 @@ class TestMatchingContractView(ViewFixtures):
         assert self.read(project, "contract_view", "id, rev") == [(1, "v2")]
 
 
-class FlagOnlyFullRefreshViewFixtures(ViewFixtures):
+class TestViewFullRefresh(ViewFixtures):
+    """--full-refresh drops and creates a view instead of altering it, and still checks an
+    enforced contract before the drop."""
+
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
         """ConfluentFixtures' project config without `+full_refresh: True`, so the --full-refresh
@@ -188,22 +196,38 @@ class FlagOnlyFullRefreshViewFixtures(ViewFixtures):
             "seeds": {"+schema": unique_schema},
         }
 
-
-class TestFullRefreshRecreatesView(FlagOnlyFullRefreshViewFixtures):
     @pytest.fixture(scope="class")
     def models(self):
-        return {"refreshed_view.sql": REFRESHED_VIEW}
+        return {
+            "refreshed_view.sql": REFRESHED_VIEW,
+            "contract_view.sql": REFRESHED_VIEW,
+            "schema.yml": CONTRACT_YML,
+        }
 
     def test_full_refresh_drops_and_creates(self, project):
-        run_dbt(["run"])
-        _, logs = run_dbt_and_capture(["--debug", "run"])
+        run_dbt(["run", "--select", "refreshed_view"])
+        _, logs = run_dbt_and_capture(["--debug", "run", "--select", "refreshed_view"])
         assert "alter view" in logs.lower()
         assert "drop view" not in logs.lower()
-        _, logs = run_dbt_and_capture(["--debug", "run", "--full-refresh"])
+        _, logs = run_dbt_and_capture(
+            ["--debug", "run", "--select", "refreshed_view", "--full-refresh"]
+        )
         assert "drop view if exists" in logs.lower()
         assert "create view" in logs.lower()
         assert "alter view" not in logs.lower()
         assert self.read(project, "refreshed_view", "id, rev") == [(1, "v1")]
+
+    def test_full_refresh_contract_failure_keeps_previous_view(self, project):
+        run_dbt(["run", "--select", "contract_view"])
+        write_file(
+            DRIFTED_CONTRACT_REFRESHED_VIEW, project.project_root, "models", "contract_view.sql"
+        )
+        results, logs = run_dbt_and_capture(
+            ["--debug", "run", "--select", "contract_view", "--full-refresh"], expect_pass=False
+        )
+        assert "contract" in results[0].message.lower()
+        assert "drop view" not in logs.lower()
+        assert self.read(project, "contract_view", "id, rev") == [(1, "v1")]
 
 
 class TestTableToViewSwitch(ViewFixtures):
@@ -245,24 +269,3 @@ class TestTableToViewSwitch(ViewFixtures):
         expectations = self.run_recording_delete_statement_expectations()
         check_relation_types(project.adapter, {physical_name("switching"): "view"})
         assert expectations == [True]
-
-
-class TestFullRefreshContractFailureKeepsView(FlagOnlyFullRefreshViewFixtures):
-    """--full-refresh drops and creates the view, but the enforced contract is checked before the
-    drop, so a mismatch fails the model with the previous view still in place."""
-
-    @pytest.fixture(scope="class")
-    def models(self):
-        return {"contract_view.sql": REFRESHED_VIEW, "schema.yml": CONTRACT_YML}
-
-    def test_full_refresh_contract_failure_keeps_previous_view(self, project):
-        run_dbt(["run"])
-        write_file(
-            DRIFTED_CONTRACT_REFRESHED_VIEW, project.project_root, "models", "contract_view.sql"
-        )
-        results, logs = run_dbt_and_capture(
-            ["--debug", "run", "--full-refresh"], expect_pass=False
-        )
-        assert "contract" in results[0].message.lower()
-        assert "drop view" not in logs.lower()
-        assert self.read(project, "contract_view", "id, rev") == [(1, "v1")]
