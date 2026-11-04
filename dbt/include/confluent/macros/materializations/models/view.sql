@@ -17,10 +17,15 @@
 
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
+  -- `BEGIN` happens here:
+  {{ run_hooks(pre_hooks, inside_transaction=True) }}
+
   {# dbt's contract check, before any DDL when something already exists.
      CREATE VIEW runs it itself, but only after the drop below, and ALTER VIEW
      doesn't run it at all. Gated on `enforced`: unlike a `streaming_table`, a
-     view needn't declare yml columns, and the check fails without them. #}
+     view needn't declare yml columns, and the check fails without them. The
+     check runs the model's SQL, so it follows the pre-hooks, which may create
+     something that SQL reads. #}
   {% if existing_relation is not none and config.get('contract').enforced %}
     {% do get_assert_columns_equivalent(sql) %}
   {% endif %}
@@ -32,9 +37,6 @@
   {% if not alter_existing_view %}
     {{ drop_relation_if_exists(existing_relation) }}
   {% endif %}
-
-  -- `BEGIN` happens here:
-  {{ run_hooks(pre_hooks, inside_transaction=True) }}
 
   -- build model
   {% call statement('main', statement_name=get_statement_name()) -%}
