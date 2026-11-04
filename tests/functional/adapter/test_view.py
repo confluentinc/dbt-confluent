@@ -76,6 +76,13 @@ SWITCHING_VIEW = """
 select cast(1 as int) as id, cast('a' as string) as name
 """
 
+# Renames `rev` like DRIFTED_CONTRACT_VIEW, but with no `full_refresh` config, so only the
+# --full-refresh flag decides between ALTER and drop-and-create.
+DRIFTED_CONTRACT_REFRESHED_VIEW = """
+{{ config(materialized='view') }}
+select cast(1 as int) as id, cast('v1' as string) as rev2
+"""
+
 CONTRACT_YML = """
 models:
   - name: contract_view
@@ -170,7 +177,7 @@ class TestMatchingContractView(ViewFixtures):
         assert self.read(project, "contract_view", "id, rev") == [(1, "v2")]
 
 
-class TestFullRefreshRecreatesView(ViewFixtures):
+class FlagOnlyFullRefreshViewFixtures(ViewFixtures):
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
         """ConfluentFixtures' project config without `+full_refresh: True`, so the --full-refresh
@@ -181,6 +188,8 @@ class TestFullRefreshRecreatesView(ViewFixtures):
             "seeds": {"+schema": unique_schema},
         }
 
+
+class TestFullRefreshRecreatesView(FlagOnlyFullRefreshViewFixtures):
     @pytest.fixture(scope="class")
     def models(self):
         return {"refreshed_view.sql": REFRESHED_VIEW}
@@ -236,3 +245,24 @@ class TestTableToViewSwitch(ViewFixtures):
         expectations = self.run_recording_delete_statement_expectations()
         check_relation_types(project.adapter, {physical_name("switching"): "view"})
         assert expectations == [True]
+
+
+class TestFullRefreshContractFailureKeepsView(FlagOnlyFullRefreshViewFixtures):
+    """--full-refresh drops and creates the view, but the enforced contract is checked before the
+    drop, so a mismatch fails the model with the previous view still in place."""
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {"contract_view.sql": REFRESHED_VIEW, "schema.yml": CONTRACT_YML}
+
+    def test_full_refresh_contract_failure_keeps_previous_view(self, project):
+        run_dbt(["run"])
+        write_file(
+            DRIFTED_CONTRACT_REFRESHED_VIEW, project.project_root, "models", "contract_view.sql"
+        )
+        results, logs = run_dbt_and_capture(
+            ["--debug", "run", "--full-refresh"], expect_pass=False
+        )
+        assert "contract" in results[0].message.lower()
+        assert "drop view" not in logs.lower()
+        assert self.read(project, "contract_view", "id, rev") == [(1, "v1")]
