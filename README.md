@@ -62,9 +62,9 @@ You have several options for configuring your credentials:
 
 ### Organization ID
 
-`organization_id` is optional with `auth: oauth` or a Global API key: when omitted, it is inferred. It is required with a Flink-region API key, which cannot discover it.
+`organization_id` may be omitted with `auth: oauth` or a Global API key, as long as your account belongs to only one organization. If it belongs to several, the connection fails rather than guess, and you must set `organization_id`. It is always required with a Flink-region API key, which cannot discover it.
 
-You may still set it with either of those. The driver then checks that you are really in that organization, which gives a clearer error than "environment not found" if your account belongs to several organizations (verified at login for `auth: oauth`).
+If you do set it with either of those, the driver verifies that you are in that organization.
 
 ### Concept mapping
 
