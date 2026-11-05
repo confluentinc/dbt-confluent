@@ -421,15 +421,15 @@ class ConfluentAdapter(SQLAdapter):
         """Build a deterministic, sanitized Flink statement name.
 
         Called from Jinja macros via adapter.get_statement_name().
-        Returns the final name ready for the Flink API. `resource_name_prefix` is
+        Returns the final name ready for the Flink API. `name_prefix` is
         prepended to every name, while `statement_name_prefix` is prepended only when no
         `statement_name_override` is provided.
         """
         creds = self.config.credentials
         if statement_name_override:
-            name = f"{creds.resource_name_prefix}{statement_name_override}{suffix}"
+            name = f"{creds.name_prefix}{statement_name_override}{suffix}"
         else:
-            prefix = f"{creds.resource_name_prefix}{creds.statement_name_prefix}"
+            prefix = f"{creds.name_prefix}{creds.statement_name_prefix}"
             name = f"{prefix}{project_name}-{model_name}{suffix}"
         return sanitize_statement_name(name)
 
@@ -762,7 +762,7 @@ class ConfluentAdapter(SQLAdapter):
         #   versioned:     model.<package>.<name>.v<version>
         _, _, name, *v = tested_node_unique_id.split(".")
         version = f"_{v[0]}" if v and v[0].startswith("v") else ""
-        prefix = self.config.credentials.resource_name_prefix.replace("-", "_")
+        prefix = self.config.credentials.name_prefix.replace("-", "_")
         identifier = f"{prefix}{name}{version}"
         relation = self.get_relation(database, schema, identifier)
         if relation is None:

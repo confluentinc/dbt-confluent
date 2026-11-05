@@ -1,4 +1,4 @@
-"""statement_name_prefix and resource_name_prefix: every name the adapter builds from them.
+"""statement_name_prefix and name_prefix: every name the adapter builds from them.
 
 Each matrix case is a profile dict; an unset prefix is a missing key, so the real defaults
 apply.
@@ -28,7 +28,7 @@ FIXED_UUID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 # is "pinned-insert"; the fallback is followed by FIXED_UUID.
 CASES = {
     "both set": (
-        {"statement_name_prefix": "team-", "resource_name_prefix": "alice-"},
+        {"statement_name_prefix": "team-", "name_prefix": "alice-"},
         "alice-team-shop-orders",
         "alice-pinned-insert",
         "alice-team-",
@@ -49,14 +49,14 @@ CASES = {
         "orders",
     ),
     "resource prefix only": (
-        {"resource_name_prefix": "alice-"},
+        {"name_prefix": "alice-"},
         "alice-dbt-shop-orders",
         "alice-pinned-insert",
         "alice-dbt-",
         "alice_orders",
     ),
     "resource prefix, statement prefix explicitly empty": (
-        {"statement_name_prefix": "", "resource_name_prefix": "alice-"},
+        {"statement_name_prefix": "", "name_prefix": "alice-"},
         "alice-shop-orders",
         "alice-pinned-insert",
         "alice-",
@@ -135,7 +135,7 @@ class TestNamePrefixMatrix:
 
     def test_topic_name(self, profile_keys, generated, explicit, fallback_prefix, topic):
         credentials = _credentials(profile_keys)
-        # statement_name_prefix never reaches topic names; only resource_name_prefix does
+        # statement_name_prefix never reaches topic names; only name_prefix does
         assert _topic_name(credentials) == topic
         assert _topic_name(credentials, "adopted_orders") == topic.replace(
             "orders", "adopted_orders"
@@ -154,7 +154,7 @@ class TestNamePrefixDetails:
     """Cases the matrix doesn't express."""
 
     def test_explicit_statement_name_with_suffix(self):
-        adapter = _adapter(_credentials({"resource_name_prefix": "alice-"}))
+        adapter = _adapter(_credentials({"name_prefix": "alice-"}))
         name = adapter.get_statement_name(
             "orders", "shop", suffix="-check", statement_name_override="base"
         )
@@ -168,22 +168,22 @@ class TestNamePrefixDetails:
 
     @pytest.mark.parametrize(
         ("profile_keys", "expected"),
-        [({}, "orders-v2"), ({"resource_name_prefix": "alice-"}, "alice_orders-v2")],
+        [({}, "orders-v2"), ({"name_prefix": "alice-"}, "alice_orders-v2")],
     )
     def test_only_prefix_hyphens_become_underscores(self, profile_keys, expected):
         assert _topic_name(_credentials(profile_keys), "orders-v2") == expected
 
     def test_missing_unit_test_relation_names_lookup(self):
-        adapter = _adapter(_credentials({"resource_name_prefix": "alice-"}))
+        adapter = _adapter(_credentials({"name_prefix": "alice-"}))
         adapter.get_relation.return_value = None
         with pytest.raises(DbtDatabaseError, match="'alice_orders'"):
             adapter.get_tested_model_relation("model.shop.orders", "env", "cluster")
 
 
-class TestResourceNamePrefixValidation:
+class TestNamePrefixValidation:
     @pytest.mark.parametrize("prefix", ["a", "eng-a-", "dbt-adapter-test-", "0x", "a" * 60])
     def test_valid_prefix_accepted(self, prefix):
-        assert _credentials({"resource_name_prefix": prefix}).resource_name_prefix == prefix
+        assert _credentials({"name_prefix": prefix}).name_prefix == prefix
 
     @pytest.mark.parametrize(
         "prefix",
@@ -198,5 +198,5 @@ class TestResourceNamePrefixValidation:
         ],
     )
     def test_invalid_prefix_rejected(self, prefix):
-        with pytest.raises(DbtRuntimeError, match="Invalid resource_name_prefix"):
-            _credentials({"resource_name_prefix": prefix})
+        with pytest.raises(DbtRuntimeError, match="Invalid name_prefix"):
+            _credentials({"name_prefix": prefix})

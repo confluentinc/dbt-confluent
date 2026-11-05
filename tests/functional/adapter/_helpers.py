@@ -117,7 +117,7 @@ def snapshot_query(project, sql: str, fetch: Literal["one", "all"]) -> agate.Tab
             cursor.execute(
                 sql,
                 statement_name=(
-                    f"{conn.credentials.resource_name_prefix}"
+                    f"{conn.credentials.name_prefix}"
                     f"{conn.credentials.statement_name_prefix}{uuid.uuid4()}"
                 ),
                 statement_labels=[conn.credentials.statement_label],

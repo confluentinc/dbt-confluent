@@ -1,4 +1,4 @@
-"""resource_name_prefix isolation against a live cluster; name rules are unit-tested
+"""name_prefix isolation against a live cluster; name rules are unit-tested
 in tests/unit/test_name_prefix_matrix.py."""
 
 import pytest
@@ -64,9 +64,9 @@ select * from {{ ref('prefix_test_ephemeral') }}
 """
 
 
-class TestResourceNamePrefix(ConfluentFixtures):
+class TestNamePrefix(ConfluentFixtures):
     NAME = "prefix"
-    RESOURCE_NAME_PREFIX = PREFIX
+    NAME_PREFIX = PREFIX
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):

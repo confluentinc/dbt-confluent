@@ -6,8 +6,8 @@ from tests.functional.adapter.isolation import TestIsolation
 
 
 class ConfluentFixtures(TestIsolation):
-    # Unprefixed by default, set by tests covering resource_name_prefix isolation.
-    RESOURCE_NAME_PREFIX = ""
+    # Unprefixed by default, set by tests covering name_prefix isolation.
+    NAME_PREFIX = ""
 
     @pytest.fixture(scope="class")
     def macros(self, alias_macros: dict[str, str]) -> dict[str, str]:
@@ -29,7 +29,7 @@ class ConfluentFixtures(TestIsolation):
                     "default": {
                         **dbt_profile_target,
                         "statement_name_prefix": statement_name_prefix,
-                        "resource_name_prefix": self.RESOURCE_NAME_PREFIX,
+                        "name_prefix": self.NAME_PREFIX,
                         "statement_label": f"dbt-test-{uuid4()}",
                     },
                 },

@@ -39,7 +39,7 @@ from dbt.adapters.events.types import (
 from dbt.adapters.sql import SQLConnectionManager
 
 from .__version__ import version
-from .naming import sanitize_statement_name, validate_resource_name_prefix
+from .naming import sanitize_statement_name, validate_name_prefix
 from .utils import fetch_from_cursor
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ class ConfluentCredentials(Credentials):
     statement_name_prefix: str = "dbt-"
     statement_label: str = "dbt-confluent"
     # Isolates statements and tables in a shared environment.
-    resource_name_prefix: str = ""
+    name_prefix: str = ""
 
     _ALIASES = {"environment_id": "database", "dbname": "schema"}
 
@@ -109,7 +109,7 @@ class ConfluentCredentials(Credentials):
             "database",
             "schema",
             "compute_pool_id",
-            "resource_name_prefix",
+            "name_prefix",
             "auth",
         )
         if self.endpoint:
@@ -118,9 +118,9 @@ class ConfluentCredentials(Credentials):
             return (*keys, "cloud_provider", "cloud_region")
 
     def __post_init__(self):
-        """Reject an invalid `resource_name_prefix` when the profile loads."""
+        """Reject an invalid `name_prefix` when the profile loads."""
         try:
-            validate_resource_name_prefix(self.resource_name_prefix)
+            validate_name_prefix(self.name_prefix)
         except ValueError as e:
             raise DbtRuntimeError(str(e)) from e
 
@@ -497,7 +497,7 @@ class ConfluentConnectionManager(SQLConnectionManager):
             # get_statement_name().
             if statement_name is None:
                 creds = connection.credentials
-                prefix = f"{creds.resource_name_prefix}{creds.statement_name_prefix}"
+                prefix = f"{creds.name_prefix}{creds.statement_name_prefix}"
                 statement_name = sanitize_statement_name(f"{prefix}{uuid.uuid4()}")
 
             cursor = connection.handle.cursor(mode=resolved_mode)

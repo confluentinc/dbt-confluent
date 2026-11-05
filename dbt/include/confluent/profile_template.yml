@@ -49,7 +49,7 @@ prompts:
     hint: "Prefix for statement names (project name is appended automatically)"
     type: "string"
     default: "dbt-"
-  resource_name_prefix:
+  name_prefix:
     hint: "Optional prefix isolating tables and statements, e.g. 'alice-'"
     type: "string"
     default: ""

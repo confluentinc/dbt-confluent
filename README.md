@@ -82,7 +82,7 @@ models:
 
 ### Sharing an environment
 
-Statement names are unique per Confluent Cloud environment, while table names are unique per Kafka cluster, since each table is backed by a Kafka topic. When several users build the same project into one environment, they share statement names even if each target uses its own cluster. Targets that also share a cluster write to the same tables. To keep your statements and tables apart from everyone else's, set the optional `resource_name_prefix` in your own `profiles.yml`:
+Statement names are unique per Confluent Cloud environment, while table names are unique per Kafka cluster, since each table is backed by a Kafka topic. When several users build the same project into one environment, they share statement names even if each target uses its own cluster. Targets that also share a cluster write to the same tables. To keep your statements and tables apart from everyone else's, set the optional `name_prefix` in your own `profiles.yml`:
 
 ```yaml
 # profiles.yml
@@ -91,12 +91,12 @@ my_project:
     dev:
       type: confluent
       # ...
-      resource_name_prefix: alice-
+      name_prefix: alice-
 ```
 
 It is empty by default, so names only change when you set it:
 
-| | Without | With `resource_name_prefix: alice-` |
+| | Without | With `name_prefix: alice-` |
 |---|---|---|
 | Statement | `dbt-my-project-orders-2bce76` | `alice-dbt-my-project-orders-f94953` |
 | Table | `orders` | `alice_orders` |
@@ -107,7 +107,7 @@ The prefix also applies to explicit `alias` and `statement_name` configs, source
 
 > [!WARNING]
 > - Changing either prefix on a target with running statements starts new ones under the new names and leaves the old ones running. Stop the old statements first.
-> - Table names get the prefix through the adapter's `generate_alias_name` macro. If your project overrides `generate_alias_name`, prepend `target.resource_name_prefix | replace('-', '_')` to the alias yourself, or tables lose the prefix while statements keep it.
+> - Table names get the prefix through the adapter's `generate_alias_name` macro. If your project overrides `generate_alias_name`, prepend `target.name_prefix | replace('-', '_')` to the alias yourself, or tables lose the prefix while statements keep it.
 
 ## Usage
 
