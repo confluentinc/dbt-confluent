@@ -1,4 +1,3 @@
-from textwrap import dedent
 from uuid import uuid4
 
 import pytest
@@ -7,6 +6,9 @@ from tests.functional.adapter.isolation import TestIsolation
 
 
 class ConfluentFixtures(TestIsolation):
+    # Unprefixed by default, set by tests covering name_prefix isolation.
+    NAME_PREFIX = ""
+
     @pytest.fixture(scope="class")
     def macros(self, alias_macros: dict[str, str]) -> dict[str, str]:
         return alias_macros
@@ -27,6 +29,7 @@ class ConfluentFixtures(TestIsolation):
                     "default": {
                         **dbt_profile_target,
                         "statement_name_prefix": statement_name_prefix,
+                        "name_prefix": self.NAME_PREFIX,
                         "statement_label": f"dbt-test-{uuid4()}",
                     },
                 },
