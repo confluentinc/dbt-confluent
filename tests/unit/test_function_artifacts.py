@@ -680,6 +680,17 @@ class TestSweepFunctionArtifacts:
         assert self.infos(logger) == [f"Deleted: {unused.id} (unused)"]
         assert driver.artifacts == {}
 
+    @pytest.mark.parametrize("delete", ["false", "true", "", 0, 1, None])
+    def test_a_non_boolean_delete_is_rejected_before_anything_is_deleted(
+        self, adapter, driver, delete
+    ):
+        unused = driver.add("unused", managed())
+
+        with pytest.raises(CompilationError, match="delete must be true or false"):
+            adapter.sweep_function_artifacts(delete=delete)
+
+        assert set(driver.artifacts) == {unused.id}
+
     def test_it_says_when_there_is_nothing_to_clean_up(self, adapter, driver, logger):
         adapter.sweep_function_artifacts()
         assert self.infos(logger) == ["No unused artifacts of this project."]

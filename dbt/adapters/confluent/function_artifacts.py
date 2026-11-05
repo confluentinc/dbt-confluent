@@ -229,7 +229,13 @@ def sweep(
 ) -> None:
     """The `sweep_function_artifacts` run-operation: report this project's unused artifacts
     (see `scan_unused_artifacts`), deleting them with `delete`, and fail at the end if any could
-    not be deleted."""
+    not be deleted. `delete` must be a boolean: the macro forwards `--args` unchanged, so a
+    quoted `"false"` would otherwise be truthy and delete."""
+    if not isinstance(delete, bool):
+        raise CompilationError(
+            f"delete must be true or false, not {delete!r}; pass it unquoted: "
+            "--args '{delete: true}'"
+        )
     unused = scan_unused_artifacts(conn, project, database, query_rows, delete)
     if not unused:
         logger.info("No unused artifacts of this project.")
