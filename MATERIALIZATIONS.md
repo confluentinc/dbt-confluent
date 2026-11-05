@@ -621,24 +621,6 @@ uploaded, so dbt doesn't check for this. Finish building packages before startin
 The artifact's description records that dbt manages it (`managed_by`) and the dbt project that
 uploaded it.
 
-#### Artifact limit and cleanup
-
-Each organization, cloud, region and environment can have no more than 100 Flink artifacts (see
-Confluent's [UDF limitations](https://docs.confluent.io/cloud/current/flink/concepts/user-defined-functions.html#udf-limitations)).
-dbt uploads a new artifact for every distinct package, so replacing a function's package uses up
-one more. A package is distinct by its bytes, not its sources: rebuilding a package from unchanged
-sources can still produce different bytes (for example from embedded timestamps or file ordering),
-and so a new digest and a new artifact upload.
-
-dbt never deletes an artifact, including the one a replaced function used to run on. Managing the
-limit, and cleaning up artifacts nothing uses any more, is left to you. Take care not to delete an
-artifact still in use: running and stopped statements stay bound to the artifact they were compiled
-against, and dbt can't tell which statements those are.
-
-An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
-looked up, the run fails with the existing function untouched. The check only runs when replacing
-an existing function.
-
 #### Changing an existing function
 
 Flink UDFs are immutable (no `ALTER` or `CREATE OR REPLACE`), so changing one means dropping and
@@ -656,6 +638,10 @@ re-creating it. On each run the materialization compares the live function (via
 | `apply` (dbt's default) | Warns, drops the function, and creates it again |
 | `continue` | Warns and leaves the existing function in place |
 | `fail` | Fails the run without changing anything |
+
+An `artifact_id` is checked before anything is dropped: if the artifact doesn't exist or can't be
+looked up, the run fails with the existing function untouched. The check only runs when replacing
+an existing function.
 
 If the re-create fails after the drop, dbt tries to create the previous function again from what
 it described before dropping. That is best-effort and held in memory only, so a run that is killed
@@ -680,6 +666,51 @@ functions:
 A `connections` entry that isn't fully qualified (`name`, `database.name` or
 `catalog.database.name`) is resolved against the function's own catalog and database when
 comparing. Runs that replace the same function concurrently can interfere with each other.
+
+#### Updating a function's artifact
+
+Each organization, cloud, region and environment can have **at most 100 Flink artifacts** (see
+Confluent's [UDF limitations](https://docs.confluent.io/cloud/current/flink/concepts/user-defined-functions.html#udf-limitations)),
+and every update uploads a new one. A package is distinct by its bytes, not its sources, so
+rebuilding unchanged sources can still produce a new artifact (for example from embedded
+timestamps or file ordering).
+
+**dbt never deletes artifacts**, not even the one a replaced function used to run on: running and
+stopped statements stay bound to the artifact they were compiled against. Cleaning up is up to
+you. If every statement that uses the function is in this dbt project, the
+`sweep_function_artifacts` operation makes that easy:
+
+1. **Build the new artifact**, however you do today, and point your function's `artifact_path` config field to the new file.
+
+2. **Update the functions and the statements that use them**:
+
+   ```bash
+   dbt build --select "resource_type:function+" --full-refresh
+   ```
+
+   `resource_type:function+` selects every function in the project and everything downstream of
+   them. The sweep in step 3 considers the whole project, so refreshing only some functions
+   (for example `my_udf+`) leaves the consumers of the others bound to their old artifacts. Each
+   function is replaced (uploading its new artifact), then each descendant is rebuilt after it,
+   so its statement is resubmitted against the new artifact. For a `streaming_table`, `--full-refresh` drops and
+   recreates the table and deletes its old statement first, so the table's data and state start
+   over. See [Statement Lifecycle](#statement-lifecycle).
+
+3. **Delete the old artifacts**, once nothing is bound to them any more:
+
+   ```bash
+   dbt run-operation sweep_function_artifacts                       # list only
+   dbt run-operation sweep_function_artifacts --args '{delete: true}'  # delete
+   ```
+
+   This targets artifacts this project uploaded (those carrying its `managed_by` marker) that no
+   function uses, according to `INFORMATION_SCHEMA.ROUTINES`. Without `delete: true` it only lists
+   them. Artifacts that another project or you uploaded are never listed or deleted. Every delete
+   is attempted, and any failures are reported at the end.
+
+   **"Unused by a function" doesn't mean "unused".** The operation can't see statements, so only
+   delete after step 2 has recreated them, and never while a `dbt run` is in progress (an artifact
+   it has just uploaded may not have its function yet).
 
 ---
 
