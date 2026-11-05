@@ -4,6 +4,28 @@ All notable changes to this dbt adapter will be documented in this file.
 
 <!-- towncrier release notes start -->
 
+## dbt-confluent 0.5.0 (2026-11-06)
+
+### Breaking Changes
+
+- `streaming_table` now runs dbt's contract check before re-submitting a missing or stopped INSERT, as it already did before `create table`, whatever `on_schema_drift` is set to. ([#184](https://github.com/confluentinc/dbt-confluent/issues/184))
+
+### Features
+
+- **Oauth** is now supported as an authentication mechanism. Add an `auth: oauth` profile config for browser-based interactive Confluent Cloud sign-in instead of any API keys! See the [README](README.md#configuration) for more details.
+- **Much faster schema drift checks**: The schema drift checks for `table` and `streaming_table` materializations are now done using Confluent Cloud for Flink's `dry-run` capability to determine the SQL schema of a SELECT statement (fast) instead of creating and then dropping a representative table from the new model and performing the diffing in INFORMATION_SCHEMA.COLUMNS-space (slow). See MATERIALIZATIONS.md#schema-drift-detection. ([#118](https://github.com/confluentinc/dbt-confluent/issues/118))
+
+### Bugfixes
+
+- `streaming_table` now inserts into its table's columns by name, guarding it against same-type column reordering schema migration bugs. See MATERIALIZATIONS.md#streaming-table. ([#184](https://github.com/confluentinc/dbt-confluent/issues/184))
+- The schema drift check no longer reports drift on every re-run of a Protobuf (`'value.format' = 'proto-registry'`) `streaming_table` with a `CHAR` or `VARCHAR` MAP key or `MULTISET` element. See MATERIALIZATIONS.md#schema-drift-detection. ([#185](https://github.com/confluentinc/dbt-confluent/issues/185))
+- `dbt docs generate` now only reads catalog metadata for the project's own relations, in small retried chunks, instead of querying the whole environment's `INFORMATION_SCHEMA`, which often timed out.
+
+### Misc
+
+- The schema drift check now reads only what it needs from `INFORMATION_SCHEMA`: `table` and `streaming_table` models no longer read the existing table's columns (only its distribution columns, when `distributed_by` is set). If `INFORMATION_SCHEMA.TABLES` doesn't have the existing table yet, the check now fails with a retriable error rather than reporting drift. ([#189](https://github.com/confluentinc/dbt-confluent/issues/189))
+
+
 ## dbt-confluent 0.4.1 (2026-10-26)
 
 ### Bugfixes
