@@ -15,7 +15,7 @@ import pytest
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
 
 from dbt.adapters.base.relation import BaseRelation
-from dbt.adapters.confluent import functions
+from dbt.adapters.confluent import function_artifacts, functions
 from dbt.adapters.confluent.function_artifacts import (
     ArtifactConfig,
     artifact_display_name,
@@ -285,6 +285,23 @@ def test_adapter_runs_the_function_lookup_on_the_configured_compute_pool():
 
     adapter.execute.assert_called_once()
     assert adapter.execute.call_args.kwargs["compute_pool_id"] == POOL_ID
+
+
+class TestArtifactIdsIn:
+    def test_one_artifact(self):
+        assert function_artifacts.artifact_ids_in("confluent-artifact://cfa-abc123/latest") == {
+            "cfa-abc123"
+        }
+
+    def test_several_artifacts_in_one_value(self):
+        value = "[confluent-artifact://cfa-one/latest, confluent-artifact://cfa-two/1]"
+        assert function_artifacts.artifact_ids_in(value) == {"cfa-one", "cfa-two"}
+
+    @pytest.mark.parametrize(
+        "value", [None, "", "gs://bucket/udf.jar", "confluent-artifact://x/1"]
+    )
+    def test_anything_without_an_artifact_id_is_empty(self, value):
+        assert function_artifacts.artifact_ids_in(value) == set()
 
 
 class TestPlanFunctionChange:
