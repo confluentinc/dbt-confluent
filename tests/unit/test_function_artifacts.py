@@ -578,14 +578,10 @@ class TestDesiredStateForAnUnuploadedPackage:
         assert functions.diff_function_state(live, desired)
 
 
-def scan(adapter, **kwargs) -> list[fa.UnusedArtifact]:
+def scan(adapter, **kwargs) -> fa.SweepResult:
     """`ArtifactSweeper._scan_unused_artifacts` for the adapter's project, as the run-operations
     call it."""
-    return fa.ArtifactSweeper(
-        adapter.connections.get_thread_handle(),
-        PROJECT,
-        CATALOG,
-    )._scan_unused_artifacts(**kwargs)
+    return adapter._artifact_sweeper()._scan_unused_artifacts(**kwargs)
 
 
 class TestScanFunctionArtifacts:
@@ -603,7 +599,7 @@ class TestScanFunctionArtifacts:
         driver.add("no description", None)
         before = set(driver.artifacts)
 
-        found = scan(adapter)
+        found = scan(adapter).unused
 
         assert self.names(found) == [f"{unused.id} (unused)"]
         assert set(driver.artifacts) == before  # nothing is deleted by default
@@ -617,7 +613,7 @@ class TestScanFunctionArtifacts:
         theirs = driver.add("theirs", "hand made")
         other = driver.add("other project", managed(project="another"))
 
-        found = scan(adapter, delete=True)
+        found = scan(adapter, delete=True).unused
 
         assert [r.error for r in found] == [None]
         assert set(driver.artifacts) == {used.id, theirs.id, other.id}
@@ -627,7 +623,7 @@ class TestScanFunctionArtifacts:
         count = 250  # past any page size or the org's artifact limit
         for i in range(count):
             driver.add(f"unused-{i}", managed())
-        assert len(scan(adapter)) == count
+        assert len(scan(adapter).unused) == count
 
     def test_a_failed_delete_does_not_stop_the_rest(self, adapter, driver, monkeypatch):
         first, second, third = (driver.add(n, managed()) for n in ("a", "b", "c"))
@@ -640,7 +636,7 @@ class TestScanFunctionArtifacts:
 
         monkeypatch.setattr(driver, "delete", flaky)
 
-        results = scan(adapter, delete=True)
+        results = scan(adapter, delete=True).unused
 
         assert [bool(r.error) for r in results] == [False, True, False]
         assert set(driver.artifacts) == {second.id}
@@ -659,7 +655,7 @@ class TestScanFunctionArtifacts:
 
     def test_a_marker_without_a_project_is_ignored(self, adapter, driver):
         driver.add("legacy", '{"managed_by":"dbt-confluent"}')
-        assert scan(adapter, delete=True) == []
+        assert scan(adapter, delete=True).unused == []
         assert len(driver.artifacts) == 1
 
     def test_functions_are_read_from_the_environments_information_schema(
@@ -750,6 +746,307 @@ class TestSweepFunctionArtifacts:
 
         assert set(driver.artifacts) == {first.id}
         assert self.infos(logger) == [f"Deleted: {second.id} (b)"]
+
+
+class TestListFunctionArtifacts:
+    """The listing file: all of this project's artifacts, used or not, and who uses them."""
+
+    def listing(self, adapter, file: str | None = None) -> dict[str, Any]:
+        adapter.list_function_artifacts(file)
+        path = Path(adapter.config.project_root) / (file or f"target/{fa.DEFAULT_LISTING_FILE}")
+        return json.loads(path.read_text())
+
+    def test_lists_used_and_unused_artifacts_with_their_functions(self, adapter, driver, flink):
+        used = driver.add("used", managed())
+        flink.add(FUNCTION, used.id)
+        flink.other_database_functions["other_fn"] = used.id
+        unused = driver.add("unused", managed())
+        driver.add("other project", managed(project="another"))
+        driver.add("theirs", "hand made")
+
+        listing = self.listing(adapter)
+
+        assert listing == {
+            "format_version": fa.LISTING_FORMAT_VERSION,
+            "project": PROJECT,
+            "artifacts": [
+                {
+                    "id": used.id,
+                    "name": "used",
+                    "referenced_by": [
+                        f"{CATALOG}.{DATABASE}.{FUNCTION}",
+                        f"{CATALOG}.{OTHER_DATABASE}.other_fn",
+                    ],
+                },
+                {"id": unused.id, "name": "unused", "referenced_by": []},
+            ],
+        }
+
+    def test_prints_each_artifact_and_its_functions_before_the_summary(
+        self, adapter, driver, flink, logger
+    ):
+        used_once = driver.add("used once", managed())
+        flink.add(FUNCTION, used_once.id)
+        used_twice = driver.add("used twice", managed())
+        flink.add("another_fn", used_twice.id)
+        flink.other_database_functions["other_fn"] = used_twice.id
+        unused = driver.add("unused", managed())
+
+        adapter.list_function_artifacts()
+
+        *lines, summary, hint = [call.args[0] for call in logger.info.call_args_list]
+        assert lines == [
+            f"{used_once.id} (used once): used by 1 function",
+            f"{used_twice.id} (used twice): used by 2 functions",
+            f"{unused.id} (unused): unused",
+        ]
+        assert summary.startswith("Wrote 3 artifact(s)")
+        assert hint.endswith(f"--args '{{list_file: target/{fa.DEFAULT_LISTING_FILE}}}'")
+
+    def test_the_written_path_is_relative_when_under_the_working_directory(
+        self, adapter, driver, logger, tmp_path, monkeypatch
+    ):
+        driver.add("unused", managed())
+        monkeypatch.chdir(tmp_path)
+
+        adapter.list_function_artifacts()
+
+        written = next(c.args[0] for c in logger.info.call_args_list if "Wrote" in c.args[0])
+        assert written.endswith(f" to target/{fa.DEFAULT_LISTING_FILE}")
+
+    def test_the_written_path_is_absolute_when_elsewhere(
+        self, adapter, driver, logger, tmp_path, monkeypatch
+    ):
+        driver.add("unused", managed())
+        monkeypatch.chdir(Path(__file__).parent)  # unrelated to the project in tmp_path
+
+        adapter.list_function_artifacts()
+
+        written = next(c.args[0] for c in logger.info.call_args_list if "Wrote" in c.args[0])
+        assert written.endswith(f" to {tmp_path / 'target' / fa.DEFAULT_LISTING_FILE}")
+
+    def test_the_sweep_hint_names_an_explicit_file(self, adapter, driver, logger):
+        driver.add("unused", managed())
+        explicit_file = "elsewhere/artifacts.json"
+
+        adapter.list_function_artifacts(explicit_file)
+
+        *_, hint = [call.args[0] for call in logger.info.call_args_list]
+        assert f"list_file: {explicit_file}}}'" in hint
+
+    def test_an_explicit_file_is_relative_to_the_project(self, adapter, driver):
+        driver.add("unused", managed())
+        assert len(self.listing(adapter, "elsewhere/artifacts.json")["artifacts"]) == 1
+
+    def test_deletes_nothing(self, adapter, driver):
+        unused = driver.add("unused", managed())
+        self.listing(adapter)
+        assert set(driver.artifacts) == {unused.id}
+
+
+class TestParseListing:
+    def listing(self, **overrides: Any) -> str:
+        listing = {
+            "format_version": fa.LISTING_FORMAT_VERSION,
+            "project": PROJECT,
+            "artifacts": [{"id": "cfa-1"}],
+            **overrides,
+        }
+        return json.dumps(listing)
+
+    def test_reads_the_ids_and_ignores_the_rest(self):
+        text = self.listing(
+            artifacts=[{"id": "cfa-1", "name": "x", "extra": 1}, {"id": "cfa-2"}], note="hi"
+        )
+        assert fa.parse_listing(text, PROJECT) == ["cfa-1", "cfa-2"]
+
+    def test_repeated_ids_are_read_once_in_order(self):
+        text = self.listing(artifacts=[{"id": "cfa-2"}, {"id": "cfa-1"}, {"id": "cfa-2"}])
+        assert fa.parse_listing(text, PROJECT) == ["cfa-2", "cfa-1"]
+
+    def test_no_artifacts_is_valid(self):
+        assert fa.parse_listing(self.listing(artifacts=[]), PROJECT) == []
+
+    def test_round_trips_what_is_rendered(self, driver):
+        artifact = driver.add("a", managed())
+        text = fa.render_listing(PROJECT, [fa.ProjectArtifact(artifact, ["f"])])
+        assert fa.parse_listing(text, PROJECT) == [artifact.id]
+
+    @pytest.mark.parametrize(
+        "text, message",
+        [
+            ("not json", "valid JSON"),
+            ("[]", "JSON object"),
+            (json.dumps({"project": PROJECT, "artifacts": []}), "format_version None"),
+            (
+                json.dumps({"format_version": 99, "project": PROJECT, "artifacts": []}),
+                "format_version 99",
+            ),
+            (
+                json.dumps({"format_version": 1, "project": "another", "artifacts": []}),
+                "project 'another'",
+            ),
+            (json.dumps({"format_version": 1, "project": PROJECT}), "'artifacts' list"),
+            (
+                json.dumps({"format_version": 1, "project": PROJECT, "artifacts": {}}),
+                "'artifacts' list",
+            ),
+            (
+                json.dumps({"format_version": 1, "project": PROJECT, "artifacts": ["cfa-1"]}),
+                "number 1",
+            ),
+            (
+                json.dumps({"format_version": 1, "project": PROJECT, "artifacts": [{"id": ""}]}),
+                "number 1",
+            ),
+            (
+                json.dumps({"format_version": 1, "project": PROJECT, "artifacts": [{"id": 5}]}),
+                "number 1",
+            ),
+        ],
+    )
+    def test_anything_else_is_rejected(self, text, message):
+        with pytest.raises(fa.ListingError, match=message):
+            fa.parse_listing(text, PROJECT)
+
+
+class TestSweepWithCandidates:
+    """Only the listed artifacts are considered, each one's outcome is reported, and an artifact
+    is still checked for use when it is deleted."""
+
+    FILE = "candidates.json"
+
+    def candidates(self, adapter, *ids: str) -> None:
+        listing = {
+            "format_version": fa.LISTING_FORMAT_VERSION,
+            "project": PROJECT,
+            "artifacts": [{"id": i} for i in ids],
+        }
+        (Path(adapter.config.project_root) / self.FILE).write_text(json.dumps(listing))
+
+    def infos(self, logger) -> list[str]:
+        return [call.args[0] for call in logger.info.call_args_list]
+
+    def test_unused_artifacts_that_are_not_candidates_are_left_alone(
+        self, adapter, driver, logger
+    ):
+        candidate = driver.add("candidate", managed())
+        uploaded_since = driver.add("uploaded since", managed())
+        self.candidates(adapter, candidate.id)
+
+        adapter.sweep_function_artifacts(delete=True, list_file=self.FILE)
+
+        assert set(driver.artifacts) == {uploaded_since.id}
+        assert self.infos(logger) == [f"Deleted: {candidate.id} (candidate)"]
+
+    def test_a_candidate_that_is_now_used_is_not_deleted(self, adapter, driver, flink, logger):
+        candidate = driver.add("candidate", managed())
+        self.candidates(adapter, candidate.id)
+        flink.add(FUNCTION, candidate.id)  # a function adopted it after it was listed
+
+        adapter.sweep_function_artifacts(delete=True, list_file=self.FILE)
+
+        assert set(driver.artifacts) == {candidate.id}
+        assert self.infos(logger) == [
+            f"Skipped: {candidate.id} (candidate): still used by {FUNCTION}",
+            "None of the candidate artifacts is unused.",
+        ]
+
+    @pytest.mark.parametrize(
+        "other_users, expected",
+        [(0, ""), (1, " and 1 other"), (2, " and 2 others")],
+    )
+    def test_a_used_candidate_names_one_function_and_counts_the_rest(
+        self, adapter, driver, flink, logger, other_users, expected
+    ):
+        candidate = driver.add("candidate", managed())
+        self.candidates(adapter, candidate.id)
+        flink.add(FUNCTION, candidate.id)
+        for i in range(other_users):
+            flink.add(f"{FUNCTION}_{i}", candidate.id)
+
+        adapter.sweep_function_artifacts(delete=True, list_file=self.FILE)
+
+        (skipped, *_) = self.infos(logger)
+        assert skipped.endswith(f"still used by {FUNCTION}{expected}")
+
+    def test_a_function_in_another_schema_keeps_its_schema_but_not_the_environment(
+        self, adapter, driver, flink, logger
+    ):
+        candidate = driver.add("candidate", managed())
+        self.candidates(adapter, candidate.id)
+        flink.other_database_functions["other_fn"] = candidate.id
+
+        adapter.sweep_function_artifacts(delete=True, list_file=self.FILE)
+
+        (skipped, *_) = self.infos(logger)
+        assert skipped.endswith(f"still used by {OTHER_DATABASE}.other_fn")
+        assert CATALOG not in skipped
+
+    def test_candidates_that_are_gone_or_not_this_projects_are_skipped(
+        self, adapter, driver, logger
+    ):
+        theirs = driver.add("theirs", "hand made")
+        other = driver.add("other project", managed(project="another"))
+        self.candidates(adapter, "cfa-gone", theirs.id, other.id)
+
+        adapter.sweep_function_artifacts(delete=True, list_file=self.FILE)
+
+        assert set(driver.artifacts) == {theirs.id, other.id}
+        assert self.infos(logger)[:3] == [
+            "Skipped: cfa-gone: no such artifact",
+            f"Skipped: {theirs.id} (theirs): not uploaded by dbt for this project",
+            f"Skipped: {other.id} (other project): not uploaded by dbt for this project",
+        ]
+
+    def test_without_delete_the_hint_repeats_the_list_file(self, adapter, driver, logger):
+        unused = driver.add("unused", managed())
+        self.candidates(adapter, unused.id)
+
+        adapter.sweep_function_artifacts(list_file=self.FILE)
+
+        _, hint = self.infos(logger)
+        assert f"--args '{{delete: true, list_file: {self.FILE}}}'" in hint
+        assert set(driver.artifacts) == {unused.id}
+
+    def test_an_empty_list_considers_nothing(self, adapter, driver):
+        unused = driver.add("unused", managed())
+        self.candidates(adapter)
+
+        adapter.sweep_function_artifacts(delete=True, list_file=self.FILE)
+
+        assert set(driver.artifacts) == {unused.id}
+
+    @pytest.mark.parametrize("contents", [None, "", "{", '{"format_version": 1}'])
+    def test_a_missing_or_invalid_file_fails_without_deleting_anything(
+        self, adapter, driver, contents
+    ):
+        unused = driver.add("unused", managed())
+        if contents is not None:
+            (Path(adapter.config.project_root) / self.FILE).write_text(contents)
+
+        with pytest.raises(CompilationError, match="list_file"):
+            adapter.sweep_function_artifacts(delete=True, list_file=self.FILE)
+
+        assert set(driver.artifacts) == {unused.id}
+
+    def test_a_listing_of_another_project_is_rejected(self, adapter, driver):
+        unused = driver.add("unused", managed())
+        listing = {"format_version": 1, "project": "another", "artifacts": [{"id": unused.id}]}
+        (Path(adapter.config.project_root) / self.FILE).write_text(json.dumps(listing))
+
+        with pytest.raises(CompilationError, match="another"):
+            adapter.sweep_function_artifacts(delete=True, list_file=self.FILE)
+
+        assert set(driver.artifacts) == {unused.id}
+
+    def test_functions_are_not_queried_when_no_candidate_is_this_projects(
+        self, adapter, driver, flink
+    ):
+        driver.add("unused", managed())
+        self.candidates(adapter, "cfa-gone")
+        adapter.sweep_function_artifacts(list_file=self.FILE)
+        assert flink.queries == []
 
 
 class TestAdapterValidateFunctionConfig:
