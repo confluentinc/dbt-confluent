@@ -293,15 +293,21 @@ class ArtifactSweeper:
         """The `sweep_function_artifacts` run-operation: report this project's unused artifacts
         (see `_scan_unused_artifacts`), deleting them with `delete`, and fail at the end if any
         could not be deleted. With `list_file` (see `write_listing`), only the artifacts in it
-        are considered, and what became of each is reported. `delete` must be a boolean: the
-        macro forwards `--args` unchanged, so a quoted `"false"` would otherwise be truthy and
-        delete."""
+        are considered, and what became of each is reported. `delete` must be a boolean and
+        `list_file` a non-empty string or `None`: the macro forwards `--args` unchanged, so a
+        quoted `"false"` would otherwise be truthy and delete, and an empty or falsy `list_file`
+        would drop the restriction to the listed artifacts."""
         if not isinstance(delete, bool):
             raise CompilationError(
                 f"delete must be true or false, not {delete!r}; pass it unquoted: "
                 "--args '{delete: true}'"
             )
-        candidates = self._read_candidates(list_file) if list_file else None
+        if list_file is not None and (not isinstance(list_file, str) or not list_file):
+            raise CompilationError(
+                f"list_file must be a non-empty file path, not {list_file!r}; "
+                "leave it out to consider every unused artifact"
+            )
+        candidates = self._read_candidates(list_file) if list_file is not None else None
         outcome = self._scan_unused_artifacts(delete, candidates)
         for skipped in outcome.skipped:
             logger.info(f"Skipped: {skipped.label}: {skipped.reason}")
@@ -317,7 +323,7 @@ class ArtifactSweeper:
                 logger.info(f"{'Deleted' if delete else 'Unused'}: {result.label}")
         if not delete:
             args = "delete: true"
-            if list_file:
+            if list_file is not None:
                 args += f", list_file: {list_file}"
             logger.info(
                 "To delete the unused artifacts, once no statement depends on them: "

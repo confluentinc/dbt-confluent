@@ -709,6 +709,17 @@ class TestSweepFunctionArtifacts:
 
         assert set(driver.artifacts) == {unused.id}
 
+    @pytest.mark.parametrize("list_file", ["", 0, False, [], 5])
+    def test_an_empty_or_non_string_list_file_is_rejected_before_anything_is_deleted(
+        self, adapter, driver, list_file
+    ):
+        unused = driver.add("unused", managed())
+
+        with pytest.raises(CompilationError, match="list_file must be a non-empty file path"):
+            adapter.sweep_function_artifacts(delete=True, list_file=list_file)
+
+        assert set(driver.artifacts) == {unused.id}
+
     def test_a_failed_delete_with_an_empty_message_still_fails_it(
         self, adapter, driver, logger, monkeypatch
     ):
