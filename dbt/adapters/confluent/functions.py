@@ -21,6 +21,7 @@ from dbt.adapters.contracts.connection import AdapterResponse
 
 from .function_artifacts import (
     ARTIFACT_FORMATS,
+    ARTIFACT_ID_PATTERN,
     ArtifactConfig,
     ArtifactDigest,
     artifact_display_name,
@@ -30,8 +31,7 @@ from .function_artifacts import (
 # The adapter's `execute` bound to a compute pool: `execute(sql, fetch=True, statement_name=...)`.
 FunctionExecutor = Callable[..., tuple[AdapterResponse, agate.Table]]
 
-# Flink artifact IDs look like `cfa-xxxxxx`.
-_ARTIFACT_ID_RE = re.compile(r"cfa-[A-Za-z0-9]+")
+_ARTIFACT_ID_RE = re.compile(ARTIFACT_ID_PATTERN)
 
 _FUNCTION_LANGUAGES = ("java", "python")
 
