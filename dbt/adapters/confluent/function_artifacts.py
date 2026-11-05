@@ -215,7 +215,7 @@ def scan_unused_artifacts(
             try:
                 conn.get_artifacts_api().delete(entry.artifact.id)
             except Exception as e:
-                error = str(e)
+                error = str(e) or type(e).__name__
         unused.append(UnusedArtifact(entry.artifact, error))
     return unused
 
@@ -241,12 +241,12 @@ def sweep(
         logger.info("No unused artifacts of this project.")
         return
     for result in unused:
-        if not result.error:
+        if result.error is None:
             logger.info(f"{'Deleted' if delete else 'Unused'}: {result.label}")
     if not delete:
         logger.info(
             "To delete the unused artifacts, once no statement depends on them: "
             "dbt run-operation sweep_function_artifacts --args '{delete: true}'"
         )
-    if failed := [f"{r.label}: {r.error}" for r in unused if r.error]:
+    if failed := [f"{r.label}: {r.error}" for r in unused if r.error is not None]:
         raise CompilationError(f"Could not delete: {'; '.join(failed)}")

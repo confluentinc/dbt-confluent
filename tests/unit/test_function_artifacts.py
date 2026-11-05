@@ -691,6 +691,21 @@ class TestSweepFunctionArtifacts:
 
         assert set(driver.artifacts) == {unused.id}
 
+    def test_a_failed_delete_with_an_empty_message_still_fails_it(
+        self, adapter, driver, logger, monkeypatch
+    ):
+        unused = driver.add("unused", managed())
+
+        def timeout(artifact_id, **kwargs):
+            raise TimeoutError()
+
+        monkeypatch.setattr(driver, "delete", timeout)
+
+        with pytest.raises(CompilationError, match=f"{unused.id} .*TimeoutError"):
+            adapter.sweep_function_artifacts(delete=True)
+
+        assert self.infos(logger) == []
+
     def test_it_says_when_there_is_nothing_to_clean_up(self, adapter, driver, logger):
         adapter.sweep_function_artifacts()
         assert self.infos(logger) == ["No unused artifacts of this project."]
