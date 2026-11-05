@@ -655,15 +655,17 @@ you. If every statement that uses the function is in this dbt project, the
 
 1. **Build the new artifact**, however you do today, and point your function's `artifact_path` config field to the new file.
 
-2. **Update the function and the statements that use it**:
+2. **Update the functions and the statements that use them**:
 
    ```bash
-   dbt build --select my_udf+ --full-refresh
+   dbt build --select "resource_type:function+" --full-refresh
    ```
 
-   `my_udf+` selects the function and everything downstream of it. The function is replaced
-   (uploading the new artifact), then each descendant is rebuilt after it, so its statement is
-   resubmitted against the new artifact. For a `streaming_table`, `--full-refresh` drops and
+   `resource_type:function+` selects every function in the project and everything downstream of
+   them. The sweep in step 3 considers the whole project, so refreshing only some functions
+   (for example `my_udf+`) leaves the consumers of the others bound to their old artifacts. Each
+   function is replaced (uploading its new artifact), then each descendant is rebuilt after it,
+   so its statement is resubmitted against the new artifact. For a `streaming_table`, `--full-refresh` drops and
    recreates the table and deletes its old statement first, so the table's data and state start
    over. See [Statement Lifecycle](#statement-lifecycle).
 
