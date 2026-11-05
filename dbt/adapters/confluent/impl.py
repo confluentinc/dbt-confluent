@@ -30,7 +30,7 @@ from dbt.adapters.contracts.relation import Policy, RelationConfig
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import functions, tableflow
+from . import function_artifacts, functions, tableflow
 from .catalog import query_catalog_rows
 from .dry_run_types import display_type, fitted_type
 from .function_artifacts_repo import FunctionArtifactsRepo
@@ -1088,8 +1088,8 @@ class ConfluentAdapter(SQLAdapter):
         after the drop, the function that was dropped is re-created from `existing`, which is
         held in memory only. A process that dies between the drop and the create leaves no
         function behind and nothing to restore it from. The artifact the function replaced is
-        left in place, since statements may still be bound to it. Returns the create
-        statement's response.
+        left in place, since statements may still be bound to it (see
+        `sweep_function_artifacts`). Returns the create statement's response.
         """
         conn = self.connections.get_thread_handle()
         execute = self._function_executor(compute_pool_id)
@@ -1118,7 +1118,8 @@ class ConfluentAdapter(SQLAdapter):
                 warning_tag(
                     f"Function {relation.render()} now uses artifact {artifact_id}. Statements "
                     f"started before this change stay on the old artifact {existing.artifact_id} "
-                    "until they are recreated; it is not deleted."
+                    "until they are recreated; it is not deleted. Once they are, "
+                    "`dbt run-operation sweep_function_artifacts` lists unused artifacts."
                 )
             )
         return response
@@ -1160,6 +1161,17 @@ class ConfluentAdapter(SQLAdapter):
             )
         except Exception as e:
             logger.error(f"Could not restore the previous function {relation.render()} ({e}).")
+
+    @available
+    def sweep_function_artifacts(self, delete: bool = False) -> None:
+        """The `sweep_function_artifacts` run-operation (see `function_artifacts.sweep`)."""
+        function_artifacts.sweep(
+            self.connections.get_thread_handle(),
+            self.config.project_name,
+            self.config.credentials.database,
+            lambda sql: self.execute(sql, fetch=True)[1].rows,
+            delete,
+        )
 
     @available
     def warn_function_change(self, message: str) -> None:
