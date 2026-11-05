@@ -25,15 +25,25 @@
      doesn't run it at all. Gated on `enforced`: unlike a `streaming_table`, a
      view needn't declare yml columns, and the check fails without them. The
      check runs the model's SQL, so it follows the pre-hooks, which may create
-     something that SQL reads. #}
+     something that SQL reads.
+     On the drop-and-create paths (--full-refresh, or a non-view under this
+     name) CREATE VIEW then runs the check a second time, a redundant
+     schema-probe statement. It's deliberate: this early run is what fails the
+     model before the drop, so the existing relation survives a contract
+     mismatch. #}
   {% if existing_relation is not none and config.get('contract').enforced %}
     {% do get_assert_columns_equivalent(sql) %}
   {% endif %}
 
-  -- delete the existing statement: the new one reuses its deterministic name.
-  -- If there's no existing relation, the statement probably doesn't exist either,
-  -- so suppress the loud warning the adapter emits for a pool-scoped 403.
-  {{ delete_statement_if_exists(get_statement_name(), expect_exists=(existing_relation is not none)) }}
+  -- delete the existing statement: the new one reuses its deterministic name,
+  -- so it has to be freed first. This happens before the ALTER, so if the ALTER
+  -- is rejected the old CREATE VIEW statement record is gone but the view itself
+  -- is untouched and keeps serving. Only the record is lost, which is harmless.
+  -- If there's no existing view (nothing there, or a table that a `view` model is
+  -- replacing), this model's statement probably doesn't exist either, so suppress
+  -- the loud warning the adapter emits for a pool-scoped 403.
+  {{ delete_statement_if_exists(get_statement_name(),
+                                expect_exists=(existing_relation is not none and existing_relation.is_view)) }}
   {% if not alter_existing_view %}
     {{ drop_relation_if_exists(existing_relation) }}
   {% endif %}
