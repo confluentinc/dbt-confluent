@@ -3,7 +3,7 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, TypeVar
@@ -1158,14 +1158,29 @@ class ConfluentAdapter(SQLAdapter):
             logger.error(f"Could not restore the previous function {relation.render()} ({e}).")
 
     @available
-    def sweep_function_artifacts(self, delete: bool = False) -> None:
+    def list_function_artifacts(self, list_file: str | None = None) -> None:
+        """The `list_function_artifacts` run-operation (see `function_artifacts.write_listing`)."""
+        function_artifacts.write_listing(
+            *self._scan_args(), self.config.project_root, self.config.target_path, list_file
+        )
+
+    @available
+    def sweep_function_artifacts(self, delete: bool = False, list_file: str | None = None) -> None:
         """The `sweep_function_artifacts` run-operation (see `function_artifacts.sweep`)."""
         function_artifacts.sweep(
+            *self._scan_args(),
+            self.config.project_root,
+            delete,
+            list_file,
+            self.config.credentials.schema,
+        )
+
+    def _scan_args(self) -> tuple[Connection, str, str, Callable[[str], Iterable[Sequence[Any]]]]:
+        return (
             self.connections.get_thread_handle(),
             self.config.project_name,
             self.config.credentials.database,
             lambda sql: self.execute(sql, fetch=True)[1].rows,
-            delete,
         )
 
     @available
