@@ -8,6 +8,7 @@ against in-memory fakes of the driver connection and of Flink.
 import json
 import re
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import count
 from pathlib import Path
@@ -47,6 +48,7 @@ class FakeDriver:
         self.events = events
         self.uploads: list[dict[str, Any]] = []  # `create`'s keyword arguments
         self.listed_languages: list[Any] = []  # the runtime_language of each listing
+        self.run_sql: Callable[[str], list[tuple[str, ...]]] = lambda sql: []
         self._ids = count(1)
 
     def add(
@@ -67,6 +69,9 @@ class FakeDriver:
 
     def get_artifacts_api(self):
         return self
+
+    def cursor(self):
+        return FakeCursor(self.run_sql)
 
     def list(self, runtime_language=None):
         self.listed_languages.append(runtime_language)
@@ -92,6 +97,23 @@ class FakeDriver:
     def update(self, artifact_id, *, description):
         self.get(artifact_id).description = description
         return self.artifacts[artifact_id]
+
+
+class FakeCursor:
+    """A snapshot cursor whose rows come from `run_sql`."""
+
+    def __init__(self, run_sql: Callable[[str], list[tuple[str, ...]]]):
+        self._run_sql = run_sql
+        self._rows: list[tuple[str, ...]] = []
+
+    def execute(self, sql: str):
+        self._rows = self._run_sql(sql)
+
+    def fetchall(self):
+        return self._rows
+
+    def close(self):
+        pass
 
 
 class FakeFlink:
@@ -192,6 +214,7 @@ def adapter(driver, flink, tmp_path) -> ConfluentAdapter:
     adapter = ConfluentAdapter.__new__(ConfluentAdapter)
     adapter.connections = SimpleNamespace(get_thread_handle=lambda: driver)  # type: ignore[assignment]
     adapter._artifacts_repo = FunctionArtifactsRepo()
+    driver.run_sql = lambda sql: flink.execute(sql)[1].rows
     adapter.execute = flink.execute  # type: ignore[method-assign, assignment]
     adapter.config = SimpleNamespace(  # type: ignore[assignment]
         credentials=SimpleNamespace(database=CATALOG, schema=DATABASE),
@@ -556,14 +579,13 @@ class TestDesiredStateForAnUnuploadedPackage:
 
 
 def scan(adapter, **kwargs) -> list[fa.UnusedArtifact]:
-    """`fa.scan_unused_artifacts` for the adapter's project, as the run-operations call it."""
-    return fa.scan_unused_artifacts(
+    """`ArtifactSweeper._scan_unused_artifacts` for the adapter's project, as the run-operations
+    call it."""
+    return fa.ArtifactSweeper(
         adapter.connections.get_thread_handle(),
         PROJECT,
         CATALOG,
-        lambda sql: adapter.execute(sql, fetch=True)[1].rows,
-        **kwargs,
-    )
+    )._scan_unused_artifacts(**kwargs)
 
 
 class TestScanFunctionArtifacts:
@@ -627,9 +649,9 @@ class TestScanFunctionArtifacts:
         """So a function created in between can't leave its artifact looking unused."""
         driver.add("unused", managed())
         order: list[str] = []
-        real_list, real_execute = driver.list, flink.execute
+        real_list, real_run_sql = driver.list, driver.run_sql
         driver.list = lambda **k: (order.append("list"), real_list(**k))[1]  # type: ignore[method-assign]
-        adapter.execute = lambda *a, **k: (order.append("functions"), real_execute(*a, **k))[1]  # type: ignore[method-assign]
+        driver.run_sql = lambda sql: (order.append("functions"), real_run_sql(sql))[1]
 
         scan(adapter)
 
