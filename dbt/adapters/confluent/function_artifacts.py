@@ -134,9 +134,27 @@ class ProjectArtifact(NamedTuple):
     # The functions using it, fully qualified, as of the scan.
     functions: list[str]
 
+    @property
+    def label(self) -> str:
+        return artifact_label(self.artifact)
+
 
 def artifact_label(artifact: FlinkArtifact) -> str:
     return f"{artifact.id} ({artifact.display_name})"
+
+
+class SkippedCandidate(NamedTuple):
+    """A candidate that was not considered for deletion, and why."""
+
+    label: str
+    reason: str
+
+
+class ProjectScan(NamedTuple):
+    # This project's artifacts, only the candidates among them if there are any.
+    artifacts: list[ProjectArtifact]
+    # Candidates that aren't this project's artifacts.
+    skipped: list[SkippedCandidate]
 
 
 def scan_project_artifacts(
@@ -144,21 +162,38 @@ def scan_project_artifacts(
     project: str,
     database: str,
     query_rows: Callable[[str], Iterable[Sequence[Any]]],
-) -> list[ProjectArtifact]:
+    candidates: Sequence[str] | None = None,
+) -> ProjectScan:
     """This dbt `project`'s artifacts, with the functions in `database` that use each.
 
-    Artifacts dbt didn't upload for `project` are ignored.
+    Artifacts dbt didn't upload for `project` are ignored. With `candidates` (artifact IDs), only
+    those are scanned, and any that aren't this project's are reported as skipped.
 
     The artifacts are listed before the functions, so a function created in between can't leave
     its artifact looking unused. `query_rows` runs a SQL query and returns its rows.
     """
-    ours = [
-        a for a in conn.get_artifacts_api().list() if artifact_project(a.description) == project
-    ]
+    listed = conn.get_artifacts_api().list()
+    ours = [a for a in listed if artifact_project(a.description) == project]
+    skipped: list[SkippedCandidate] = []
+    if candidates is not None:
+        ours_ids = {a.id for a in ours}
+        listed_by_id = {a.id: a for a in listed}
+        for candidate in candidates:
+            if candidate in ours_ids:
+                continue
+            other = listed_by_id.get(candidate)
+            if other is None:
+                skipped.append(SkippedCandidate(candidate, "no such artifact"))
+            else:
+                skipped.append(
+                    SkippedCandidate(artifact_label(other), "not uploaded by dbt for this project")
+                )
+        wanted = set(candidates)
+        ours = [a for a in ours if a.id in wanted]
     if not ours:
-        return []
+        return ProjectScan([], skipped)
     users = _functions_by_artifact(database, query_rows)
-    return [ProjectArtifact(a, users.get(a.id, [])) for a in ours]
+    return ProjectScan([ProjectArtifact(a, users.get(a.id, [])) for a in ours], skipped)
 
 
 def _functions_by_artifact(
@@ -186,19 +221,48 @@ class UnusedArtifact(NamedTuple):
         return artifact_label(self.artifact)
 
 
+def _unqualified(function: str, database: str, schema: str | None) -> str:
+    """A function's `database.schema.name` without what its reader already knows: the database
+    (a scan covers just one), and the schema if it is `schema`, the one being built into."""
+    for prefix in (f"{database}.{schema}." if schema else None, f"{database}."):
+        if prefix and function.startswith(prefix):
+            return function[len(prefix) :]
+    return function
+
+
+def _first_and_count(names: Sequence[str]) -> str:
+    """The first of `names`, and how many more there are, e.g. `a and 2 others`."""
+    others = len(names) - 1
+    if others == 0:
+        return names[0]
+    return f"{names[0]} and {others} other{'' if others == 1 else 's'}"
+
+
+class SweepResult(NamedTuple):
+    unused: list[UnusedArtifact]
+    # Candidates that were left alone, if there were any.
+    skipped: list[SkippedCandidate]
+
+
 def scan_unused_artifacts(
     conn: Connection,
     project: str,
     database: str,
     query_rows: Callable[[str], Iterable[Sequence[Any]]],
     delete: bool = False,
-) -> list[UnusedArtifact]:
+    candidates: Sequence[str] | None = None,
+    schema: str | None = None,
+) -> SweepResult:
     """List this dbt `project`'s artifacts that no function in `database` uses, and delete them
-    with `delete`.
+    with `delete`. With `candidates` (artifact IDs), only those are considered, and the outcome
+    is reported for each of them. Functions are named in the `schema` being built into, if any,
+    without it.
 
     Artifacts dbt didn't upload for `project` are ignored. An artifact a run uploaded but has
     not yet created its function from looks unused too, so a sweep shouldn't run alongside a
-    `dbt run`.
+    `dbt run`. Candidates narrow that to artifacts that existed when they were listed, but don't
+    remove it: the artifact API doesn't refuse to delete an artifact a function uses, so only
+    the functions looked up just before deleting guard against that.
 
     Unused by a function doesn't mean unused: statements may still be bound to an artifact,
     which is why deleting is left to the user, on their word that statements using
@@ -206,9 +270,21 @@ def scan_unused_artifacts(
 
     `error` is set if deleting an artifact failed (every one is tried).
     """
+    scan = scan_project_artifacts(conn, project, database, query_rows, candidates)
+    skipped = list(scan.skipped)
     unused: list[UnusedArtifact] = []
-    for entry in scan_project_artifacts(conn, project, database, query_rows):
+    for entry in scan.artifacts:
         if entry.functions:
+            if candidates is not None:
+                skipped.append(
+                    SkippedCandidate(
+                        entry.label,
+                        "still used by "
+                        + _first_and_count(
+                            [_unqualified(f, database, schema) for f in entry.functions]
+                        ),
+                    )
+                )
             continue
         error = None
         if delete:
@@ -217,7 +293,106 @@ def scan_unused_artifacts(
             except Exception as e:
                 error = str(e)
         unused.append(UnusedArtifact(entry.artifact, error))
-    return unused
+    return SweepResult(unused, skipped)
+
+
+LISTING_FORMAT_VERSION = 1
+DEFAULT_LISTING_FILE = "confluent_function_artifacts.json"
+
+
+def render_listing(project: str, artifacts: Iterable[ProjectArtifact]) -> str:
+    """The `list_function_artifacts` file: this project's artifacts and who uses them."""
+    entries = [
+        {"id": a.artifact.id, "name": a.artifact.display_name, "referenced_by": a.functions}
+        for a in sorted(artifacts, key=lambda a: a.artifact.id)
+    ]
+    listing = {"format_version": LISTING_FORMAT_VERSION, "project": project, "artifacts": entries}
+    return json.dumps(listing, indent=2) + "\n"
+
+
+class ListingError(ValueError):
+    """The candidates file isn't a usable `render_listing` output."""
+
+
+def parse_listing(text: str, project: str) -> list[str]:
+    """The artifact IDs in a `render_listing` file, without duplicates.
+
+    Only the IDs are read: the other fields are for people, and what an artifact is used by is
+    looked up again when it is deleted. Unknown keys are ignored.
+    """
+    try:
+        listing = json.loads(text)
+    except ValueError as e:
+        raise ListingError(f"isn't valid JSON ({e})") from e
+    if not isinstance(listing, dict):
+        raise ListingError("isn't a JSON object")
+    version = listing.get("format_version")
+    if version != LISTING_FORMAT_VERSION:
+        raise ListingError(
+            f"has format_version {version!r}, but only {LISTING_FORMAT_VERSION} is supported"
+        )
+    if listing.get("project") != project:
+        raise ListingError(
+            f"is for project {listing.get('project')!r}, not this project ({project!r})"
+        )
+    entries = listing.get("artifacts")
+    if not isinstance(entries, list):
+        raise ListingError("has no 'artifacts' list")
+    ids: list[str] = []
+    for i, entry in enumerate(entries):
+        artifact_id = entry.get("id") if isinstance(entry, dict) else None
+        if not isinstance(artifact_id, str) or not artifact_id:
+            raise ListingError(f"has an artifact (number {i + 1}) without a string 'id'")
+        ids.append(artifact_id)
+    return list(dict.fromkeys(ids))
+
+
+def write_listing(
+    conn: Connection,
+    project: str,
+    database: str,
+    query_rows: Callable[[str], Iterable[Sequence[Any]]],
+    project_root: str,
+    target_path: str,
+    list_file: str | None = None,
+) -> None:
+    """The `list_function_artifacts` run-operation: write this project's artifacts, and the
+    functions using each, to `list_file` (see `render_listing`).
+
+    `list_file` is relative to `project_root`; by default it is in `target_path`. Passed to
+    `sweep_function_artifacts` as `list_file`, it limits the sweep to what existed now.
+    """
+    list_file = list_file or str(Path(target_path) / DEFAULT_LISTING_FILE)
+    path = Path(project_root) / list_file
+    scan = scan_project_artifacts(conn, project, database, query_rows)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(render_listing(project, scan.artifacts))
+    for entry in sorted(scan.artifacts, key=lambda a: a.artifact.id):
+        count = len(entry.functions)
+        used = f"used by {count} function{'' if count == 1 else 's'}" if count else "unused"
+        logger.info(f"{entry.label}: {used}")
+    try:
+        shown = path.relative_to(Path.cwd())
+    except ValueError:
+        shown = path
+    logger.info(f"Wrote {len(scan.artifacts)} artifact(s) of this project to {shown}")
+    logger.info(
+        "To see which artifacts would be deleted: dbt run-operation sweep_function_artifacts "
+        f"--args '{{list_file: {list_file}}}'"
+    )
+
+
+def read_candidates(project_root: str, file: str, project: str) -> list[str]:
+    """The artifact IDs in a `list_file` (relative to `project_root`), failing on anything
+    that isn't a `render_listing` file for `project`, so that a bad file never turns into
+    "everything is a candidate"."""
+    path = Path(project_root) / file
+    try:
+        return parse_listing(path.read_text(), project)
+    except OSError as e:
+        raise CompilationError(f"Can't read list_file {path}: {e}") from e
+    except ListingError as e:
+        raise CompilationError(f"list_file {path} {e}") from e
 
 
 def sweep(
@@ -225,22 +400,39 @@ def sweep(
     project: str,
     database: str,
     query_rows: Callable[[str], Iterable[Sequence[Any]]],
+    project_root: str,
     delete: bool = False,
+    list_file: str | None = None,
+    schema: str | None = None,
 ) -> None:
     """The `sweep_function_artifacts` run-operation: report this project's unused artifacts
     (see `scan_unused_artifacts`), deleting them with `delete`, and fail at the end if any could
-    not be deleted."""
-    unused = scan_unused_artifacts(conn, project, database, query_rows, delete)
-    if not unused:
-        logger.info("No unused artifacts of this project.")
+    not be deleted. With `list_file` (see `write_listing`), only the artifacts in it are
+    considered, and what became of each is reported. `schema` is the one being built into
+    (see `scan_unused_artifacts`)."""
+    candidates = read_candidates(project_root, list_file, project) if list_file else None
+    outcome = scan_unused_artifacts(
+        conn, project, database, query_rows, delete, candidates, schema
+    )
+    for skipped in outcome.skipped:
+        logger.info(f"Skipped: {skipped.label}: {skipped.reason}")
+    if not outcome.unused:
+        logger.info(
+            "No unused artifacts of this project."
+            if candidates is None
+            else "None of the candidate artifacts is unused."
+        )
         return
-    for result in unused:
+    for result in outcome.unused:
         if not result.error:
             logger.info(f"{'Deleted' if delete else 'Unused'}: {result.label}")
     if not delete:
+        args = "delete: true"
+        if list_file:
+            args += f", list_file: {list_file}"
         logger.info(
             "To delete the unused artifacts, once no statement depends on them: "
-            "dbt run-operation sweep_function_artifacts --args '{delete: true}'"
+            f"dbt run-operation sweep_function_artifacts --args '{{{args}}}'"
         )
-    if failed := [f"{r.label}: {r.error}" for r in unused if r.error]:
+    if failed := [f"{r.label}: {r.error}" for r in outcome.unused if r.error]:
         raise CompilationError(f"Could not delete: {'; '.join(failed)}")
