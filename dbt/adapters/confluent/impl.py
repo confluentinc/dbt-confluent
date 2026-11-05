@@ -1164,14 +1164,12 @@ class ConfluentAdapter(SQLAdapter):
 
     @available
     def sweep_function_artifacts(self, delete: bool = False) -> None:
-        """The `sweep_function_artifacts` run-operation (see `function_artifacts.sweep`)."""
-        function_artifacts.sweep(
+        """The `sweep_function_artifacts` run-operation (see `ArtifactSweeper.sweep`)."""
+        function_artifacts.ArtifactSweeper(
             self.connections.get_thread_handle(),
             self.config.project_name,
             self.config.credentials.database,
-            lambda sql: self.execute(sql, fetch=True)[1].rows,
-            delete,
-        )
+        ).sweep(delete)
 
     @available
     def warn_function_change(self, message: str) -> None:

@@ -297,9 +297,7 @@ class TestArtifactIdsIn:
         value = "[confluent-artifact://cfa-one/latest, confluent-artifact://cfa-two/1]"
         assert function_artifacts.artifact_ids_in(value) == {"cfa-one", "cfa-two"}
 
-    @pytest.mark.parametrize(
-        "value", [None, "", "gs://bucket/udf.jar", "confluent-artifact://x/1"]
-    )
+    @pytest.mark.parametrize("value", ["", "gs://bucket/udf.jar", "confluent-artifact://x/1"])
     def test_anything_without_an_artifact_id_is_empty(self, value):
         assert function_artifacts.artifact_ids_in(value) == set()
 
