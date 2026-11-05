@@ -556,14 +556,14 @@ class TestDesiredStateForAnUnuploadedPackage:
 
 
 def scan(adapter, **kwargs) -> list[fa.UnusedArtifact]:
-    """`fa.scan_unused_artifacts` for the adapter's project, as the run-operations call it."""
-    return fa.scan_unused_artifacts(
+    """`ArtifactSweeper._scan_unused_artifacts` for the adapter's project, as the run-operations
+    call it."""
+    return fa.ArtifactSweeper(
         adapter.connections.get_thread_handle(),
         PROJECT,
         CATALOG,
         lambda sql: adapter.execute(sql, fetch=True)[1].rows,
-        **kwargs,
-    )
+    )._scan_unused_artifacts(**kwargs)
 
 
 class TestScanFunctionArtifacts:
