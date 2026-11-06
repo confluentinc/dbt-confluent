@@ -617,7 +617,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
 @requires_global_key
 class TestFunctionUpdateFlow(FunctionFixtures):
     """The CI/CD flow documented under "Updating a function's artifact" in MATERIALIZATIONS.md:
-    build a new artifact, `dbt build --select <function>+ --full-refresh` so the function's
+    build a new artifact, `dbt build --select "resource_type:function+" --full-refresh` so the function's
     consumers are resubmitted on it, then `sweep_function_artifacts` to delete the old artifact.
 
     The consumer is a running `streaming_table`, whose statement stays bound to the artifact it
@@ -693,7 +693,7 @@ models:
         old_statement_id = self.consumer_statement(project).statement_id
 
         write_package(project, "v2")
-        run_dbt(["build", "--select", f"{FUNCTION_NAME}+", "--full-refresh"])
+        run_dbt(["build", "--select", "resource_type:function+", "--full-refresh"])
 
         new_artifact_id = self.live_artifact_id(project)
         assert new_artifact_id != old_artifact_id

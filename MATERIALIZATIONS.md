@@ -675,9 +675,9 @@ and every update uploads a new one. A package is distinct by its bytes, not its 
 rebuilding unchanged sources can still produce a new artifact (for example from embedded
 timestamps or file ordering).
 
-**dbt never deletes artifacts**, not even the one a replaced function used to run on: running and
+**dbt never automatically deletes artifacts**, not even the one a replaced function used to run on: running and
 stopped statements stay bound to the artifact they were compiled against. Cleaning up is up to
-you. If every statement that uses the function is in this dbt project, the
+you, but can be assisted. If every statement that uses the function is in this dbt project, the
 `sweep_function_artifacts` operation makes that easy:
 
 1. **Build the new artifact**, however you do today, and point your function's `artifact_path` config field to the new file.
