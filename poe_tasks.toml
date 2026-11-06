@@ -27,12 +27,38 @@ sequence = [
 # Test suite tasks
 [tasks.unit]
 help = "Run unit tests with coverage"
-cmd = "pytest tests/unit --junitxml=test-results.xml --cov"
+cmd = "pytest -m unit --junitxml=test-results.xml --cov"
 
-[tasks.integration]
-help = "Run integration (functional) tests with coverage"
-cmd = "pytest tests/functional --junitxml=test-results.xml --cov"
+[tasks.functional]
+help = "Run functional tests with coverage (they skip if the Confluent Cloud env vars are not set)"
+cmd = "pytest -m functional --junitxml=test-results.xml --cov"
 
 [tasks.test-all]
 help = "Run full test suite with JUnit XML report and coverage"
 cmd = "pytest --junitxml=test-results.xml --cov"
+
+# CI/CD mirror: everything the Semaphore pipeline checks, runnable locally (e.g. as a pre-push hook)
+[tasks.changelog-check]
+help = "Check that the branch has a changelog fragment (skipped on main and release branches)"
+interpreter = "bash"
+shell = '''
+branch="${SEMAPHORE_GIT_WORKING_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
+if [ "$branch" = "main" ] || [[ "$branch" =~ ^v[0-9]+\.[0-9]+\.x$ ]]; then
+  echo "Skipping changelog check on $branch"
+else
+  towncrier check
+fi
+'''
+
+[tasks.build]
+help = "Build the sdist and wheel"
+cmd = "uv build"
+
+[tasks.cicd]
+help = "Run everything Semaphore does: lint, changelog check, build, tests"
+sequence = [
+    "lint",
+    "changelog-check",
+    "build",
+    "test-all",
+]

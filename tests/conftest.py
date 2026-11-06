@@ -26,6 +26,53 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     )
 
 
+# Env vars without which no functional test can build its profile. Credentials are handled
+# separately (see `missing_functional_env`): either API key pair will do. Other optional ones
+# (the second compute pool) are not listed: the tests needing them skip themselves.
+REQUIRED_FUNCTIONAL_ENV_VARS = (
+    "CONFLUENT_TEST_DBNAME",
+    "CONFLUENT_ENV_ID",
+    "CONFLUENT_ORG_ID",
+    "CONFLUENT_COMPUTE_POOL_ID",
+    "CONFLUENT_CLOUD_PROVIDER",
+    "CONFLUENT_CLOUD_REGION",
+)
+
+CREDENTIAL_ENV_VAR_PAIRS = (
+    ("CONFLUENT_GLOBAL_API_KEY", "CONFLUENT_GLOBAL_API_SECRET"),
+    ("CONFLUENT_FLINK_API_KEY", "CONFLUENT_FLINK_API_SECRET"),
+)
+
+
+def missing_functional_env() -> list[str]:
+    """Descriptions of what is missing for functional tests to run; empty if they can."""
+    missing = [name for name in REQUIRED_FUNCTIONAL_ENV_VARS if not os.getenv(name)]
+    if not any(all(os.getenv(name) for name in pair) for pair in CREDENTIAL_ENV_VAR_PAIRS):
+        missing.append(
+            " and ".join(CREDENTIAL_ENV_VAR_PAIRS[0])
+            + " (or CONFLUENT_FLINK_API_KEY and CONFLUENT_FLINK_API_SECRET)"
+        )
+    return missing
+
+
+_SUITE_MARKERS = {"unit": pytest.mark.unit, "functional": pytest.mark.functional}
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Mark each test `unit` or `functional` by the top-level tests/ directory it lives in, so
+    `pytest -m unit` / `pytest -m functional` select a suite. A test outside both is an error
+    rather than silently escaping both selections."""
+    tests_dir = config.rootpath / "tests"
+    for item in items:
+        suite = item.path.relative_to(tests_dir).parts[0]
+        if suite not in _SUITE_MARKERS:
+            raise pytest.UsageError(
+                f"{item.nodeid} must live under tests/unit/ or tests/functional/ "
+                "so that it is marked `unit` or `functional`."
+            )
+        item.add_marker(_SUITE_MARKERS[suite])
+
+
 @pytest.fixture(scope="class")
 def unique_schema(request, prefix):
     """
@@ -35,11 +82,15 @@ def unique_schema(request, prefix):
     Since we don't want to create a cluster ad hoc for each test run,
     we expect it to be already present, and the name should be passed
     as an env var. The same env var is used in the test profile fixture.
+
+    Every functional test class depends on this fixture (directly or via the profile and
+    project fixtures), so it is also where the functional suite skips, rather than errors, when
+    the environment is not configured.
     """
-    dbname = os.getenv("CONFLUENT_TEST_DBNAME")
-    if not dbname:
-        raise ValueError("CONFLUENT_TEST_DBNAME env var needs to be set")
-    return dbname
+    missing = missing_functional_env()
+    if missing:
+        pytest.skip(f"functional tests require env vars: {', '.join(missing)}")
+    return os.environ["CONFLUENT_TEST_DBNAME"]
 
 
 @pytest.fixture(scope="class")
