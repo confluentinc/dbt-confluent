@@ -78,8 +78,10 @@ confluent = "dbt.adapters.confluent"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/functional", "tests/unit"]
-addopts = "-v --color=yes --dist=loadscope"
+addopts = "-v --color=yes --dist=loadscope --strict-markers"
 markers = [
+    "unit: tests that need no Confluent Cloud credentials (everything under tests/unit; applied automatically)",
+    "functional: tests that run against a live Confluent Cloud environment (everything under tests/functional; applied automatically)",
     "serial: must not run under pytest-xdist (e.g. it observes the whole shared environment, or uses fixed relation names); see tests/functional/conftest.py",
 ]
 env_files = ["test.env"]
