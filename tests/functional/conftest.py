@@ -12,12 +12,12 @@ from tests.functional.adapter.isolation import ISOLATION_SLUG_ENV_VAR, record_fa
 
 # Env vars without which no functional test can build its profile. Credentials are handled
 # separately (see `missing_functional_env`): either API key pair will do. Other optional ones
-# (the second compute pool) are not listed: the tests needing them skip themselves.
+# (the compute pools: without CONFLUENT_COMPUTE_POOL_ID statements run in the environment's
+# default pool) are not listed: the tests needing them skip themselves.
 REQUIRED_FUNCTIONAL_ENV_VARS = (
     "CONFLUENT_TEST_DBNAME",
     "CONFLUENT_ENV_ID",
     "CONFLUENT_ORG_ID",
-    "CONFLUENT_COMPUTE_POOL_ID",
     "CONFLUENT_CLOUD_PROVIDER",
     "CONFLUENT_CLOUD_REGION",
 )

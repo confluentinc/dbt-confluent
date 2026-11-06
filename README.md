@@ -241,7 +241,6 @@ Set the following environment variables (or add them to a `test.env` file):
 ```bash
 export CONFLUENT_ENV_ID=env-xxxxxx
 export CONFLUENT_ORG_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-export CONFLUENT_COMPUTE_POOL_ID=lfcp-xxxxx
 export CONFLUENT_CLOUD_PROVIDER=aws
 export CONFLUENT_CLOUD_REGION=us-west-6
 export CONFLUENT_TEST_DBNAME=dbname
@@ -249,6 +248,10 @@ export CONFLUENT_TEST_DBNAME=dbname
 # pair further below (which is preferred when both are set).
 export CONFLUENT_FLINK_API_KEY=xxx
 export CONFLUENT_FLINK_API_SECRET=xxx
+
+# Optional: a compute pool for the tests to run statements in. When unset, statements run in the
+# environment+region default compute pool.
+export CONFLUENT_COMPUTE_POOL_ID=lfcp-xxxxx
 
 # Optional: a second compute pool (same environment + region, different from
 # CONFLUENT_COMPUTE_POOL_ID) used only by the per-model compute pool test.
