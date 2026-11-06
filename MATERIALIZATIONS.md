@@ -669,16 +669,17 @@ comparing. Runs that replace the same function concurrently can interfere with e
 
 #### Updating a function's artifact
 
-Each organization, cloud, region and environment can have **at most 100 Flink artifacts** (see
-Confluent's [UDF limitations](https://docs.confluent.io/cloud/current/flink/concepts/user-defined-functions.html#udf-limitations)),
-and every update uploads a new one. A package is distinct by its bytes, not its sources, so
-rebuilding unchanged sources can still produce a new artifact (for example from embedded
-timestamps or file ordering).
+When using the `artifact_path` field to build a function from a package on disk,
+the artifact is automatically updated during a `dbt build` when the referenced package has changed.
 
-**dbt never automatically deletes artifacts**, not even the one a replaced function used to run on: running and
-stopped statements stay bound to the artifact they were compiled against. Cleaning up is up to
-you, but can be assisted. If every statement that uses the function is in this dbt project, the
-`sweep_function_artifacts` operation makes that easy:
+_Note: A package is distinct by its bytes, not its sources, so rebuilding unchanged sources can still produce
+a new artifact (for example from embedded timestamps or file ordering)._
+
+Importantly, dbt never automatically deletes artifacts, because running and stopped statements stay bound to the artifact they were compiled against.
+Given the limit of **at most 100 Flink artifacts** (see Confluent's [UDF limitations](https://docs.confluent.io/cloud/current/flink/concepts/user-defined-functions.html#udf-limitations))
+per organization, cloud, region and environment, it is important to clean up unused artifacts to avoid hitting the limit.
+
+If every statement that uses the function is in this dbt project, the `sweep_function_artifacts` operation makes cleanup easy:
 
 1. **Build the new artifact**, however you do today, and point your function's `artifact_path` config field to the new file.
 
@@ -711,6 +712,40 @@ you, but can be assisted. If every statement that uses the function is in this d
    **"Unused by a function" doesn't mean "unused".** The operation can't see statements, so only
    delete after step 2 has recreated them, and never while a `dbt run` is in progress (an artifact
    it has just uploaded may not have its function yet).
+
+   **Limiting the sweep to artifacts that existed before a run.** An artifact another job has
+   uploaded, but whose function it hasn't created yet, looks unused. To keep the sweep away from
+   artifacts like that, list this project's artifacts first, and pass the list back afterwards:
+
+   ```bash
+   dbt run-operation list_function_artifacts      # writes target/confluent_function_artifacts.json
+   dbt run --select my_udf+ --full-refresh
+   dbt run-operation sweep_function_artifacts \
+     --args '{list_file: target/confluent_function_artifacts.json}'                # dry run
+   dbt run-operation sweep_function_artifacts \
+     --args '{delete: true, list_file: target/confluent_function_artifacts.json}'  # delete
+   ```
+
+   `list_function_artifacts` prints the dry-run command, and the dry run prints the one that
+   deletes, each with the file's path filled in. `list_file` on `list_function_artifacts` writes
+   the file somewhere else. On `sweep_function_artifacts` it limits the sweep to the artifacts in
+   the file, and the outcome is reported for each: deleted, or skipped because it is still used,
+   no longer exists, or isn't this project's. The file is for people too:
+   it names each artifact and the functions using it, and deleting an entry excludes that artifact.
+   A file that is missing or isn't one `list_function_artifacts` wrote for this project fails the
+   operation without deleting anything.
+
+   This narrows the risk without removing it. Confluent doesn't refuse to delete an artifact a
+   function uses, so a function created from a listed artifact while the sweep runs can lose it.
+   Don't run the sweep while another job deploys functions of this project to the same
+   environment.
+
+For artifacts that are managed outside of dbt (referenced by `artifact_id`), cleanup is completely manual,
+but the same principles apply. Always follow the same procedure:
+
+- Upload new artifacts first.
+- Resubmit any statements to ensure they pick up the new artifact.
+- Remove the old artifact only after all statements have been resubmitted.
 
 ---
 
