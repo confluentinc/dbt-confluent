@@ -1163,13 +1163,23 @@ class ConfluentAdapter(SQLAdapter):
             logger.error(f"Could not restore the previous function {relation.render()} ({e}).")
 
     @available
-    def sweep_function_artifacts(self, delete: bool = False) -> None:
+    def list_function_artifacts(self, list_file: str | None = None) -> None:
+        """The `list_function_artifacts` run-operation (see `ArtifactSweeper.write_listing`)."""
+        self._artifact_sweeper().write_listing(self.config.target_path, list_file)
+
+    @available
+    def sweep_function_artifacts(self, delete: bool = False, list_file: str | None = None) -> None:
         """The `sweep_function_artifacts` run-operation (see `ArtifactSweeper.sweep`)."""
-        function_artifacts.ArtifactSweeper(
+        self._artifact_sweeper().sweep(delete, list_file)
+
+    def _artifact_sweeper(self) -> function_artifacts.ArtifactSweeper:
+        return function_artifacts.ArtifactSweeper(
             self.connections.get_thread_handle(),
             self.config.project_name,
             self.config.credentials.database,
-        ).sweep(delete)
+            self.config.credentials.schema,
+            self.config.project_root,
+        )
 
     @available
     def warn_function_change(self, message: str) -> None:
