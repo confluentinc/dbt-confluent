@@ -212,7 +212,7 @@ Routine development tasks are defined in [`poe_tasks.toml`](poe_tasks.toml) and 
 | `uv run poe test-all` | Both suites with JUnit XML and coverage (functional tests skip if the environment isn't configured) |
 | `uv run poe changelog-check` | Require a changelog fragment (skipped on `main` and `vX.Y.x` branches) |
 | `uv run poe build` | Build the sdist and wheel |
-| `uv run poe cicd` | Everything Semaphore does: `lint`, `changelog-check`, `build`, `test-all`. Handy as a pre-push hook |
+| `uv run poe cicd` | Everything Semaphore does: `lint`, `changelog-check`, `build`, `unit`. Handy as a pre-push hook |
 
 See [Running tests](#running-tests) for the test suites and the environment they need.
 

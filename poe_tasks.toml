@@ -55,10 +55,10 @@ help = "Build the sdist and wheel"
 cmd = "uv build"
 
 [tasks.cicd]
-help = "Run everything Semaphore does: lint, changelog check, build, tests"
+help = "Run everything Semaphore does: lint, changelog check, build, unit tests"
 sequence = [
     "lint",
     "changelog-check",
     "build",
-    "test-all",
+    "unit",
 ]
