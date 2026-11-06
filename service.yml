@@ -7,8 +7,6 @@ codeowners:
   enable: true
 renovatebot:
   enable: true
-  automerge:
-    enable: true
 semaphore:
   enable: true
   status_level: block
@@ -17,3 +15,6 @@ code_artifact:
   enable: true
   package_paths:
     - pypi-internal/pypi//dbt-confluent*
+automerge:
+  renovate:
+    enable: true
