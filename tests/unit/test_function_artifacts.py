@@ -22,6 +22,7 @@ from confluent_sql import (
     ArtifactContentFormat,
     ArtifactNotFoundError,
     ArtifactRuntimeLanguage,
+    FlinkArtifact,
     OperationalError,
 )
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
@@ -578,19 +579,23 @@ class TestDesiredStateForAnUnuploadedPackage:
         assert functions.diff_function_state(live, desired)
 
 
-def scan(adapter, **kwargs) -> list[fa.UnusedArtifact]:
-    """`ArtifactSweeper._scan_unused_artifacts` for the adapter's project, as the run-operations
-    call it."""
-    return fa.ArtifactSweeper(
-        adapter.connections.get_thread_handle(),
-        PROJECT,
-        CATALOG,
-    )._scan_unused_artifacts(**kwargs)
+def sweeper(adapter) -> fa.ArtifactSweeper:
+    """The `ArtifactSweeper` for the adapter's project, as the run-operation builds it."""
+    return fa.ArtifactSweeper(adapter.connections.get_thread_handle(), PROJECT, CATALOG)
+
+
+def find_unused(adapter) -> list[FlinkArtifact]:
+    return sweeper(adapter)._unused_artifacts()
+
+
+def delete_unused(adapter) -> list[fa.UnusedArtifact]:
+    s = sweeper(adapter)
+    return s._delete_artifacts(s._unused_artifacts())
 
 
 class TestScanFunctionArtifacts:
     def names(self, results) -> list[str]:
-        return [r.label for r in results]
+        return [fa.artifact_label(a) for a in results]
 
     def test_lists_this_projects_artifacts_that_no_function_uses(self, adapter, driver, flink):
         used = driver.add("used", managed())
@@ -603,7 +608,7 @@ class TestScanFunctionArtifacts:
         driver.add("no description", None)
         before = set(driver.artifacts)
 
-        found = scan(adapter)
+        found = find_unused(adapter)
 
         assert self.names(found) == [f"{unused.id} (unused)"]
         assert set(driver.artifacts) == before  # nothing is deleted by default
@@ -617,7 +622,7 @@ class TestScanFunctionArtifacts:
         theirs = driver.add("theirs", "hand made")
         other = driver.add("other project", managed(project="another"))
 
-        found = scan(adapter, delete=True)
+        found = delete_unused(adapter)
 
         assert [r.error for r in found] == [None]
         assert set(driver.artifacts) == {used.id, theirs.id, other.id}
@@ -627,7 +632,7 @@ class TestScanFunctionArtifacts:
         count = 250  # past any page size or the org's artifact limit
         for i in range(count):
             driver.add(f"unused-{i}", managed())
-        assert len(scan(adapter)) == count
+        assert len(find_unused(adapter)) == count
 
     def test_a_failed_delete_does_not_stop_the_rest(self, adapter, driver, monkeypatch):
         first, second, third = (driver.add(n, managed()) for n in ("a", "b", "c"))
@@ -640,7 +645,7 @@ class TestScanFunctionArtifacts:
 
         monkeypatch.setattr(driver, "delete", flaky)
 
-        results = scan(adapter, delete=True)
+        results = delete_unused(adapter)
 
         assert [bool(r.error) for r in results] == [False, True, False]
         assert set(driver.artifacts) == {second.id}
@@ -653,20 +658,20 @@ class TestScanFunctionArtifacts:
         driver.list = lambda **k: (order.append("list"), real_list(**k))[1]  # type: ignore[method-assign]
         driver.run_sql = lambda sql: (order.append("functions"), real_run_sql(sql))[1]
 
-        scan(adapter)
+        find_unused(adapter)
 
         assert order == ["list", "functions"]
 
     def test_a_marker_without_a_project_is_ignored(self, adapter, driver):
         driver.add("legacy", '{"managed_by":"dbt-confluent"}')
-        assert scan(adapter, delete=True) == []
+        assert delete_unused(adapter) == []
         assert len(driver.artifacts) == 1
 
     def test_functions_are_read_from_the_environments_information_schema(
         self, adapter, driver, flink
     ):
         driver.add("unused", managed())
-        scan(adapter)
+        find_unused(adapter)
         (query,) = flink.queries
         assert f"`{CATALOG}`.`INFORMATION_SCHEMA`.`ROUTINES`" in query
 
@@ -674,7 +679,7 @@ class TestScanFunctionArtifacts:
         self, adapter, driver, flink
     ):
         driver.add("theirs", "hand made")
-        scan(adapter)
+        find_unused(adapter)
         assert flink.queries == []
 
 

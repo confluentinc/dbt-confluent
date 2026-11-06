@@ -10,7 +10,7 @@ create the new one.
 
 The old artifact is never deleted as part of a replace: running and stopped statements stay
 bound to the artifact they were compiled against, and nothing tells us which statements those
-are. `scan_unused_artifacts` finds the candidates for an explicit, manual sweep instead.
+are. `ArtifactSweeper` finds the candidates for an explicit, manual sweep instead.
 
 Every dbt-created artifact carries a `managed_by` marker naming the dbt project that uploaded
 it. An artifact without it, or from another project, is never deleted by dbt.
@@ -140,7 +140,7 @@ def artifact_label(artifact: FlinkArtifact) -> str:
 
 class UnusedArtifact(NamedTuple):
     artifact: FlinkArtifact
-    # Why deleting it failed, if it was asked for and failed.
+    # Why deleting it failed; None if it was deleted.
     error: str | None
 
     @property
@@ -160,7 +160,7 @@ class ArtifactSweeper:
 
     def sweep(self, delete: bool = False) -> None:
         """The `sweep_function_artifacts` run-operation: report this project's unused artifacts
-        (see `scan_unused_artifacts`), deleting them with `delete`, and fail at the end if any could
+        (see `_unused_artifacts`), deleting them with `delete`, and fail at the end if any could
         not be deleted. `delete` must be a boolean: the macro forwards `--args` unchanged, so a
         quoted `"false"` would otherwise be truthy and delete."""
         if not isinstance(delete, bool):
@@ -168,24 +168,28 @@ class ArtifactSweeper:
                 f"delete must be true or false, not {delete!r}; pass it unquoted: "
                 "--args '{delete: true}'"
             )
-        unused = self._scan_unused_artifacts(delete)
+        unused = self._unused_artifacts()
         if not unused:
             logger.info("No unused artifacts of this project.")
             return
-        for result in unused:
-            if result.error is None:
-                logger.info(f"{'Deleted' if delete else 'Unused'}: {result.label}")
-        if not delete:
+
+        if delete:
+            results = self._delete_artifacts(unused)
+            for result in results:
+                if result.error is None:
+                    logger.info(f"Deleted: {result.label}")
+            if failed := [f"{r.label}: {r.error}" for r in results if r.error is not None]:
+                raise CompilationError(f"Could not delete: {'; '.join(failed)}")
+        else:
+            for artifact in unused:
+                logger.info(f"Unused: {artifact_label(artifact)}")
             logger.info(
                 "To delete the unused artifacts, once no statement depends on them: "
                 "dbt run-operation sweep_function_artifacts --args '{delete: true}'"
             )
-        if failed := [f"{r.label}: {r.error}" for r in unused if r.error is not None]:
-            raise CompilationError(f"Could not delete: {'; '.join(failed)}")
 
-    def _scan_unused_artifacts(self, delete: bool = False) -> list[UnusedArtifact]:
-        """List this project's artifacts that no function in the database uses, and delete them
-        with `delete`.
+    def _unused_artifacts(self) -> list[FlinkArtifact]:
+        """This project's artifacts that no function in the database uses. Read-only.
 
         Artifacts dbt didn't upload for the project are ignored. An artifact a run uploaded but has
         not yet created its function from looks unused too, so a sweep shouldn't run alongside a
@@ -194,21 +198,20 @@ class ArtifactSweeper:
         Unused by a function doesn't mean unused: statements may still be bound to an artifact,
         which is why deleting is left to the user, on their word that statements using
         an old artifact were recreated. They stay bound to it, and fail to restart once it is gone.
-
-        `error` is set if deleting an artifact failed (every one is tried).
         """
-        unused: list[UnusedArtifact] = []
-        for entry in self._scan_project_artifacts():
-            if entry.functions:
-                continue
+        return [entry.artifact for entry in self._scan_project_artifacts() if not entry.functions]
+
+    def _delete_artifacts(self, artifacts: list[FlinkArtifact]) -> list[UnusedArtifact]:
+        """Delete each of `artifacts`, trying every one; `error` is set on those that failed."""
+        results: list[UnusedArtifact] = []
+        for artifact in artifacts:
             error = None
-            if delete:
-                try:
-                    self._conn.get_artifacts_api().delete(entry.artifact.id)
-                except Exception as e:
-                    error = str(e) or type(e).__name__
-            unused.append(UnusedArtifact(entry.artifact, error))
-        return unused
+            try:
+                self._conn.get_artifacts_api().delete(artifact.id)
+            except Exception as e:
+                error = str(e) or type(e).__name__
+            results.append(UnusedArtifact(artifact, error))
+        return results
 
     def _scan_project_artifacts(self) -> list[ProjectArtifact]:
         """This project's artifacts, with the functions in the database that use each.
