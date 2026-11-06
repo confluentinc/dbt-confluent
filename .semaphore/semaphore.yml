@@ -61,13 +61,7 @@ blocks:
       jobs:
         - name: "Run Tests"
           commands:
-            - |
-              if [ -z "${CONFLUENT_FLINK_API_KEY:-}" ]; then
-                echo "CONFLUENT_FLINK_API_KEY not set, skipping integration tests"
-                uv run --frozen poe unit
-              else
-                uv run --frozen poe test-all
-              fi
+            - uv run --frozen poe unit
       epilogue:
         always:
           commands:

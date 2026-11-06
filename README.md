@@ -197,16 +197,46 @@ uv sync --dev
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for changelog and contribution guidelines.
 
+### Development tasks
+
+Routine development tasks are defined in [`poe_tasks.toml`](poe_tasks.toml) and run with [poe the poet](https://poethepoet.natn.io/) (already installed by `uv sync --dev`). These are the same tasks CI runs, so a local run matches Semaphore; `poe cicd` runs the whole pipeline in one go. List them with `uv run poe --help`.
+
+| Task | What it does |
+|---|---|
+| `uv run poe lint` | All static checks: the three below, in order |
+| `uv run poe ruff-check` | Ruff linter |
+| `uv run poe ruff-format-check` | Ruff formatting check (changes nothing) |
+| `uv run poe mypy` | Mypy type checks |
+| `uv run poe unit` | Unit tests (`pytest -m unit`) with JUnit XML and coverage |
+| `uv run poe functional` | Functional tests (`pytest -m functional`) with JUnit XML and coverage. Skips, rather than fails, unless the minimal environment variables below are set (or found in `test.env`) |
+| `uv run poe test-all` | Both suites with JUnit XML and coverage (functional tests skip if the environment isn't configured) |
+| `uv run poe changelog-check` | Require a changelog fragment (skipped on `main` and `vX.Y.x` branches) |
+| `uv run poe build` | Build the sdist and wheel |
+| `uv run poe cicd` | Everything Semaphore does: `lint`, `changelog-check`, `build`, `unit`. Handy as a pre-push hook |
+
+See [Running tests](#running-tests) for the test suites and the environment they need.
+
 ### Code quality
 
 ```bash
-uv run ruff check dbt/ tests/
-uv run ruff format --check dbt/ tests/
+uv run poe lint
 ```
+
+To apply Ruff's formatting rather than just check it: `uv run ruff format dbt/ tests/`.
 
 ### Running tests
 
-Tests require a Confluent Cloud environment. Set the following environment variables (or add them to a `test.env` file):
+Tests under `tests/unit` are marked `unit` and need no credentials; tests under `tests/functional` are marked `functional` and run against a live Confluent Cloud environment. The markers are applied automatically by directory, so either suite can be selected with `-m`, or through the equivalent [poe](https://poethepoet.natn.io/) tasks (which also write `test-results.xml` and report coverage):
+
+```bash
+uv run pytest -m unit          # or: uv run poe unit
+uv run pytest -m functional    # or: uv run poe functional
+uv run pytest                  # or: uv run poe test-all (both suites)
+```
+
+The functional tests (`pytest -m functional`, `poe functional`, or a bare `pytest` / `poe test-all`) need the minimal set of environment variables below: the first block of exports, which includes one complete API key pair (Flink-region or Global). If the minimal set is not present, either exported or in a `test.env` file, the functional tests are skipped rather than failed, and the skip message names what is missing. The remaining variables are optional and only gate the individual tests that use them.
+
+Set the following environment variables (or add them to a `test.env` file):
 
 ```bash
 export CONFLUENT_ENV_ID=env-xxxxxx
@@ -215,6 +245,8 @@ export CONFLUENT_COMPUTE_POOL_ID=lfcp-xxxxx
 export CONFLUENT_CLOUD_PROVIDER=aws
 export CONFLUENT_CLOUD_REGION=us-west-6
 export CONFLUENT_TEST_DBNAME=dbname
+# Minimal set also needs one complete API key pair: this Flink-region pair, or the Global
+# pair further below (which is preferred when both are set).
 export CONFLUENT_FLINK_API_KEY=xxx
 export CONFLUENT_FLINK_API_SECRET=xxx
 
