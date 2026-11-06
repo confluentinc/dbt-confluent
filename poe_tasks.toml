@@ -31,7 +31,9 @@ cmd = "pytest -m unit --junitxml=test-results.xml --cov"
 
 [tasks.functional]
 help = "Run functional tests with coverage (they skip if the Confluent Cloud env vars are not set)"
-cmd = "pytest -m functional --junitxml=test-results.xml --cov"
+# Functional tests alone (or all skipped) cannot meet the repo-wide coverage gate, which the
+# unit and test-all tasks still enforce; keep the report but not the gate.
+cmd = "pytest -m functional --junitxml=test-results.xml --cov --cov-fail-under=0"
 
 [tasks.test-all]
 help = "Run full test suite with JUnit XML report and coverage"

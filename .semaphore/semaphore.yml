@@ -40,12 +40,7 @@ blocks:
             - uv run --frozen poe mypy
         - name: "Changelog Check"
           commands:
-            - |
-              if [ "$SEMAPHORE_GIT_WORKING_BRANCH" = "main" ] || [[ "$SEMAPHORE_GIT_WORKING_BRANCH" =~ ^v[0-9]+\.[0-9]+\.x$ ]]; then
-                echo "Skipping changelog check on $SEMAPHORE_GIT_WORKING_BRANCH"
-              else
-                uv run --frozen towncrier check
-              fi
+            - uv run --frozen poe changelog-check
 
   - name: "Build"
     dependencies: []
