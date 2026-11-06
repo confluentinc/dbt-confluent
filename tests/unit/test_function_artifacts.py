@@ -8,6 +8,7 @@ against in-memory fakes of the driver connection and of Flink.
 import json
 import re
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import count
 from pathlib import Path
@@ -21,6 +22,7 @@ from confluent_sql import (
     ArtifactContentFormat,
     ArtifactNotFoundError,
     ArtifactRuntimeLanguage,
+    FlinkArtifact,
     OperationalError,
 )
 from dbt_common.exceptions import CompilationError, DbtDatabaseError
@@ -32,6 +34,7 @@ from dbt.adapters.confluent.impl import ConfluentAdapter
 
 CATALOG = "env-1"
 DATABASE = "cluster-a"
+OTHER_DATABASE = "cluster-b"
 FUNCTION = "is_smaller"
 CLASS_NAME = "pkg.mod.is_smaller"
 PROJECT = "proj"
@@ -46,6 +49,7 @@ class FakeDriver:
         self.events = events
         self.uploads: list[dict[str, Any]] = []  # `create`'s keyword arguments
         self.listed_languages: list[Any] = []  # the runtime_language of each listing
+        self.run_sql: Callable[[str], list[tuple[str, ...]]] = lambda sql: []
         self._ids = count(1)
 
     def add(
@@ -67,6 +71,9 @@ class FakeDriver:
     def get_artifacts_api(self):
         return self
 
+    def cursor(self):
+        return FakeCursor(self.run_sql)
+
     def list(self, runtime_language=None):
         self.listed_languages.append(runtime_language)
         return list(self.artifacts.values())
@@ -83,9 +90,31 @@ class FakeDriver:
             raise ArtifactNotFoundError("gone", artifact_id=artifact_id)
         return self.artifacts[artifact_id]
 
+    def delete(self, artifact_id, **_):
+        self.get(artifact_id)
+        self.events.append(f"delete {artifact_id}")
+        del self.artifacts[artifact_id]
+
     def update(self, artifact_id, *, description):
         self.get(artifact_id).description = description
         return self.artifacts[artifact_id]
+
+
+class FakeCursor:
+    """A snapshot cursor whose rows come from `run_sql`."""
+
+    def __init__(self, run_sql: Callable[[str], list[tuple[str, ...]]]):
+        self._run_sql = run_sql
+        self._rows: list[tuple[str, ...]] = []
+
+    def execute(self, sql: str):
+        self._rows = self._run_sql(sql)
+
+    def fetchall(self):
+        return self._rows
+
+    def close(self):
+        pass
 
 
 class FakeFlink:
@@ -93,6 +122,7 @@ class FakeFlink:
 
     def __init__(self, events: list[str]):
         self.functions: dict[str, dict[str, str]] = {}
+        self.other_database_functions: dict[str, str] = {}  # name -> artifact id
         self.events = events
         self.fail_create_once = False
         self.fail_creates = 0  # fail this many of the next creates
@@ -112,6 +142,15 @@ class FakeFlink:
     def execute(self, sql: str, **kwargs):
         self.queries.append(sql)
         name = re.findall(r"`([^`]+)`", sql)[2]  # catalog, database, name
+        if "INFORMATION_SCHEMA" in sql:
+            rows = [
+                (DATABASE, fname, f"confluent-artifact://{f['plugin']}/latest")
+                for fname, f in self.functions.items()
+            ] + [
+                (OTHER_DATABASE, fname, f"confluent-artifact://{a}/latest")
+                for fname, a in self.other_database_functions.items()
+            ]
+            return None, SimpleNamespace(rows=rows)
         if sql.startswith("DESCRIBE FUNCTION"):
             if name not in self.functions:
                 raise DbtDatabaseError(f"Function with the identifier '`{name}`' doesn't exist.")
@@ -172,13 +211,17 @@ def flink(events) -> FakeFlink:
 
 
 @pytest.fixture
-def adapter(driver, flink) -> ConfluentAdapter:
+def adapter(driver, flink, tmp_path) -> ConfluentAdapter:
     adapter = ConfluentAdapter.__new__(ConfluentAdapter)
     adapter.connections = SimpleNamespace(get_thread_handle=lambda: driver)  # type: ignore[assignment]
     adapter._artifacts_repo = FunctionArtifactsRepo()
+    driver.run_sql = lambda sql: flink.execute(sql)[1].rows
     adapter.execute = flink.execute  # type: ignore[method-assign, assignment]
     adapter.config = SimpleNamespace(  # type: ignore[assignment]
-        credentials=SimpleNamespace(database=CATALOG), project_name=PROJECT
+        credentials=SimpleNamespace(database=CATALOG, schema=DATABASE),
+        project_name=PROJECT,
+        project_root=str(tmp_path),
+        target_path="target",
     )  # type: ignore[assignment]
     return adapter
 
@@ -188,6 +231,7 @@ def logger(monkeypatch) -> MagicMock:
     """The adapter's logger, to assert on what it warns about."""
     mock = MagicMock()
     monkeypatch.setattr(impl, "logger", mock)
+    monkeypatch.setattr(fa, "logger", mock)
     return mock
 
 
@@ -246,6 +290,20 @@ class TestDescription:
             "managed_by": "dbt-confluent",
             "project": "my_project",
         }
+
+    @pytest.mark.parametrize(
+        "description, project",
+        [
+            (managed("my_project"), "my_project"),
+            (None, None),
+            ("my udf", None),
+            ("[1]", None),
+            ('{"managed_by": "someone"}', None),
+            ('{"managed_by":"dbt-confluent"}', None),  # a marker without a project
+        ],
+    )
+    def test_the_project_of_an_artifact(self, description, project):
+        assert fa.artifact_project(description) == project
 
 
 class TestFileDigestAndName:
@@ -501,6 +559,7 @@ class TestReplaceWarning:
 
         (message,) = self.warnings(logger)
         assert old.id in message
+        assert "sweep_function_artifacts" in message
 
     def test_creating_and_re_creating_on_the_same_artifact_do_not_warn(
         self, adapter, flink, tmp_path, logger
@@ -518,6 +577,184 @@ class TestDesiredStateForAnUnuploadedPackage:
         assert artifact_of(udf).name in desired.artifact_id
         live = functions.FunctionState(CLASS_NAME, "python", "cfa-123456", frozenset())
         assert functions.diff_function_state(live, desired)
+
+
+def sweeper(adapter) -> fa.ArtifactSweeper:
+    """The `ArtifactSweeper` for the adapter's project, as the run-operation builds it."""
+    return fa.ArtifactSweeper(adapter.connections.get_thread_handle(), PROJECT, CATALOG)
+
+
+def find_unused(adapter) -> list[FlinkArtifact]:
+    return sweeper(adapter)._unused_artifacts()
+
+
+def delete_unused(adapter) -> list[fa.UnusedArtifact]:
+    s = sweeper(adapter)
+    return s._delete_artifacts(s._unused_artifacts())
+
+
+class TestScanFunctionArtifacts:
+    def names(self, results) -> list[str]:
+        return [fa.artifact_label(a) for a in results]
+
+    def test_lists_this_projects_artifacts_that_no_function_uses(self, adapter, driver, flink):
+        used = driver.add("used", managed())
+        flink.add(FUNCTION, used.id)
+        elsewhere = driver.add("elsewhere", managed())
+        flink.other_database_functions["other_fn"] = elsewhere.id
+        unused = driver.add("unused", managed())
+        driver.add("other project", managed(project="another"))
+        driver.add("theirs", "hand made")
+        driver.add("no description", None)
+        before = set(driver.artifacts)
+
+        found = find_unused(adapter)
+
+        assert self.names(found) == [f"{unused.id} (unused)"]
+        assert set(driver.artifacts) == before  # nothing is deleted by default
+
+    def test_delete_removes_only_the_unused_artifacts_of_this_project(
+        self, adapter, driver, flink, events
+    ):
+        used = driver.add("used", managed())
+        flink.add(FUNCTION, used.id)
+        unused = driver.add("unused", managed())
+        theirs = driver.add("theirs", "hand made")
+        other = driver.add("other project", managed(project="another"))
+
+        found = delete_unused(adapter)
+
+        assert [r.error for r in found] == [None]
+        assert set(driver.artifacts) == {used.id, theirs.id, other.id}
+        assert events == [f"delete {unused.id}"]
+
+    def test_checks_every_artifact(self, adapter, driver):
+        count = 250  # past any page size or the org's artifact limit
+        for i in range(count):
+            driver.add(f"unused-{i}", managed())
+        assert len(find_unused(adapter)) == count
+
+    def test_a_failed_delete_does_not_stop_the_rest(self, adapter, driver, monkeypatch):
+        first, second, third = (driver.add(n, managed()) for n in ("a", "b", "c"))
+        real = driver.delete
+
+        def flaky(artifact_id, **kwargs):
+            if artifact_id == second.id:
+                raise OperationalError("denied")
+            real(artifact_id, **kwargs)
+
+        monkeypatch.setattr(driver, "delete", flaky)
+
+        results = delete_unused(adapter)
+
+        assert [bool(r.error) for r in results] == [False, True, False]
+        assert set(driver.artifacts) == {second.id}
+
+    def test_functions_are_looked_up_after_artifacts_are_listed(self, adapter, driver, flink):
+        """So a function created in between can't leave its artifact looking unused."""
+        driver.add("unused", managed())
+        order: list[str] = []
+        real_list, real_run_sql = driver.list, driver.run_sql
+        driver.list = lambda **k: (order.append("list"), real_list(**k))[1]  # type: ignore[method-assign]
+        driver.run_sql = lambda sql: (order.append("functions"), real_run_sql(sql))[1]
+
+        find_unused(adapter)
+
+        assert order == ["list", "functions"]
+
+    def test_a_marker_without_a_project_is_ignored(self, adapter, driver):
+        driver.add("legacy", '{"managed_by":"dbt-confluent"}')
+        assert delete_unused(adapter) == []
+        assert len(driver.artifacts) == 1
+
+    def test_functions_are_read_from_the_environments_information_schema(
+        self, adapter, driver, flink
+    ):
+        driver.add("unused", managed())
+        find_unused(adapter)
+        (query,) = flink.queries
+        assert f"`{CATALOG}`.`INFORMATION_SCHEMA`.`ROUTINES`" in query
+
+    def test_functions_are_not_queried_when_the_project_has_no_artifacts(
+        self, adapter, driver, flink
+    ):
+        driver.add("theirs", "hand made")
+        find_unused(adapter)
+        assert flink.queries == []
+
+
+class TestSweepFunctionArtifacts:
+    """The run-operation's report: what it says, and that it fails if a delete failed."""
+
+    def infos(self, logger) -> list[str]:
+        return [call.args[0] for call in logger.info.call_args_list]
+
+    def test_without_delete_it_lists_them_and_says_how_to_delete(self, adapter, driver, logger):
+        unused = driver.add("unused", managed())
+
+        adapter.sweep_function_artifacts()
+
+        first, hint = self.infos(logger)
+        assert first == f"Unused: {unused.id} (unused)"
+        assert "--args '{delete: true}'" in hint
+        assert set(driver.artifacts) == {unused.id}
+
+    def test_with_delete_it_reports_what_was_deleted(self, adapter, driver, logger):
+        unused = driver.add("unused", managed())
+
+        adapter.sweep_function_artifacts(delete=True)
+
+        assert self.infos(logger) == [f"Deleted: {unused.id} (unused)"]
+        assert driver.artifacts == {}
+
+    @pytest.mark.parametrize("delete", ["false", "true", "", 0, 1, None])
+    def test_a_non_boolean_delete_is_rejected_before_anything_is_deleted(
+        self, adapter, driver, delete
+    ):
+        unused = driver.add("unused", managed())
+
+        with pytest.raises(CompilationError, match="delete must be true or false"):
+            adapter.sweep_function_artifacts(delete=delete)
+
+        assert set(driver.artifacts) == {unused.id}
+
+    def test_a_failed_delete_with_an_empty_message_still_fails_it(
+        self, adapter, driver, logger, monkeypatch
+    ):
+        unused = driver.add("unused", managed())
+
+        def timeout(artifact_id, **kwargs):
+            raise TimeoutError()
+
+        monkeypatch.setattr(driver, "delete", timeout)
+
+        with pytest.raises(CompilationError, match=f"{unused.id} .*TimeoutError"):
+            adapter.sweep_function_artifacts(delete=True)
+
+        assert self.infos(logger) == []
+
+    def test_it_says_when_there_is_nothing_to_clean_up(self, adapter, driver, logger):
+        adapter.sweep_function_artifacts()
+        assert self.infos(logger) == ["No unused artifacts of this project."]
+
+    def test_failed_deletes_fail_it_after_the_rest_are_deleted(
+        self, adapter, driver, logger, monkeypatch
+    ):
+        first, second = (driver.add(n, managed()) for n in ("a", "b"))
+        real = driver.delete
+
+        def flaky(artifact_id, **kwargs):
+            if artifact_id == first.id:
+                raise OperationalError("denied")
+            real(artifact_id, **kwargs)
+
+        monkeypatch.setattr(driver, "delete", flaky)
+
+        with pytest.raises(CompilationError, match=f"{first.id} .*denied"):
+            adapter.sweep_function_artifacts(delete=True)
+
+        assert set(driver.artifacts) == {first.id}
+        assert self.infos(logger) == [f"Deleted: {second.id} (b)"]
 
 
 class TestAdapterValidateFunctionConfig:
