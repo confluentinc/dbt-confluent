@@ -40,12 +40,7 @@ blocks:
             - uv run --frozen poe mypy
         - name: "Changelog Check"
           commands:
-            - |
-              if [ "$SEMAPHORE_GIT_WORKING_BRANCH" = "main" ] || [[ "$SEMAPHORE_GIT_WORKING_BRANCH" =~ ^v[0-9]+\.[0-9]+\.x$ ]]; then
-                echo "Skipping changelog check on $SEMAPHORE_GIT_WORKING_BRANCH"
-              else
-                uv run --frozen towncrier check
-              fi
+            - uv run --frozen poe changelog-check
 
   - name: "Build"
     dependencies: []
@@ -61,13 +56,7 @@ blocks:
       jobs:
         - name: "Run Tests"
           commands:
-            - |
-              if [ -z "${CONFLUENT_FLINK_API_KEY:-}" ]; then
-                echo "CONFLUENT_FLINK_API_KEY not set, skipping integration tests"
-                uv run --frozen poe unit
-              else
-                uv run --frozen poe test-all
-              fi
+            - uv run --frozen poe unit
       epilogue:
         always:
           commands:
