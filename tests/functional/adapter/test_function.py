@@ -25,6 +25,7 @@ from dbt.adapters.confluent.function_artifacts import artifact_display_name
 from dbt.tests.util import run_dbt, run_dbt_and_capture, write_file
 from tests.functional.adapter._helpers import (
     get_result_by_name,
+    wait_for_running,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
 from tests.functional.adapter.isolation import physical_name
@@ -554,7 +555,21 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.live_artifact_id(project) == self.failed_run_artifact["id"]
         assert self.artifacts(project).keys() == before.keys()  # nothing was uploaded or deleted
 
-    def test_6_continue_and_fail_upload_nothing(self, project, plan_actions):
+    def test_6_sweep_lists_the_artifacts_no_function_uses(self, project):
+        """A dry run: the earlier artifacts are listed, the live one is not, nothing is deleted,
+        and the output says how to delete them."""
+        live_artifact_id = self.live_artifact_id(project)
+        before = self.artifacts(project)
+        unused = before.keys() - {live_artifact_id}
+
+        _, output = run_dbt_and_capture(["run-operation", "sweep_function_artifacts"])
+
+        assert all(artifact_id in output for artifact_id in unused)
+        assert live_artifact_id not in output
+        assert "--args '{delete: true}'" in output
+        assert self.artifacts(project) == before
+
+    def test_7_continue_and_fail_upload_nothing(self, project, plan_actions):
         """The plan is made before anything is uploaded, so neither touches artifacts."""
         before, live_artifact_id = self.artifacts(project), self.live_artifact_id(project)
         package_file = Path(project.project_root) / PACKAGE_FILE
@@ -572,7 +587,7 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.artifacts(project) == before
         assert self.live_artifact_id(project) == live_artifact_id
 
-    def test_7_full_refresh_re_creates_on_the_same_artifact(
+    def test_8_full_refresh_re_creates_on_the_same_artifact(
         self, project, plan_actions, submitted_sql
     ):
         """An unchanged package is replaced on --full-refresh, without a new upload."""
@@ -587,7 +602,111 @@ class TestFunctionArtifactUpload(FunctionFixtures):
         assert self.artifacts(project) == before
         assert self.live_artifact_id(project) == live_artifact_id
 
+    def test_9_sweep_deletes_the_unused_artifacts(self, project):
+        """The sweep is scoped to this project, so it is safe to delete for real here: only this
+        class's artifacts are candidates (unless the class runs twice at once on one environment)."""
+        live_artifact_id = self.live_artifact_id(project)
+        assert self.artifacts(project).keys() - {live_artifact_id}  # something to delete
 
+        run_dbt(["run-operation", "sweep_function_artifacts", "--args", "{delete: true}"])
+
+        assert self.artifacts(project).keys() == {live_artifact_id}
+        assert self.live_artifact_id(project) == live_artifact_id
+
+
+@requires_global_key
+class TestFunctionUpdateFlow(FunctionFixtures):
+    """The CI/CD flow documented under "Updating a function's artifact" in MATERIALIZATIONS.md:
+    build a new artifact, `dbt build --select "resource_type:function+" --full-refresh` so the function's
+    consumers are resubmitted on it, then `sweep_function_artifacts` to delete the old artifact.
+
+    The consumer is a running `streaming_table`, whose statement stays bound to the artifact it
+    was submitted against (see the "Changing an existing function" docs)."""
+
+    NAME = "functionupdate"
+    FUNCTIONS = [FUNCTION_NAME]
+    CONSUMER = "consumer"
+    SOURCE = "source"
+    # Unbounded (no `number-of-rows`), so the consumer's INSERT is still running afterwards.
+    SOURCE_SQL = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={'rows-per-second': '1', 'changelog.mode': 'append'},
+) }}
+order_id BIGINT,
+PRIMARY KEY(`order_id`) NOT ENFORCED
+"""
+    CONSUMER_SQL = """
+{{ config(materialized='streaming_table', with={'changelog.mode': 'append'}) }}
+select order_id, {{ function('udf') }}('small', 'large') as is_smaller from {{ ref('source') }}
+"""
+    CONSUMER_YML = """
+models:
+  - name: consumer
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: is_smaller
+        data_type: boolean
+"""
+
+    @pytest.fixture(scope="class")
+    def functions(self):
+        return {
+            FUNCTION_FILE: function_sql(
+                artifact_id=None, class_name=EXAMPLE_UDF_CLASS, language="python"
+            ).replace("artifact_id=None", f"artifact_path={PACKAGE_FILE!r}")
+        }
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            f"{self.SOURCE}.sql": self.SOURCE_SQL,
+            f"{self.CONSUMER}.sql": self.CONSUMER_SQL,
+            "models.yml": self.CONSUMER_YML,
+        }
+
+    @pytest.fixture(autouse=True)
+    def clean_up(self):
+        """Replaces the per-test statement cleanup: the statement is checked across runs."""
+        yield
+
+    def live_artifact_id(self, project) -> str:
+        rows = project.run_sql(f"describe function `{physical_name(FUNCTION_NAME)}`", fetch="all")
+        return {str(name): str(value) for name, value in rows}["plugin id"]
+
+    def consumer_statement(self, project):
+        name = project.adapter.get_statement_name(
+            model_name=self.CONSUMER, project_name=project.adapter.config.project_name
+        )
+        return wait_for_running(project.adapter, name)
+
+    def artifact_ids(self, project) -> set[str]:
+        with project.adapter.connection_named("list_artifacts"):
+            return {a.id for a in our_artifacts(project)}
+
+    def test_update_consumers_then_delete_the_old_artifact(self, project):
+        write_package(project, "v1")
+        run_dbt(["build"])
+        old_artifact_id = self.live_artifact_id(project)
+        old_statement_id = self.consumer_statement(project).statement_id
+
+        write_package(project, "v2")
+        run_dbt(["build", "--select", "resource_type:function+", "--full-refresh"])
+
+        new_artifact_id = self.live_artifact_id(project)
+        assert new_artifact_id != old_artifact_id
+        assert self.consumer_statement(project).statement_id != old_statement_id
+        assert self.artifact_ids(project) == {old_artifact_id, new_artifact_id}
+
+        run_dbt(["run-operation", "sweep_function_artifacts", "--args", "{delete: true}"])
+
+        assert self.artifact_ids(project) == {new_artifact_id}
+        assert self.consumer_statement(project).phase.name == "RUNNING"
+
+
+@requires_global_key
 class TestFunctionEmptyRun(FunctionFixtures):
     """`--empty` only limits the rows models read; a function is DDL, so it is still created
     (models that call it in an `--empty` run need it), uploading its package like any other run."""
