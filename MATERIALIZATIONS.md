@@ -669,16 +669,17 @@ comparing. Runs that replace the same function concurrently can interfere with e
 
 #### Updating a function's artifact
 
-Each organization, cloud, region and environment can have **at most 100 Flink artifacts** (see
-Confluent's [UDF limitations](https://docs.confluent.io/cloud/current/flink/concepts/user-defined-functions.html#udf-limitations)),
-and every update uploads a new one. A package is distinct by its bytes, not its sources, so
-rebuilding unchanged sources can still produce a new artifact (for example from embedded
-timestamps or file ordering).
+When using the `artifact_path` field to build a function from a package on disk,
+the artifact is automatically updated during a `dbt build` when the referenced package has changed.
 
-**dbt never automatically deletes artifacts**, not even the one a replaced function used to run on: running and
-stopped statements stay bound to the artifact they were compiled against. Cleaning up is up to
-you, but can be assisted. If every statement that uses the function is in this dbt project, the
-`sweep_function_artifacts` operation makes that easy:
+_Note: A package is distinct by its bytes, not its sources, so rebuilding unchanged sources can still produce
+a new artifact (for example from embedded timestamps or file ordering)._
+
+Importantly, dbt never automatically deletes artifacts, because running and stopped statements stay bound to the artifact they were compiled against.
+Given the limit of **at most 100 Flink artifacts** (see Confluent's [UDF limitations](https://docs.confluent.io/cloud/current/flink/concepts/user-defined-functions.html#udf-limitations))
+per organization, cloud, region and environment, it is important to clean up unused artifacts to avoid hitting the limit.
+
+If every statement that uses the function is in this dbt project, the `sweep_function_artifacts` operation makes cleanup easy:
 
 1. **Build the new artifact**, however you do today, and point your function's `artifact_path` config field to the new file.
 
@@ -711,6 +712,13 @@ you, but can be assisted. If every statement that uses the function is in this d
    **"Unused by a function" doesn't mean "unused".** The operation can't see statements, so only
    delete after step 2 has recreated them, and never while a `dbt run` is in progress (an artifact
    it has just uploaded may not have its function yet).
+
+For artifacts that are managed outside of dbt (referenced by `artifact_id`), cleanup is completely manual,
+but the same principles apply. Always follow the same procedure:
+
+- Upload new artifacts first.
+- Resubmit any statements to ensure they pick up the new artifact.
+- Remove the old artifact only after all statements have been resubmitted.
 
 ---
 
