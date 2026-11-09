@@ -553,7 +553,7 @@ independently. Flink scans the source once per consumer, not once shared across 
 
 A `function` registers a user-defined function (UDF) in Flink from an artifact (a Java JAR or
 Python ZIP) in Confluent Cloud, by issuing
-`CREATE FUNCTION ... USING JAR 'confluent-artifact://<artifact_id>'`. The artifact is either one
+`CREATE FUNCTION ... USING ARTIFACT 'confluent-artifact://<artifact_id>'`. The artifact is either one
 you uploaded yourself (`artifact_id`) or a local package that dbt uploads for you
 (`artifact_path`). dbt orders the function ahead of any model that calls it via
 `{{ function('name') }}`.

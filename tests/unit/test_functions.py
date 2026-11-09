@@ -480,14 +480,14 @@ class TestRenderCreateFunction:
         )
         assert sql == (
             "create function `env-1`.`cluster-a`.`is_smaller` as 'pkg.it''s' language python "
-            "using jar 'confluent-artifact://cfa-abc123' using connections (`a`, `b`)"
+            "using artifact 'confluent-artifact://cfa-abc123' using connections (`a`, `b`)"
         )
 
     def test_java_has_no_language_or_connections_clause(self):
         sql = functions.render_create_function(self.RELATION, CLASS_NAME, "java", ARTIFACT_ID, [])
         assert sql == (
             f"create function `env-1`.`cluster-a`.`is_smaller` as '{CLASS_NAME}' "
-            "using jar 'confluent-artifact://cfa-abc123'"
+            "using artifact 'confluent-artifact://cfa-abc123'"
         )
 
 
@@ -546,7 +546,7 @@ class TestApplyFunctionRestore:
         *_, restore = adapter.submitted
         assert restore == (
             "create function `env-1`.`cluster-a`.`is_smaller` "
-            f"as '{CLASS_NAME}' using jar 'confluent-artifact://{self.PREVIOUS_ARTIFACT_ID}' "
+            f"as '{CLASS_NAME}' using artifact 'confluent-artifact://{self.PREVIOUS_ARTIFACT_ID}' "
             "using connections (`env-1`.`cluster-a`.`svc`)"
         )
         assert self.NEW_ARTIFACT_ID in adapter.submitted[1]

@@ -345,7 +345,7 @@ def render_create_function(
     sql = f"create function {relation.render()} as '{escaped_class}'"
     if language == "python":
         sql += " language python"
-    sql += f" using jar 'confluent-artifact://{artifact_id}'"
+    sql += f" using artifact 'confluent-artifact://{artifact_id}'"
     if connection_names:
         sql += f" using connections ({', '.join(connection_names)})"
     return sql
