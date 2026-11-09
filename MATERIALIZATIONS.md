@@ -664,8 +664,8 @@ functions:
 ```
 
 A `connections` entry that isn't fully qualified (`name`, `database.name` or
-`catalog.database.name`) is resolved against the function's own catalog and database when
-comparing. Runs that replace the same function concurrently can interfere with each other.
+`catalog.database.name`) is resolved against the function's own catalog and database, both
+when comparing and in the emitted `CREATE FUNCTION`. Runs that replace the same function concurrently can interfere with each other.
 
 #### Updating a function's artifact
 

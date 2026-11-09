@@ -244,7 +244,6 @@ def package(tmp_path: Path, content: bytes) -> functions.FunctionConfig:
         language="python",
         class_name=CLASS_NAME,
         connections=[],
-        connection_names=[],
         artifact_id=None,
         artifact_config=fa.ArtifactConfig(
             path=path,
@@ -274,7 +273,6 @@ ID_UDF = functions.FunctionConfig(
     language="python",
     class_name=CLASS_NAME,
     connections=[],
-    connection_names=[],
     artifact_id=None,
     artifact_config=None,
 )

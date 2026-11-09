@@ -9,7 +9,7 @@ else is a drop and re-create.
 """
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -60,14 +60,13 @@ class FunctionConfig(NamedTuple):
     """A validated `function` config (see `validate_function_config`).
 
     Exactly one of `artifact_id` (an artifact already uploaded) and `artifact_config` (a local
-    package dbt uploads) is set. `connections` are for comparison; `connection_names` are the
-    names as configured, rendered as identifiers, for the DDL.
+    package dbt uploads) is set. `connections` are fully qualified (a partial name is resolved
+    against the function's own catalog and database), both for comparison and for the DDL.
     """
 
     language: str
     class_name: str
     connections: list[QualifiedName]
-    connection_names: list[str]
     artifact_id: str | None
     artifact_config: ArtifactConfig | None
 
@@ -117,16 +116,6 @@ def parse_qualified_name(text: str, catalog: str, database: str) -> QualifiedNam
         raise ValueError(f"{text!r} is not a valid [[catalog.]database.]name")
     defaults = [catalog, database]
     return QualifiedName(*(defaults[: 3 - len(parts)] + parts))
-
-
-def render_identifier(text: str) -> str:
-    """Render `name`, `database.name` or `catalog.database.name` as backtick-quoted identifiers.
-
-    Parts are emitted as configured (unqualified names stay unqualified). Flink's
-    `USING CONNECTIONS (...)` takes identifiers; a string literal is a parse error.
-    """
-    parts = [_unquote(p) for p in _split_outside_backticks(text, ".")]
-    return ".".join("`" + part.replace("`", "``") + "`" for part in parts)
 
 
 def validate_function_config(
@@ -219,7 +208,6 @@ def validate_function_config(
         language=language,
         class_name=class_name,
         connections=connections,
-        connection_names=[render_identifier(raw) for raw in raw_connections],
         artifact_id=artifact_id,
         artifact_config=artifact_config,
     )
@@ -338,16 +326,26 @@ def render_create_function(
     class_name: str,
     language: str,
     artifact_id: str,
-    connection_names: list[str],
+    connections: Iterable[QualifiedName],
 ) -> str:
-    """The `CREATE FUNCTION` statement. `connection_names` are already rendered identifiers."""
+    """The `CREATE FUNCTION` statement.
+
+    Connections are rendered as backtick-quoted, fully qualified identifiers (Flink's
+    `USING CONNECTIONS (...)` takes identifiers; a string literal is a parse error). The artifact
+    ID is spliced in as it is, so it is checked here, whatever its source (config, or a
+    `DESCRIBE FUNCTION` being restored): raises ValueError if malformed. The class is escaped
+    instead, since it can be any text.
+    """
+    if not _ARTIFACT_ID_RE.fullmatch(artifact_id):
+        raise ValueError(f"{artifact_id!r} is not an artifact ID of the form 'cfa-...'")
     escaped_class = class_name.replace("'", "''")
     sql = f"create function {relation.render()} as '{escaped_class}'"
     if language == "python":
         sql += " language python"
     sql += f" using artifact 'confluent-artifact://{artifact_id}'"
-    if connection_names:
-        sql += f" using connections ({', '.join(connection_names)})"
+    rendered = [connection.render() for connection in connections]
+    if rendered:
+        sql += f" using connections ({', '.join(rendered)})"
     return sql
 
 
