@@ -134,7 +134,7 @@ class FakeFlink:
         self, name: str, artifact_id: str, class_name: str = CLASS_NAME, connections: str = ""
     ):
         self.functions[name] = {
-            "class": class_name,
+            "path": class_name,
             "plugin": artifact_id,
             "connections": connections,
         }
@@ -156,7 +156,7 @@ class FakeFlink:
                 raise DbtDatabaseError(f"Function with the identifier '`{name}`' doesn't exist.")
             f = self.functions[name]
             described: list[tuple[str, str]] = [
-                ("class name", f["class"]),
+                ("class name", f["path"]),
                 ("function language", "PYTHON"),
                 ("plugin id", f["plugin"]),
             ]
@@ -766,7 +766,7 @@ class TestAdapterValidateFunctionConfig:
             project_root=str(tmp_path),
             project_name=PROJECT,
         )
-        base = {"language": "python", "class": CLASS_NAME}
+        base = {"language": "python", "path": CLASS_NAME}
         return adapter.validate_function_config(base | config, relation())
 
     def test_an_artifact_path_is_named_after_its_project_and_digest(self, tmp_path):

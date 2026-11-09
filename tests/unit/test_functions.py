@@ -39,7 +39,7 @@ class FakeConfig(dict):
 
 def java_config(**overrides) -> FakeConfig:
     return FakeConfig(
-        {"language": "java", "artifact_id": ARTIFACT_ID, "class": CLASS_NAME} | overrides
+        {"language": "java", "artifact_id": ARTIFACT_ID, "path": CLASS_NAME} | overrides
     )
 
 
@@ -70,7 +70,7 @@ class TestValidateFunctionConfig:
 
     def test_python_with_connections(self):
         config = java_config(
-            language="PYTHON", connections=["my_external_service"], **{"class": "pkg.mod.fn"}
+            language="PYTHON", connections=["my_external_service"], **{"path": "pkg.mod.fn"}
         )
         assert validate(config) == functions.FunctionConfig(
             language="python",
@@ -107,8 +107,8 @@ class TestValidateFunctionConfig:
             ({"artifact_id": None}, "one of 'artifact_id'"),
             ({"artifact_id": "abc123"}, "one of 'artifact_id'"),
             ({"artifact_id": "cfa-"}, "one of 'artifact_id'"),
-            ({"class": None}, "'class' must be a non-empty string"),
-            ({"class": "  "}, "'class' must be a non-empty string"),
+            ({"path": None}, "'path' must be a non-empty string"),
+            ({"path": "  "}, "'path' must be a non-empty string"),
             ({"connections": "my_external_service"}, "'connections' must be a list"),
             ({"connections": [""]}, "'connections' must be a list"),
             ({"connections": ["a.b.c.d"]}, "not a valid"),
@@ -134,7 +134,7 @@ class TestValidateFunctionConfig:
         message = str(exc.value)
         assert "'language'" in message
         assert "'artifact_id'" in message
-        assert "'class'" in message
+        assert "'path'" in message
 
 
 class TestConfiguredConnections:
@@ -241,7 +241,7 @@ class TestDiffFunctionState:
         new_artifact, new_class = "cfa-new999", "com.example.Other"
         changes = functions.diff_function_state(
             self.existing(),
-            configured(artifact_id=new_artifact, connections=["svc"], **{"class": new_class}),
+            configured(artifact_id=new_artifact, connections=["svc"], **{"path": new_class}),
         )
         assert len(changes) == 3
         assert any(c.startswith("class_name:") and new_class in c for c in changes)

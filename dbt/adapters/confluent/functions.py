@@ -130,8 +130,8 @@ def validate_function_config(
 ) -> FunctionConfig:
     """Validate a `function` node's config and return the values the DDL needs.
 
-    The config must name the `language` (java/python), the `class` to bind (a Python module path
-    for python) and exactly one of `artifact_id` (`cfa-...`, already uploaded) or `artifact_path`
+    The config must name the `language` (java/python), the `path` to bind (a Java class name, or a
+    Python module path) and exactly one of `artifact_id` (`cfa-...`, already uploaded) or `artifact_path`
     (a local .jar/.zip matching the language, relative to `project_root`, that dbt uploads).
     `connections` is an optional list of connection names; a name that isn't fully qualified is
     resolved against `catalog` and `database` (the function's own). Only scalar functions are
@@ -152,7 +152,7 @@ def validate_function_config(
     language = str(model_config.get("language") or "").lower()
     artifact_id = model_config.get("artifact_id")
     artifact_path = model_config.get("artifact_path")
-    class_name = model_config.get("class")
+    class_name = model_config.get("path")
     class_name = class_name.strip() if isinstance(class_name, str) else ""
     raw_connections = model_config.get("connections")
     if raw_connections is None:
@@ -177,7 +177,7 @@ def validate_function_config(
             f"(a local package to upload) is required (got artifact_id={artifact_id!r})"
         )
     if not class_name:
-        problems.append("'class' must be a non-empty string")
+        problems.append("'path' must be a non-empty string")
     connections: list[QualifiedName] = []
     if not isinstance(raw_connections, list) or not all(
         isinstance(c, str) and c for c in raw_connections

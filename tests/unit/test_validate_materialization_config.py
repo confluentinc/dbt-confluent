@@ -36,7 +36,7 @@ class TestAllConfluentConfigKeys:
             "tableflow",
             "language",
             "artifact_id",
-            "class",
+            "path",
             "connections",
         ):
             assert expected in keys
@@ -62,7 +62,7 @@ class TestValidateMaterializationConfig:
                 {
                     "language": "java",
                     "artifact_id": "cfa-abc123",
-                    "class": "com.example.Fn",
+                    "path": "com.example.Fn",
                     "connections": ["svc"],
                 },
             ),
@@ -114,7 +114,7 @@ class TestValidateMaterializationConfig:
             ("function", {"statement_properties": {"x": "y"}}),
             ("function", {"distributed_by": {"columns": ["id"]}}),
             ("table", {"artifact_id": "cfa-abc123"}),
-            ("view", {"class": "com.example.Fn"}),
+            ("view", {"path": "com.example.Fn"}),
             ("streaming_table", {"connections": ["svc"]}),
             ("materialized_table", {"language": "java"}),
         ],

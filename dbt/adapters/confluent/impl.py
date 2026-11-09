@@ -69,7 +69,7 @@ MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
         "language",
         "artifact_id",
         "artifact_path",
-        "class",
+        "path",
         "connections",
     },
     "streaming_source": _UNIVERSAL_CONFIG_KEYS
