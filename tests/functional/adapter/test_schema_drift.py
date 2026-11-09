@@ -1169,9 +1169,9 @@ models:
 
 
 class TestOptionValuesDoNotFalselyDrift(ConfluentFixtures):
-    """Flink reports some WITH option values in its own form: '7 days' as '7 d', '1024 mb' as '1 gb',
-    'LOG-APPEND-TIME' as 'log-append-time'. An unchanged re-run must not drift, and a real change
-    must."""
+    """Flink reports some WITH option values in its own form: '7 days' as '7 d', '1024 mb' as
+    '1 gb', 'LOG-APPEND-TIME' as 'log-append-time'. An unchanged re-run must not drift, and a
+    real change must."""
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -1201,14 +1201,17 @@ class TestOptionValuesDoNotFalselyDrift(ConfluentFixtures):
             assert_drift_error(results, "option_values")
             message = get_result_by_name(results, "option_values").message
             assert "option: 'kafka.retention.time' existing='7 d', expected='8 days'" in message
+            assert "'kafka.retention.size'" not in message
+            assert "'kafka.message-timestamp-type'" not in message
         finally:
             set_model_file(project, relation(project, "option_values"), OPTION_VALUES_MODEL)
 
 
 class TestFlinkReportsOptionValuesAsListed(ConfluentFixtures):
-    """The option_values unit tests check option_values_match against how Flink reports each value in
-    tests/flink_option_values.py. This creates tables with all of them and checks Flink still reports
-    them that way, so a change in Flink fails here instead of as false drift in a user's run."""
+    """The option_values unit tests check option_values_match against how Flink reports each value
+    in tests/flink_option_values.py. This creates tables with all of them and checks Flink still
+    reports them that way, so a change in Flink fails here instead of as false drift in a user's
+    run."""
 
     @pytest.fixture(scope="class")
     def project_config_update(self, unique_schema):
@@ -1228,25 +1231,26 @@ class TestFlinkReportsOptionValuesAsListed(ConfluentFixtures):
             for i in range(table_count)
         ]
         catalog = project.adapter.config.credentials.database
-        schema = unique_schema
         names = [physical_name(f"flink_values_{i}") for i in range(table_count)]
         try:
             for name, options in zip(names, tables, strict=True):
                 option_pairs = []
                 for key, (value, _) in options.items():
-                    escaped_value = value.replace("'", "''")
-                    option_pairs.append(f"'{key}' = '{escaped_value}'")
+                    escaped_key = project.adapter.escape_string_literal(key)
+                    escaped_value = project.adapter.escape_string_literal(value)
+                    option_pairs.append(f"'{escaped_key}' = '{escaped_value}'")
                 options_clause = ", ".join(option_pairs)
                 create_sql = f"CREATE TABLE `{name}` (id INT, v STRING) WITH ({options_clause})"
                 project.run_sql(create_sql)
-            table_filters = " OR ".join(f"TABLE_NAME = '{name}'" for name in names)
-            query = (
-                f"SELECT TABLE_NAME, OPTION_KEY, OPTION_VALUE "
-                f"FROM INFORMATION_SCHEMA.`TABLE_OPTIONS` "
+            queries = [
+                "SELECT TABLE_NAME, OPTION_KEY, OPTION_VALUE "
+                "FROM INFORMATION_SCHEMA.`TABLE_OPTIONS` "
                 f"WHERE TABLE_CATALOG_ID = '{catalog}' "
-                f"AND TABLE_SCHEMA = '{schema}' "
-                f"AND ({table_filters})"
-            )
+                f"AND TABLE_SCHEMA = '{unique_schema}' "
+                f"AND TABLE_NAME = '{name}'"
+                for name in names
+            ]
+            query = " UNION ALL ".join(queries)
             rows = project.run_sql(query, fetch="all")
             actual = {(str(row[0]), str(row[1])): str(row[2]) for row in rows}
             mismatches = [
