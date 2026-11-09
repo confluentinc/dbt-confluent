@@ -39,7 +39,7 @@ class FakeConfig(dict):
 
 def java_config(**overrides) -> FakeConfig:
     return FakeConfig(
-        {"language": "java", "artifact_id": ARTIFACT_ID, "class": CLASS_NAME} | overrides
+        {"language": "java", "artifact_id": ARTIFACT_ID, "path": CLASS_NAME} | overrides
     )
 
 
@@ -64,20 +64,18 @@ class TestValidateFunctionConfig:
             language="java",
             class_name=CLASS_NAME,
             connections=[],
-            connection_names=[],
             artifact_id=ARTIFACT_ID,
             artifact_config=None,
         )
 
     def test_python_with_connections(self):
         config = java_config(
-            language="PYTHON", connections=["my_external_service"], **{"class": "pkg.mod.fn"}
+            language="PYTHON", connections=["my_external_service"], **{"path": "pkg.mod.fn"}
         )
         assert validate(config) == functions.FunctionConfig(
             language="python",
             class_name="pkg.mod.fn",
             connections=[conn("my_external_service")],
-            connection_names=["`my_external_service`"],
             artifact_id=ARTIFACT_ID,
             artifact_config=None,
         )
@@ -109,8 +107,8 @@ class TestValidateFunctionConfig:
             ({"artifact_id": None}, "one of 'artifact_id'"),
             ({"artifact_id": "abc123"}, "one of 'artifact_id'"),
             ({"artifact_id": "cfa-"}, "one of 'artifact_id'"),
-            ({"class": None}, "'class' must be a non-empty string"),
-            ({"class": "  "}, "'class' must be a non-empty string"),
+            ({"path": None}, "'path' must be a non-empty string"),
+            ({"path": "  "}, "'path' must be a non-empty string"),
             ({"connections": "my_external_service"}, "'connections' must be a list"),
             ({"connections": [""]}, "'connections' must be a list"),
             ({"connections": ["a.b.c.d"]}, "not a valid"),
@@ -136,25 +134,27 @@ class TestValidateFunctionConfig:
         message = str(exc.value)
         assert "'language'" in message
         assert "'artifact_id'" in message
-        assert "'class'" in message
+        assert "'path'" in message
 
 
-class TestRenderIdentifier:
+class TestConfiguredConnections:
+    def test_partial_names_are_qualified_with_the_functions_catalog_and_database(self):
+        udf = validate(java_config(connections=["svc", "other-db.svc2", "other-env.db.svc3"]))
+        assert udf.connections == [
+            conn("svc"),
+            conn("svc2", database="other-db"),
+            conn("svc3", database="db", catalog="other-env"),
+        ]
+
     @pytest.mark.parametrize(
-        "text, expected",
+        "name, expected",
         [
-            ("conn", "`conn`"),
-            ("other-db.conn", "`other-db`.`conn`"),
-            ("`env-1`.`cluster-a`.`conn`", "`env-1`.`cluster-a`.`conn`"),
-            ("`odd``name`", "`odd``name`"),
+            (conn("svc"), "`env-1`.`cluster-a`.`svc`"),
+            (conn("odd`name"), "`env-1`.`cluster-a`.`odd``name`"),
         ],
     )
-    def test_render(self, text, expected):
-        assert functions.render_identifier(text) == expected
-
-    def test_ddl_gets_identifiers_as_configured_not_qualified(self):
-        udf = validate(java_config(connections=["svc", "other-db.svc2"]))
-        assert udf.connection_names == ["`svc`", "`other-db`.`svc2`"]
+    def test_rendering_quotes_every_part_and_escapes_backticks(self, name, expected):
+        assert name.render() == expected
 
 
 class TestParseQualifiedName:
@@ -241,7 +241,7 @@ class TestDiffFunctionState:
         new_artifact, new_class = "cfa-new999", "com.example.Other"
         changes = functions.diff_function_state(
             self.existing(),
-            configured(artifact_id=new_artifact, connections=["svc"], **{"class": new_class}),
+            configured(artifact_id=new_artifact, connections=["svc"], **{"path": new_class}),
         )
         assert len(changes) == 3
         assert any(c.startswith("class_name:") and new_class in c for c in changes)
@@ -476,19 +476,27 @@ class TestRenderCreateFunction:
 
     def test_python_with_connections_and_an_escaped_class(self):
         sql = functions.render_create_function(
-            self.RELATION, "pkg.it's", "python", ARTIFACT_ID, ["`a`", "`b`"]
+            self.RELATION, "pkg.it's", "python", ARTIFACT_ID, [conn("a"), conn("b")]
         )
         assert sql == (
             "create function `env-1`.`cluster-a`.`is_smaller` as 'pkg.it''s' language python "
-            "using jar 'confluent-artifact://cfa-abc123' using connections (`a`, `b`)"
+            "using artifact 'confluent-artifact://cfa-abc123' using connections (`env-1`.`cluster-a`.`a`, `env-1`.`cluster-a`.`b`)"
         )
 
     def test_java_has_no_language_or_connections_clause(self):
         sql = functions.render_create_function(self.RELATION, CLASS_NAME, "java", ARTIFACT_ID, [])
         assert sql == (
             f"create function `env-1`.`cluster-a`.`is_smaller` as '{CLASS_NAME}' "
-            "using jar 'confluent-artifact://cfa-abc123'"
+            "using artifact 'confluent-artifact://cfa-abc123'"
         )
+
+    @pytest.mark.parametrize(
+        "artifact_id",
+        ["", "cfa-", "cfa-abc'123", "cfa-abc123\n", "cfa-abc123' using jar 'x", "plugin-abc"],
+    )
+    def test_rejects_a_malformed_artifact_id(self, artifact_id: str):
+        with pytest.raises(ValueError, match="artifact ID"):
+            functions.render_create_function(self.RELATION, CLASS_NAME, "java", artifact_id, [])
 
 
 class TestApplyFunctionRestore:
@@ -546,7 +554,7 @@ class TestApplyFunctionRestore:
         *_, restore = adapter.submitted
         assert restore == (
             "create function `env-1`.`cluster-a`.`is_smaller` "
-            f"as '{CLASS_NAME}' using jar 'confluent-artifact://{self.PREVIOUS_ARTIFACT_ID}' "
+            f"as '{CLASS_NAME}' using artifact 'confluent-artifact://{self.PREVIOUS_ARTIFACT_ID}' "
             "using connections (`env-1`.`cluster-a`.`svc`)"
         )
         assert self.NEW_ARTIFACT_ID in adapter.submitted[1]
@@ -584,6 +592,15 @@ class TestApplyFunctionRestore:
         assert self.apply(adapter, self.PREVIOUS) == "response"
 
         assert [sql.split(" ")[0] for sql in adapter.submitted] == ["drop", "create"]
+
+    def test_a_malformed_described_artifact_id_is_not_submitted_in_a_restore(self):
+        adapter = self.adapter(create_fails=True)
+        previous = self.PREVIOUS._replace(artifact_id="cfa-x' using jar 'evil")
+
+        with pytest.raises(DbtDatabaseError, match="artifact not found"):
+            self.apply(adapter, previous)
+
+        assert [sql.split(" ")[0] for sql in adapter.submitted] == ["drop", "create"]  # type: ignore[attr-defined]
 
     def test_a_failed_restore_surfaces_the_original_error(self):
         adapter = self.adapter(create_fails=True)

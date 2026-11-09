@@ -9,7 +9,7 @@ else is a drop and re-create.
 """
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, NamedTuple, cast
 
@@ -60,14 +60,13 @@ class FunctionConfig(NamedTuple):
     """A validated `function` config (see `validate_function_config`).
 
     Exactly one of `artifact_id` (an artifact already uploaded) and `artifact_config` (a local
-    package dbt uploads) is set. `connections` are for comparison; `connection_names` are the
-    names as configured, rendered as identifiers, for the DDL.
+    package dbt uploads) is set. `connections` are fully qualified (a partial name is resolved
+    against the function's own catalog and database), both for comparison and for the DDL.
     """
 
     language: str
     class_name: str
     connections: list[QualifiedName]
-    connection_names: list[str]
     artifact_id: str | None
     artifact_config: ArtifactConfig | None
 
@@ -119,16 +118,6 @@ def parse_qualified_name(text: str, catalog: str, database: str) -> QualifiedNam
     return QualifiedName(*(defaults[: 3 - len(parts)] + parts))
 
 
-def render_identifier(text: str) -> str:
-    """Render `name`, `database.name` or `catalog.database.name` as backtick-quoted identifiers.
-
-    Parts are emitted as configured (unqualified names stay unqualified). Flink's
-    `USING CONNECTIONS (...)` takes identifiers; a string literal is a parse error.
-    """
-    parts = [_unquote(p) for p in _split_outside_backticks(text, ".")]
-    return ".".join("`" + part.replace("`", "``") + "`" for part in parts)
-
-
 def validate_function_config(
     model_config: dict[str, Any],
     catalog: str | None,
@@ -141,8 +130,8 @@ def validate_function_config(
 ) -> FunctionConfig:
     """Validate a `function` node's config and return the values the DDL needs.
 
-    The config must name the `language` (java/python), the `class` to bind (a Python module path
-    for python) and exactly one of `artifact_id` (`cfa-...`, already uploaded) or `artifact_path`
+    The config must name the `language` (java/python), the `path` to bind (a Java class name, or a
+    Python module path) and exactly one of `artifact_id` (`cfa-...`, already uploaded) or `artifact_path`
     (a local .jar/.zip matching the language, relative to `project_root`, that dbt uploads).
     `connections` is an optional list of connection names; a name that isn't fully qualified is
     resolved against `catalog` and `database` (the function's own). Only scalar functions are
@@ -163,7 +152,7 @@ def validate_function_config(
     language = str(model_config.get("language") or "").lower()
     artifact_id = model_config.get("artifact_id")
     artifact_path = model_config.get("artifact_path")
-    class_name = model_config.get("class")
+    class_name = model_config.get("path")
     class_name = class_name.strip() if isinstance(class_name, str) else ""
     raw_connections = model_config.get("connections")
     if raw_connections is None:
@@ -188,7 +177,7 @@ def validate_function_config(
             f"(a local package to upload) is required (got artifact_id={artifact_id!r})"
         )
     if not class_name:
-        problems.append("'class' must be a non-empty string")
+        problems.append("'path' must be a non-empty string")
     connections: list[QualifiedName] = []
     if not isinstance(raw_connections, list) or not all(
         isinstance(c, str) and c for c in raw_connections
@@ -219,7 +208,6 @@ def validate_function_config(
         language=language,
         class_name=class_name,
         connections=connections,
-        connection_names=[render_identifier(raw) for raw in raw_connections],
         artifact_id=artifact_id,
         artifact_config=artifact_config,
     )
@@ -338,16 +326,26 @@ def render_create_function(
     class_name: str,
     language: str,
     artifact_id: str,
-    connection_names: list[str],
+    connections: Iterable[QualifiedName],
 ) -> str:
-    """The `CREATE FUNCTION` statement. `connection_names` are already rendered identifiers."""
+    """The `CREATE FUNCTION` statement.
+
+    Connections are rendered as backtick-quoted, fully qualified identifiers (Flink's
+    `USING CONNECTIONS (...)` takes identifiers; a string literal is a parse error). The artifact
+    ID is spliced in as it is, so it is checked here, whatever its source (config, or a
+    `DESCRIBE FUNCTION` being restored): raises ValueError if malformed. The class is escaped
+    instead, since it can be any text.
+    """
+    if not _ARTIFACT_ID_RE.fullmatch(artifact_id):
+        raise ValueError(f"{artifact_id!r} is not an artifact ID of the form 'cfa-...'")
     escaped_class = class_name.replace("'", "''")
     sql = f"create function {relation.render()} as '{escaped_class}'"
     if language == "python":
         sql += " language python"
-    sql += f" using jar 'confluent-artifact://{artifact_id}'"
-    if connection_names:
-        sql += f" using connections ({', '.join(connection_names)})"
+    sql += f" using artifact 'confluent-artifact://{artifact_id}'"
+    rendered = [connection.render() for connection in connections]
+    if rendered:
+        sql += f" using connections ({', '.join(rendered)})"
     return sql
 
 
