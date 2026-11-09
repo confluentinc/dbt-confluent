@@ -22,11 +22,13 @@ tests' job.
 """
 
 import re
+from collections import defaultdict
 
 import pytest
 
 from dbt.adapters.confluent.impl import ConfluentAdapter
 from dbt.tests.util import run_dbt, set_model_file
+from tests.flink_option_values import FLINK_REPORTED_VALUES
 from tests.functional.adapter._helpers import (
     SubmittedStatement,
     assert_distribution_drift_error,
@@ -1119,6 +1121,149 @@ class TestProtobufMapKey(ConfluentFixtures):
             assert "'order_id'" not in message
         finally:
             set_model_file(project, relation(project, "protobuf_map_key"), PROTOBUF_MAP_KEY_MODEL)
+
+
+# -- WITH option values Flink reports in its own form --
+
+OPTION_VALUES_MODEL = """
+{{ config(
+    materialized='streaming_table',
+    with={
+        'changelog.mode': 'upsert',
+        'kafka.retention.time': '7 days',
+        'kafka.retention.size': '1024 mb',
+        'kafka.message-timestamp-type': 'LOG-APPEND-TIME',
+    },
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+OPTION_VALUES_MODEL_CHANGED = """
+{{ config(
+    materialized='streaming_table',
+    with={
+        'changelog.mode': 'upsert',
+        'kafka.retention.time': '8 days',
+        'kafka.retention.size': '1024 mb',
+        'kafka.message-timestamp-type': 'LOG-APPEND-TIME',
+    },
+) }}
+select order_id, price, order_time from {{ ref('source_for_drift') }}
+"""
+
+OPTION_VALUES_YML = """
+models:
+  - name: option_values
+    columns:
+      - name: order_id
+        data_type: bigint
+        constraints:
+          - type: not_null
+          - type: primary_key
+            expression: "not enforced"
+      - name: price
+        data_type: decimal(10,2)
+      - name: order_time
+        data_type: timestamp(3)
+"""
+
+
+class TestOptionValuesDoNotFalselyDrift(ConfluentFixtures):
+    """Flink reports some WITH option values in its own form: '7 days' as '7 d', '1024 mb' as '1 gb',
+    'LOG-APPEND-TIME' as 'log-append-time'. An unchanged re-run must not drift, and a real change
+    must."""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {"models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {
+            "source_for_drift.sql": SOURCE_FOR_DRIFT,
+            "option_values.sql": OPTION_VALUES_MODEL,
+            "models.yml": OPTION_VALUES_YML,
+        }
+
+    @pytest.fixture(scope="class", autouse=True)
+    def setup(self, project):
+        run_dbt(["run", "--full-refresh"])
+
+    def test_unchanged_rerun_does_not_drift(self, project):
+        results = run_dbt(["run"])
+        message = get_result_by_name(results, "option_values").message
+        assert message == "SKIP", f"option_values was not skipped (message: {message})"
+
+    def test_changed_value_drifts(self, project):
+        set_model_file(project, relation(project, "option_values"), OPTION_VALUES_MODEL_CHANGED)
+        try:
+            results = run_dbt(["run"], expect_pass=False)
+            assert_drift_error(results, "option_values")
+            message = get_result_by_name(results, "option_values").message
+            assert "option: 'kafka.retention.time' existing='7 d', expected='8 days'" in message
+        finally:
+            set_model_file(project, relation(project, "option_values"), OPTION_VALUES_MODEL)
+
+
+class TestFlinkReportsOptionValuesAsListed(ConfluentFixtures):
+    """The option_values unit tests check option_values_match against how Flink reports each value in
+    tests/flink_option_values.py. This creates tables with all of them and checks Flink still reports
+    them that way, so a change in Flink fails here instead of as false drift in a user's run."""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {"models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {}
+
+    def test_reported_values_match_list(self, project, unique_schema):
+        by_option = defaultdict(list)
+        for option, written, reported in FLINK_REPORTED_VALUES:
+            by_option[option].append((written, reported))
+        table_count = max(len(entries) for entries in by_option.values())
+        tables = [
+            {option: entries[i] for option, entries in by_option.items() if i < len(entries)}
+            for i in range(table_count)
+        ]
+        catalog = project.adapter.config.credentials.database
+        schema = unique_schema
+        names = [physical_name(f"flink_values_{i}") for i in range(table_count)]
+        try:
+            for name, options in zip(names, tables, strict=True):
+                option_pairs = []
+                for key, (value, _) in options.items():
+                    escaped_value = value.replace("'", "''")
+                    option_pairs.append(f"'{key}' = '{escaped_value}'")
+                options_clause = ", ".join(option_pairs)
+                create_sql = f"CREATE TABLE `{name}` (id INT, v STRING) WITH ({options_clause})"
+                project.run_sql(create_sql)
+            table_filters = " OR ".join(f"TABLE_NAME = '{name}'" for name in names)
+            query = (
+                f"SELECT TABLE_NAME, OPTION_KEY, OPTION_VALUE "
+                f"FROM INFORMATION_SCHEMA.`TABLE_OPTIONS` "
+                f"WHERE TABLE_CATALOG_ID = '{catalog}' "
+                f"AND TABLE_SCHEMA = '{schema}' "
+                f"AND ({table_filters})"
+            )
+            rows = project.run_sql(query, fetch="all")
+            actual = {(str(row[0]), str(row[1])): str(row[2]) for row in rows}
+            mismatches = [
+                f"'{option}' written='{written}' expected='{reported}' "
+                f"reported='{actual.get((name, option))}'"
+                for name, options in zip(names, tables, strict=True)
+                for option, (written, reported) in options.items()
+                if actual.get((name, option)) != reported
+            ]
+            assert not mismatches, (
+                "Flink no longer reports these WITH option values as tests/flink_option_values.py "
+                "lists them. Update the list, then check option_values_match handles the new "
+                "forms:\n" + "\n".join(mismatches)
+            )
+        finally:
+            for name in names:
+                project.run_sql(f"DROP TABLE IF EXISTS `{name}`")
 
 
 # -- Nested nullability, with a table model --
