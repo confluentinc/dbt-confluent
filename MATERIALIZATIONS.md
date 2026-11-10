@@ -1027,6 +1027,10 @@ Compares the user-specified `config(distributed_by={...})` against the existing 
 #### WITH Options Drift
 Compares existing `WITH` options against the model's `config(with={...})`. Raises an error if any configured option value has changed. For `streaming_source`, the mandatory `config(connector='...')` is included in this comparison (it is rendered as the `connector` WITH option), so changing the connector is detected as drift.
 
+Values are compared by what they mean, not character for character, since Flink doesn't always report a value the way the model wrote it. A duration can be written in any unit Flink accepts from milliseconds to days, and a size in any unit Flink accepts: `'7 days'`, `'168 h'` and `'604800000'` all match the `7 d` Flink reports, and `'1024 mb'` matches `1 gb`. Case is ignored, so `'COMPACT'` matches `compact`.
+
+**Limitation**: because case is ignored, a change that only alters the case of a value (for example a Schema Registry subject name, or a faker expression) is not detected. Use `--full-refresh` to apply it.
+
 **Important limitation**: The adapter only verifies that user-specified options exist with the correct values. It does **not** detect when options are removed from the config, because connectors may add default options automatically (e.g., `fields.*.expression` from the faker connector), and we cannot distinguish between user-specified and auto-generated options.
 
 **Example of undetected drift**:
