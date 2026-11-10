@@ -1253,13 +1253,22 @@ class TestFlinkReportsOptionValuesAsListed(ConfluentFixtures):
             query = " UNION ALL ".join(queries)
             rows = project.run_sql(query, fetch="all")
             actual = {(str(row[0]), str(row[1])): str(row[2]) for row in rows}
-            mismatches = [
-                f"'{option}' written='{written}' expected='{reported}' "
-                f"reported='{actual.get((name, option))}'"
-                for name, options in zip(names, tables, strict=True)
-                for option, (written, reported) in options.items()
-                if actual.get((name, option)) != reported
-            ]
+            tables_with_rows = {name for name, _ in actual.keys()}
+            mismatches = []
+            for name in names:
+                if name not in tables_with_rows:
+                    mismatches.append(
+                        f"no TABLE_OPTIONS rows for {name} "
+                        "(INFORMATION_SCHEMA may not have caught up yet)"
+                    )
+            for name, options in zip(names, tables, strict=True):
+                if name in tables_with_rows:
+                    for option, (written, reported) in options.items():
+                        if actual.get((name, option)) != reported:
+                            mismatches.append(
+                                f"'{option}' written='{written}' expected='{reported}' "
+                                f"reported='{actual.get((name, option))}'"
+                            )
             assert not mismatches, (
                 "Flink no longer reports these WITH option values as tests/flink_option_values.py "
                 "lists them. Update the list, then check option_values_match handles the new "
