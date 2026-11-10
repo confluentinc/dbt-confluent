@@ -69,7 +69,7 @@ MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
         "language",
         "artifact_id",
         "artifact_path",
-        "class",
+        "path",
         "connections",
     },
     "streaming_source": _UNIVERSAL_CONFIG_KEYS
@@ -1102,7 +1102,7 @@ class ConfluentAdapter(SQLAdapter):
                 # Eagerly check that the newly specified artifact exists before we drop anything
                 self._require_artifact_exists(conn, artifact_id)
         create_sql = functions.render_create_function(
-            relation, udf.class_name, udf.language, artifact_id, udf.connection_names
+            relation, udf.class_name, udf.language, artifact_id, udf.connections
         )
         if existing is not None:
             # A failed drop leaves the function in place, so there is nothing to restore.
@@ -1151,7 +1151,7 @@ class ConfluentAdapter(SQLAdapter):
                 previous.class_name,
                 previous.language,
                 previous.artifact_id,
-                sorted(c.render() for c in previous.connections),
+                sorted(previous.connections),
             )
             execute(sql, statement_name=sanitize_statement_name(f"{statement_name}-restore"))
             logger.warning(

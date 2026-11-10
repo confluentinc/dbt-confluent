@@ -47,7 +47,7 @@ def function_sql(
         "materialized": "function",
         "language": language,
         "artifact_id": artifact_id,
-        "class": class_name,
+        "path": class_name,
         **extra,
     }
     args = ",\n    ".join(f"{key}={value!r}" for key, value in config.items())
@@ -186,7 +186,7 @@ class TestFunctionConfigErrors(FunctionFixtures):
     CASES = {
         "bad_language": ({"language": "sql"}, "'language' must be one of"),
         "bad_artifact_id": ({"artifact_id": "abc123"}, "one of 'artifact_id'"),
-        "bad_class": ({"class_name": " "}, "'class' must be a non-empty string"),
+        "bad_class": ({"class_name": " "}, "'path' must be a non-empty string"),
         "bad_connections": ({"connections": ["a..c"]}, "'connections'"),
         "bad_id_and_path": ({"artifact_path": "udf.zip"}, "mutually exclusive"),
         "bad_missing_package": (

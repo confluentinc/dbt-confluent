@@ -553,7 +553,7 @@ independently. Flink scans the source once per consumer, not once shared across 
 
 A `function` registers a user-defined function (UDF) in Flink from an artifact (a Java JAR or
 Python ZIP) in Confluent Cloud, by issuing
-`CREATE FUNCTION ... USING JAR 'confluent-artifact://<artifact_id>'`. The artifact is either one
+`CREATE FUNCTION ... USING ARTIFACT 'confluent-artifact://<artifact_id>'`. The artifact is either one
 you uploaded yourself (`artifact_id`) or a local package that dbt uploads for you
 (`artifact_path`). dbt orders the function ahead of any model that calls it via
 `{{ function('name') }}`.
@@ -566,7 +566,7 @@ a function to have a body file, so the config call is all it contains):
 {{ config(
     language='java',
     artifact_id='cfa-xxxxxx',
-    class='com.example.my.TShirtSizingIsSmaller',
+    path='com.example.my.TShirtSizingIsSmaller',
 ) }}
 ```
 
@@ -575,7 +575,7 @@ a function to have a body file, so the config call is all it contains):
   and `artifact_path` is required.
 - `artifact_path`: a local package for dbt to upload, relative to the dbt project root: a `.jar`
   for `java` or a `.zip` for `python`. See [Uploading the artifact](#uploading-the-artifact).
-- `class`: the Java class, or the Python module path of the function.
+- `path`: the function's Java class name, or its Python module path.
 - `connections`: optional list of connection names the function may use.
 
 ```sql
@@ -625,7 +625,7 @@ uploaded it.
 
 Flink UDFs are immutable (no `ALTER` or `CREATE OR REPLACE`), so changing one means dropping and
 re-creating it. On each run the materialization compares the live function (via
-`DESCRIBE FUNCTION`) to the config (class, language, artifact and connections):
+`DESCRIBE FUNCTION`) to the config (path, language, artifact and connections):
 
 - **Function doesn't exist:** it is created.
 - **Function matches the config:** nothing is submitted.
@@ -664,8 +664,8 @@ functions:
 ```
 
 A `connections` entry that isn't fully qualified (`name`, `database.name` or
-`catalog.database.name`) is resolved against the function's own catalog and database when
-comparing. Runs that replace the same function concurrently can interfere with each other.
+`catalog.database.name`) is resolved against the function's own catalog and database, both
+when comparing and in the emitted `CREATE FUNCTION`. Runs that replace the same function concurrently can interfere with each other.
 
 #### Updating a function's artifact
 
@@ -731,7 +731,7 @@ Each per-materialization section links back to the specific subsections below th
 
 Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing. For example, `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
 
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `language`, `artifact_id`, `artifact_path`, `class`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `language`, `artifact_id`, `artifact_path`, `path`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
 
 If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
 
