@@ -52,6 +52,9 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
 
 _DIGEST_LENGTH = 16
 
+# Characters kept from a package file's name when it goes into an artifact name.
+_ILLEGAL_PACKAGE_CHARS = re.compile(r"[^A-Za-z0-9_-]")
+
 # The artifact API's limit on a display name (the driver rejects longer ones).
 MAX_ARTIFACT_NAME_LENGTH = 60
 
@@ -108,14 +111,23 @@ def file_digest(path: Path) -> ArtifactDigest:
     return ArtifactDigest(sha.hexdigest()[:_DIGEST_LENGTH])
 
 
-def artifact_display_name(project: str, digest: str) -> str:
-    """Name an artifact after the dbt `project`, plus the content digest.
+def artifact_display_name(project: str, package: str, digest: str) -> str:
+    """Name an artifact `<project>-<package>-<digest>`, so a person can tell which package it is.
 
-    A label too long to leave room for the digest is cut short and ends in a hash of the full
-    label. The digest is never cut, since it is what makes the name mean "this content".
+    The project and package are joined with `-`, which dbt forbids in a project name, so a name
+    maps back to exactly one (project, package) pair: `shop` + `eu_udfs` and `shop_eu` + `udfs`
+    can't collide. Name-based lookup relies on that to never reuse another project's artifact.
+
+    `package` is the package file's name without its suffix, with anything but letters, digits,
+    `_` and `-` (e.g. the dots of a version) replaced by `_`, since the API's allowed characters
+    are not documented. Two files whose names differ only there get the same label, which is fine:
+    the digest still tells their artifacts apart. A label too long to leave room for the digest is
+    cut short and ends in a hash of the full label, so the file name is cut from its end first
+    and the project survives whole. The digest is never cut, since it is what makes the name mean
+    "this content".
     """
-    max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for '-'
-    label = project
+    max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for the "-"
+    label = f"{project}-{_ILLEGAL_PACKAGE_CHARS.sub('_', package)}"
     if len(label) > max_label:
         label = truncate_with_hash(label, max_label, label)
     return f"{label}-{digest}"

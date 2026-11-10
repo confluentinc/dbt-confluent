@@ -21,7 +21,7 @@ import pytest
 
 from dbt.adapters.confluent import functions
 from dbt.adapters.confluent.connections import ConfluentConnectionManager
-from dbt.adapters.confluent.function_artifacts import artifact_display_name
+from dbt.adapters.confluent.function_artifacts import artifact_project
 from dbt.tests.util import run_dbt, run_dbt_and_capture, write_file
 from tests.functional.adapter._helpers import (
     get_result_by_name,
@@ -105,26 +105,18 @@ def submitted_sql(monkeypatch):
 
 
 def our_artifacts(project) -> list:
-    """The artifacts dbt uploaded for this test class's project (see `FunctionFixtures`)."""
-    stem = f"{project.adapter.config.project_name}-"
-    handle = project.adapter.connections.get_thread_handle()
-    return [a for a in handle.get_artifacts_api().list() if a.display_name.startswith(stem)]
+    """The artifacts dbt uploaded for this test class's project (see `FunctionFixtures`).
 
-
-def check_project_name_survives_artifact_naming(project_name: str) -> None:
-    """Fail fast if dbt would truncate `project_name` when naming its artifacts.
-
-    Artifacts are named `<project name>-<digest>`, but a project name too long to leave room for
-    the digest is cut short (see `artifact_display_name`). Everything here that finds a class's
-    artifacts by the project name (`our_artifacts`) would then silently match nothing.
+    Found by the ownership marker in the description, not the name: a long project name is cut
+    short in the artifact name.
     """
-    if not artifact_display_name(project_name, "0" * 16).startswith(f"{project_name}-"):
-        pytest.fail(
-            f"Test project name {project_name!r} ({len(project_name)} chars) is too long: dbt "
-            "would truncate it when naming function artifacts. The name is the class's "
-            "isolation prefix plus its NAME, so shorten the class's NAME.",
-            pytrace=False,
-        )
+    project_name = project.adapter.config.project_name
+    handle = project.adapter.connections.get_thread_handle()
+    return [
+        a
+        for a in handle.get_artifacts_api().list()
+        if artifact_project(a.description) == project_name
+    ]
 
 
 class FunctionFixtures(ConfluentFixtures):
@@ -140,7 +132,6 @@ class FunctionFixtures(ConfluentFixtures):
     @pytest.fixture(scope="class")
     def project_config_update(self, project_config_update, relation_namespace):
         name = f"{relation_namespace}{self.NAME}"
-        check_project_name_survives_artifact_naming(name)
         project_config_update = {**project_config_update, "name": name}
         if self.flags_enabled:
             return {**project_config_update, "flags": {FLAG: True}}
