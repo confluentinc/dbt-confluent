@@ -25,11 +25,11 @@ def validate_name_prefix(prefix: str) -> None:
         )
 
 
-def truncate_with_hash(base: str, max_length: int, hash_source: str) -> str:
-    """Cut `base` to fit `max_length`, ending in `-<hash of hash_source>`."""
+def truncate_with_hash(base: str, max_length: int, hash_source: str, sep: str = "-") -> str:
+    """Cut `base` to fit `max_length`, ending in `<sep><hash of hash_source>`."""
     hash_suffix = hashlib.md5(hash_source.encode()).hexdigest()[:_HASH_LENGTH]
-    max_base = max_length - 1 - len(hash_suffix)  # 1 for '-'
-    return f"{base[:max_base]}-{hash_suffix}"
+    max_base = max_length - len(sep) - len(hash_suffix)  # room for `sep`
+    return f"{base[:max_base]}{sep}{hash_suffix}"
 
 
 def sanitize_statement_name(name: str) -> str:
