@@ -114,11 +114,11 @@ def our_artifacts(project) -> list:
 def check_project_name_survives_artifact_naming(project_name: str) -> None:
     """Fail fast if dbt would truncate `project_name` when naming its artifacts.
 
-    Artifacts are named `<project name>-<digest>`, but a project name too long to leave room for
+    Artifacts are named `<project name>-<package>-<digest>`, but a project name too long to leave room for
     the digest is cut short (see `artifact_display_name`). Everything here that finds a class's
     artifacts by the project name (`our_artifacts`) would then silently match nothing.
     """
-    if not artifact_display_name(project_name, "0" * 16).startswith(f"{project_name}-"):
+    if not artifact_display_name(project_name, "", "0" * 16).startswith(f"{project_name}-"):
         pytest.fail(
             f"Test project name {project_name!r} ({len(project_name)} chars) is too long: dbt "
             "would truncate it when naming function artifacts. The name is the class's "

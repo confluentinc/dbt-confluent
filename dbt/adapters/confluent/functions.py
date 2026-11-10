@@ -140,9 +140,9 @@ def validate_function_config(
     package is read once).
 
     An `artifact_path` becomes an `ArtifactConfig` naming the artifact it is (or will be) uploaded
-    under: the dbt `project`, plus a digest of the package's content, so every function using
-    the same package shares one artifact. `catalog`, `database` and `function` are the function
-    relation's parts; a relation missing any of them is an error.
+    under: the dbt `project`, the package file's name, and a digest of the package's content,
+    so every function using the same package shares one artifact. `catalog`, `database` and
+    `function` are the function relation's parts; a relation missing any of them is an error.
     """
     if catalog is None or database is None or function is None:
         raise CompilationError(
@@ -200,7 +200,7 @@ def validate_function_config(
         package_digest = digest(resolved_path)
         artifact_config = ArtifactConfig(
             path=resolved_path,
-            name=artifact_display_name(project, package_digest),
+            name=artifact_display_name(project, resolved_path.stem, package_digest),
             project=project,
             language=language,
         )
