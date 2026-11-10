@@ -52,7 +52,7 @@ class FunctionArtifactsRepo:
     ) -> None:
         self._digests = SingleFlightDict[Path, ArtifactDigest](digest_timeout)
         self._listing = SingleFlightCell[dict[str, FlinkArtifact]](listing_timeout)
-        self._uploads = SingleFlightDict[ArtifactDigest, FlinkArtifact](upload_timeout)
+        self._uploads = SingleFlightDict[str, FlinkArtifact](upload_timeout)
         # Artifacts this build uploaded, by name.
         # Written once per name, by that name's upload leader, so it needs no lock.
         self._uploaded_by_name: dict[str, FlinkArtifact] = {}
@@ -67,10 +67,13 @@ class FunctionArtifactsRepo:
         return self._listing.get(lambda: self._list_artifacts(conn)).get(name)
 
     def ensure(self, conn: Connection, config: ArtifactConfig) -> FlinkArtifact:
-        """The artifact for this package, found or uploaded once per package content."""
-        digest = self.digest(config.path)
-        artifact = self._uploads.get(digest, lambda: self._find_or_upload(conn, config))
-        # Uploads are keyed on content alone, so this may be the artifact another function (the
+        """The artifact for this package, found or uploaded once per artifact name.
+
+        The name carries the content digest, so one name is one content. Two files with
+        identical bytes but different names are two artifacts, so each traces back to its file.
+        """
+        artifact = self._uploads.get(config.name, lambda: self._find_or_upload(conn, config))
+        # Uploads are keyed on the name alone, so this may be the artifact another function (the
         # leader) uploaded under its own language, or one already there from an earlier run.
         # A single package contain functions in multiple languages, so we validate the mismatch
         # rather than uploading the package again with different metadata. This is unlikely to

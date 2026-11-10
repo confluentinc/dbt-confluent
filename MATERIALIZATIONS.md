@@ -601,13 +601,15 @@ flags:
 
 With `artifact_path`, dbt uploads the package as the function's artifact, which needs credentials that
 can use the artifact API (`auth: oauth`, or a [Global API key](#tableflow) as for Tableflow). The artifact is
-named after the package's content (`<project>-<digest>`), so the same package always maps to
-the same artifact, whichever function uses it. Artifact names are limited to 60 characters,
-so when the project name is too long to leave room for the digest, it is cut short and ends
-in a hash of the full name; the digest is never cut:
+named after the project, the package file's name and the package's content (`<project>_<file name>_<digest>`, e.g. `shop_udfs_3f2a9c...`), so it is recognizable in Confluent Cloud. The
+file name is without its extension, and characters other than letters, digits, `_` and `-` become `_`.
+The same package file always maps to the same artifact, whichever function uses it. Artifact names are
+limited to 60 characters, so when the project and file names are too long to leave room for the digest,
+they are cut short from the end and finish with a hash of the full name; the digest is never cut:
 
-- Functions that point at the same package share one artifact: dbt hashes, looks up and uploads
-  it once per run, however many functions use it or how many threads build them.
+- Functions that point at the same package file share one artifact: dbt hashes, looks up and uploads
+  it once per run, however many functions use it or how many threads build them. Two files with
+  identical content but different names are two artifacts.
 - An unchanged package reuses its artifact, and the function is left alone.
 - A changed package is uploaded as a new artifact, and the function is replaced to use it.
 - Uploading happens when the function is created or replaced, not at parse or compile time.
