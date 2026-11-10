@@ -713,12 +713,38 @@ If every statement that uses the function is in this dbt project, the `sweep_fun
    delete after step 2 has recreated them, and never while a `dbt run` is in progress (an artifact
    it has just uploaded may not have its function yet).
 
-For artifacts that are managed outside of dbt (referenced by `artifact_id`), cleanup is completely manual,
+**For artifacts that are managed outside of dbt** (referenced by `artifact_id`), cleanup is completely manual,
 but the same principles apply. Always follow the same procedure:
 
 - Upload new artifacts first.
 - Resubmit any statements to ensure they pick up the new artifact.
 - Remove the old artifact only after all statements have been resubmitted.
+
+**Limiting the scope of the sweep.** For more explict control over what artifacts the sweep will
+consider as candidates for removal, you can list the artifacts ahead of time and provide that
+list - possibly modified - back to the sweep command:
+
+```bash
+# Writes target/confluent_function_artifacts.json
+dbt run-operation list_function_artifacts
+
+# Resubmit all statements downstream of the updated functions
+dbt build --select resource_type:function+ --full-refresh
+
+# Drop any unreferenced artifacts that existed before the 'dbt build' was run
+dbt run-operation sweep_function_artifacts \
+  --args '{delete: true, list_file: target/confluent_function_artifacts.json}'
+```
+
+`list_function_artifacts` will print the details of all live artifacts used by this project,
+including information about which functions refer to which artifacts. The same information is
+written to a JSON file for later processing.
+
+Passing the JSON file back to the `sweep_function_artifacts` operation limits the sweep to the
+artifacts mentioned in the file. The sweep operation will still refuse to delete any artifacts
+that are referenced by a function or are not managed by the dbt project. So it is not guaranteed
+that all artifacts in the list file are deleted, but rather that no artifact that isn't in the
+file will be deleted.
 
 ---
 
