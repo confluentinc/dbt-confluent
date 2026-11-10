@@ -11,19 +11,24 @@ size is told apart by the form Flink reports it in, so it works for any option, 
 format.
 """
 
-# Flink's duration units (TimeUtils.parseDuration), in milliseconds. µs and ns are left out: no
-# Kafka-backed option goes below milliseconds, so a value written in them is reported as drift.
-_DURATION_UNITS_MS = {
-    **dict.fromkeys(("ms", "milli", "millis", "millisecond", "milliseconds"), 1),
-    **dict.fromkeys(("s", "sec", "secs", "second", "seconds"), 1000),
-    **dict.fromkeys(("min", "m", "minute", "minutes"), 60_000),
-    **dict.fromkeys(("h", "hour", "hours"), 3_600_000),
-    **dict.fromkeys(("d", "day", "days"), 86_400_000),
+# How many nanoseconds each of Flink's duration units (TimeUtils.parseDuration) is; a bare number
+# ("") is milliseconds. Nanoseconds so '1500 µs' reads exactly before it's rounded down: values
+# are compared in whole milliseconds, the smallest unit Flink stores. µ is the micro sign (U+00B5),
+# as Flink spells it.
+_NS_PER_DURATION_UNIT = {
+    **dict.fromkeys(("ns", "nano", "nanos", "nanosecond", "nanoseconds"), 1),
+    **dict.fromkeys(("µs", "micro", "micros", "microsecond", "microseconds"), 1000),
+    **dict.fromkeys(("", "ms", "milli", "millis", "millisecond", "milliseconds"), 1_000_000),
+    **dict.fromkeys(("s", "sec", "secs", "second", "seconds"), 1_000_000_000),
+    **dict.fromkeys(("min", "m", "minute", "minutes"), 60_000_000_000),
+    **dict.fromkeys(("h", "hour", "hours"), 3_600_000_000_000),
+    **dict.fromkeys(("d", "day", "days"), 86_400_000_000_000),
 }
 
-# Flink's memory size units (MemorySize.parse), in bytes.
-_SIZE_UNITS_BYTES = {
-    **dict.fromkeys(("b", "bytes"), 1),
+# How many bytes each of Flink's memory size units (MemorySize.parse) is; a bare number ("") is
+# bytes.
+_BYTES_PER_SIZE_UNIT = {
+    **dict.fromkeys(("", "b", "bytes"), 1),
     **dict.fromkeys(("k", "kb", "kibibytes"), 1024),
     **dict.fromkeys(("m", "mb", "mebibytes"), 1024**2),
     **dict.fromkeys(("g", "gb", "gibibytes"), 1024**3),
@@ -32,8 +37,9 @@ _SIZE_UNITS_BYTES = {
 
 # The units TABLE_OPTIONS reports a duration or a size in: a whole number, one space, then the
 # largest of these it divides into evenly ('7 d', '90 min', '1 gb', '2097164 bytes'). Sizes stop at
-# gb (1 TiB is reported in bytes). The two sets don't overlap, so the reported value says which
-# kind of value the option holds.
+# gb (1 TiB is reported in bytes). A duration is stored in whole milliseconds, rounded down ('1500
+# µs' is reported as '1 ms'), so it's never reported in µs or ns. The two sets don't overlap, so
+# the reported value says which kind of value the option holds.
 _REPORTED_DURATION_UNITS = frozenset({"ms", "s", "min", "h", "d"})
 _REPORTED_SIZE_UNITS = frozenset({"bytes", "kb", "mb", "gb"})
 
@@ -43,35 +49,43 @@ def option_values_match(expected: str, existing: str) -> bool:
 
     expected is the model's value as a string; existing is the value TABLE_OPTIONS reports. Equal
     strings match. If existing is a duration or a size in the form Flink reports one, both are read
-    as a number of milliseconds or bytes, the way Flink reads them (a bare number is milliseconds
-    or bytes), and match if the numbers are equal; a model value that can't be read that way
-    doesn't match. Any other value matches if it's equal ignoring case.
+    the way Flink reads and stores them, as a number of whole milliseconds (anything smaller is
+    dropped) or bytes, with a bare number being milliseconds or bytes, and match if the numbers are
+    equal; a model value that can't be read that way doesn't match. Any other value matches if it's
+    equal ignoring case.
 
     Ignoring case means a change to a free-text value that only alters case (a subject name, a
     faker expression) isn't reported as drift. Flink reads enum values without regard to case, so
     for those a change in case changes nothing.
+
+    Reading the kind of value from existing means a free-text value in the form Flink reports a
+    duration or size in is compared as one: a faker expression changed from '1 h' to '60 min'
+    isn't reported as drift.
     """
 
-    def amount(value: str, units: dict[str, int]) -> int | None:
-        """Read value the way Flink does: a whole number, then an optional unit (bare is 1).
+    def amount(value: str, units: dict[str, int], result_unit: int = 1) -> int | None:
+        """Read value the way Flink does: a whole number, then an optional unit.
 
-        Anything malformed ends up in the unit, which the lookup in units rejects.
+        Returns a duration in whole milliseconds (result_unit is one millisecond in nanoseconds),
+        rounded down as Flink stores it, or a size in bytes. Anything malformed ends up in the
+        unit, which the lookup in units rejects.
         """
         value = value.strip()
         unit = value.lstrip("0123456789")
         number = value[: len(value) - len(unit)]
         if not number:
             return None
-        unit = unit.strip().lower()
-        factor = units.get(unit) if unit else 1
-        return None if factor is None else int(number) * factor
+        factor = units.get(unit.strip().lower())
+        return None if factor is None else int(number) * factor // result_unit
 
     if expected == existing:
         return True
     number, _, unit = existing.partition(" ")
     if number and not number.lstrip("0123456789"):
         if unit in _REPORTED_DURATION_UNITS:
-            return amount(expected, _DURATION_UNITS_MS) == amount(existing, _DURATION_UNITS_MS)
+            ms = _NS_PER_DURATION_UNIT["ms"]
+            expected_ms = amount(expected, _NS_PER_DURATION_UNIT, result_unit=ms)
+            return expected_ms == amount(existing, _NS_PER_DURATION_UNIT, result_unit=ms)
         if unit in _REPORTED_SIZE_UNITS:
-            return amount(expected, _SIZE_UNITS_BYTES) == amount(existing, _SIZE_UNITS_BYTES)
+            return amount(expected, _BYTES_PER_SIZE_UNIT) == amount(existing, _BYTES_PER_SIZE_UNIT)
     return expected.casefold() == existing.casefold()

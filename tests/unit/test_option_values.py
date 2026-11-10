@@ -26,8 +26,11 @@ def test_value_as_flink_reports_it_matches(expected, existing):
         # Kept as written
         ("90 min", "90 min"),
         ("#{Name.firstName}", "#{Name.firstName}"),
-        # Review Focus: leading zeros, as Flink reads them
+        # Leading zeros, as Flink reads them
         ("007 d", "7 d"),
+        # Below a millisecond is dropped, not rounded to the nearest
+        ("999999 ns", "0 ms"),
+        ("1999 µs", "1 ms"),
     ],
 )
 def test_same_value_matches(expected, existing):
@@ -43,9 +46,10 @@ def test_same_value_matches(expected, existing):
         ("forever", "7 d"),  # not a duration
         ("1 gb", "1 h"),  # a size against a duration
         ("1 h", "1 gb"),  # a duration against a size
-        ("100 us", "100 ms"),  # a unit left out
+        ("100 us", "100 ms"),  # not a Flink unit (the micro sign is µ)
+        ("2000 µs", "1 ms"),  # a whole millisecond more
         ("#{Name.lastName}", "#{Name.firstName}"),
-        # Review Focus: Flink rejects padded enum values
+        # Flink rejects padded enum values
         (" compact", "compact"),
     ],
 )
@@ -61,7 +65,7 @@ def test_changed_value_does_not_match(expected, existing):
         ("-1", "0 ms"),  # sign
         ("+7 d", "7 d"),  # sign
         ("²", "2 ms"),  # a digit int() rejects
-        # Review Focus: empty
+        # Empty
         ("", "0 ms"),
     ],
 )
@@ -74,3 +78,11 @@ def test_case_only_change_to_free_text_matches():
     """Known blind spot: case is ignored for any value that isn't a duration or size, so a change
     to free text that only alters case isn't drift. Pinned so a change to it is deliberate."""
     assert option_values_match("#{name.firstName}", "#{Name.firstName}")
+
+
+def test_duration_or_size_shaped_free_text_change_matches():
+    """Known blind spot: a free-text value in the form Flink reports a duration or size in is read
+    as one, so changing a faker expression from '1 h' to '60 min' isn't drift. Pinned so a change
+    to it is deliberate."""
+    assert option_values_match("60 min", "1 h")
+    assert option_values_match("1024 kb", "1 mb")

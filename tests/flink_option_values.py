@@ -9,7 +9,7 @@ update the triples here, then check option_values_match still handles the new fo
 Every duration and size unit spelling option_values accepts appears at least once. The functional
 test packs entries into tables by position (its first table sets each option's first entry, and so
 on), so the option with the most entries sets the number of tables; spread new entries across
-options to keep it near 12.
+options to keep it near 18.
 """
 
 FLINK_REPORTED_VALUES = [
@@ -37,6 +37,19 @@ FLINK_REPORTED_VALUES = [
     ("kafka.compaction.time", "1500 millisecond", "1500 ms"),
     ("kafka.compaction.time", "1500 milliseconds", "1500 ms"),
     ("kafka.compaction.time", "604800000", "7 d"),
+    # Below a millisecond: Flink stores whole milliseconds, rounded down
+    ("kafka.retention.time", "1000000000 ns", "1 s"),
+    ("kafka.retention.time", "90000000000 nano", "90 s"),
+    ("kafka.retention.time", "1000 µs", "1 ms"),
+    ("kafka.retention.time", "90000000 micro", "90 s"),
+    ("kafka.retention.time", "1500 µs", "1 ms"),
+    ("kafka.retention.time", "1 ns", "0 ms"),
+    ("kafka.compaction.time", "90000000000 nanos", "90 s"),
+    ("kafka.compaction.time", "90000000000 nanosecond", "90 s"),
+    ("kafka.compaction.time", "90000000000 nanoseconds", "90 s"),
+    ("kafka.compaction.time", "90000000 micros", "90 s"),
+    ("kafka.compaction.time", "90000000 microsecond", "90 s"),
+    ("kafka.compaction.time", "90000000 microseconds", "90 s"),
     # Sizes
     ("kafka.retention.size", "1 gb", "1 gb"),
     ("kafka.retention.size", "1gb", "1 gb"),
