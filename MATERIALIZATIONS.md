@@ -1027,7 +1027,7 @@ Compares the user-specified `config(distributed_by={...})` against the existing 
 #### WITH Options Drift
 Compares existing `WITH` options against the model's `config(with={...})`. Raises an error if any configured option value has changed. For `streaming_source`, the mandatory `config(connector='...')` is included in this comparison (it is rendered as the `connector` WITH option), so changing the connector is detected as drift.
 
-Values are compared by what they mean, not character for character, since Flink doesn't always report a value the way the model wrote it. A duration or a size can be written in any unit Flink accepts: `'7 days'`, `'168 h'` and `'604800000'` all match the `7 d` Flink reports, and `'1024 mb'` matches `1 gb`. Flink keeps a duration in whole milliseconds, so `'1500 µs'` matches the `1 ms` it reports. Case is ignored, so `'COMPACT'` matches `compact`.
+Values are compared by what they mean, not as exact strings, since Flink doesn't always report a value the way the model wrote it. A duration or a size can be written in any unit Flink accepts: `'7 days'`, `'168 h'` and `'604800000'` all match the `7 d` that Flink reports, and `'1024 mb'` matches `1 gb`. Flink returns durations in whole milliseconds (rounded down), so `'1500 µs'` matches the `1 ms` reported by Flink. Case is ignored, so `'COMPACT'` matches `compact`.
 
 **Limitations**: the adapter doesn't know what kind of value each option holds, so some changes are not detected:
 
