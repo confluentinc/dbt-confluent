@@ -35,6 +35,7 @@ from .catalog import query_catalog_rows
 from .dry_run_types import display_type, fitted_type
 from .function_artifacts_repo import FunctionArtifactsRepo
 from .naming import sanitize_statement_name
+from .option_values import option_values_match
 from .utils import fetch_from_cursor
 
 logger = AdapterLogger("Confluent")
@@ -1633,12 +1634,14 @@ class ConfluentAdapter(SQLAdapter):
 
         Coerces the expected value to str before comparing — `INFORMATION_SCHEMA`
         always returns option values as strings, so an `int 1` in the model
-        config matches the existing `'1'`.
+        config matches the existing `'1'`. Values are compared by meaning, not as
+        strings (`option_values_match`), since Flink doesn't always report a value
+        the way the model wrote it.
         """
         violations: list[str] = []
         for key, value in expected_with.items():
             existing_value = existing_options.get(key)
-            if existing_value != str(value):
+            if existing_value is None or not option_values_match(str(value), existing_value):
                 shown = existing_value if existing_value is not None else "<not set>"
                 violations.append(f"option: '{key}' existing='{shown}', expected='{str(value)}'")
         return violations
