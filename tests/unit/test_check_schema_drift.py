@@ -182,6 +182,35 @@ class TestCheckOptionsDrift:
             ]
         )
 
+    def test_value_flink_rewrote_is_not_drift(self):
+        """Flink reports '7 days' as '7 d', 1048576 bytes as '1 mb' and 604800000 ms as '7 d';
+        the model hasn't changed."""
+        assert (
+            ConfluentAdapter._check_options_drift(
+                expected_with={
+                    "kafka.retention.time": "7 days",
+                    "kafka.max-message-size": 1048576,
+                    "kafka.compaction.time": 604800000,
+                },
+                existing_options={
+                    "kafka.retention.time": "7 d",
+                    "kafka.max-message-size": "1 mb",
+                    "kafka.compaction.time": "7 d",
+                },
+            )
+            == []
+        )
+
+    def test_bool_value_matches_lowercase(self):
+        """A Python bool renders as 'True'; it matches a stored 'true'."""
+        assert (
+            ConfluentAdapter._check_options_drift(
+                expected_with={"some.flag": True},
+                existing_options={"some.flag": "true"},
+            )
+            == []
+        )
+
 
 # ---------------------------------------------------------------------------
 # _check_distribution_drift
