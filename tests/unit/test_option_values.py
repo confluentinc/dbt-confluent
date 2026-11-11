@@ -1,5 +1,5 @@
-"""Unit tests for option_values: how the drift check compares a WITH option value the model sets
-with the one INFORMATION_SCHEMA.TABLE_OPTIONS reports."""
+"""Unit tests for `option_values`: how the drift check compares a WITH option value the model sets
+with the one `INFORMATION_SCHEMA.TABLE_OPTIONS` reports."""
 
 import pytest
 

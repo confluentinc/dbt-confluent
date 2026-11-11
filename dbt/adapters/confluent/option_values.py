@@ -1,6 +1,6 @@
 """How the drift check compares a WITH option value the model sets with the one the table has.
 
-The drift check reads the existing table's WITH options from INFORMATION_SCHEMA.TABLE_OPTIONS,
+The drift check reads the existing table's WITH options from `INFORMATION_SCHEMA.TABLE_OPTIONS`,
 which doesn't always report a value the way the model wrote it. Flink shows a duration or a size
 in the largest unit it divides into evenly ('7 days' and '604800000' both become '7 d', '1024 mb'
 becomes '1 gb'), and lowercases some enum values ('COMPACT' becomes 'compact'). Comparing the
@@ -11,10 +11,11 @@ size is told apart by the form Flink reports it in, so it works for any option, 
 format.
 """
 
-# How many nanoseconds each of Flink's duration units (TimeUtils.parseDuration) is; a bare number
-# ("") is milliseconds. Nanoseconds so '1500 µs' reads exactly before it's rounded down: values
-# are compared in whole milliseconds, the smallest unit Flink stores. µ is the micro sign (U+00B5),
-# as Flink spells it.
+# Each of Flink's duration "units" (TimeUtils.parseDuration) mapped to its value in nanoseconds -
+# the smallest unit that Flink accepts; a bare number ("") is milliseconds. The smallest unit that
+# Flink reports back is in whole milliseconds, rounded down (e.g. '1900 µs' is reported as '1 ms'
+# by Flink). Thus, we compare the values in whole milliseconds (rounded down to match Flink). µ is
+# the micro sign (U+00B5), as Flink spells it.
 _NS_PER_DURATION_UNIT = {
     **dict.fromkeys(("ns", "nano", "nanos", "nanosecond", "nanoseconds"), 1),
     **dict.fromkeys(("µs", "micro", "micros", "microsecond", "microseconds"), 1000),
@@ -37,9 +38,9 @@ _BYTES_PER_SIZE_UNIT = {
 
 # The units TABLE_OPTIONS reports a duration or a size in: a whole number, one space, then the
 # largest of these it divides into evenly ('7 d', '90 min', '1 gb', '2097164 bytes'). Sizes stop at
-# gb (1 TiB is reported in bytes). A duration is stored in whole milliseconds, rounded down ('1500
-# µs' is reported as '1 ms'), so it's never reported in µs or ns. The two sets don't overlap, so
-# the reported value says which kind of value the option holds.
+# gb (1 TiB is reported in bytes). A duration is reported in whole milliseconds, rounded down
+# (e.g. '1900 µs' is reported as '1 ms'). The two sets don't overlap, so the reported value says
+# which kind of value the option holds.
 _REPORTED_DURATION_UNITS = frozenset({"ms", "s", "min", "h", "d"})
 _REPORTED_SIZE_UNITS = frozenset({"bytes", "kb", "mb", "gb"})
 
@@ -47,28 +48,28 @@ _REPORTED_SIZE_UNITS = frozenset({"bytes", "kb", "mb", "gb"})
 def option_values_match(expected: str, existing: str) -> bool:
     """Return whether a WITH option value the model sets means the same as the table's.
 
-    expected is the model's value as a string; existing is the value TABLE_OPTIONS reports. Equal
-    strings match. If existing is a duration or a size in the form Flink reports one, both are read
-    the way Flink reads and stores them, as a number of whole milliseconds (anything smaller is
-    dropped) or bytes, with a bare number being milliseconds or bytes, and match if the numbers are
-    equal; a model value that can't be read that way doesn't match. Any other value matches if it's
-    equal ignoring case.
+    `expected` is the model's value as a string; `existing` is the value `TABLE_OPTIONS` reports.
+    Equal strings match. If `existing` is a duration or a size in the form Flink reports one, both
+    are read the way Flink reads and reports them, as a number of whole milliseconds (anything
+    smaller is dropped) or bytes, with a bare number being milliseconds or bytes, and match if the
+    numbers are equal; a model value that can't be read that way doesn't match. Any other value
+    matches if it's equal ignoring case.
 
     Ignoring case means a change to a free-text value that only alters case (a subject name, a
     faker expression) isn't reported as drift. Flink reads enum values without regard to case, so
     for those a change in case changes nothing.
 
-    Reading the kind of value from existing means a free-text value in the form Flink reports a
-    duration or size in is compared as one: a faker expression changed from '1 h' to '60 min'
-    isn't reported as drift.
+    Reading the kind of value from `existing` means a free-text value in the form Flink reports a
+    duration or size in is compared as one: a faker expression changed from '1 h' to '60 min' isn't
+    reported as drift.
     """
 
     def amount(value: str, units: dict[str, int], result_unit: int = 1) -> int | None:
-        """Read value the way Flink does: a whole number, then an optional unit.
+        """Read `value` the way Flink does: a whole number, then an optional unit.
 
-        Returns a duration in whole milliseconds (result_unit is one millisecond in nanoseconds),
-        rounded down as Flink stores it, or a size in bytes. Anything malformed ends up in the
-        unit, which the lookup in units rejects.
+        Returns a duration in whole milliseconds (`result_unit` is one millisecond in nanoseconds),
+        rounded down as Flink reports it, or a size in bytes. Anything malformed ends up in the
+        unit, which the lookup in `units` rejects.
         """
         value = value.strip()
         unit = value.lstrip("0123456789")

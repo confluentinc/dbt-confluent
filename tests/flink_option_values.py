@@ -37,7 +37,7 @@ FLINK_REPORTED_VALUES = [
     ("kafka.compaction.time", "1500 millisecond", "1500 ms"),
     ("kafka.compaction.time", "1500 milliseconds", "1500 ms"),
     ("kafka.compaction.time", "604800000", "7 d"),
-    # Below a millisecond: Flink stores whole milliseconds, rounded down
+    # Below a millisecond: Flink reports whole milliseconds, rounded down
     ("kafka.retention.time", "1000000000 ns", "1 s"),
     ("kafka.retention.time", "90000000000 nano", "90 s"),
     ("kafka.retention.time", "1000 µs", "1 ms"),
