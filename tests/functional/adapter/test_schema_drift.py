@@ -22,6 +22,7 @@ tests' job.
 """
 
 import re
+import time
 from collections import defaultdict
 
 import pytest
@@ -37,6 +38,7 @@ from tests.functional.adapter._helpers import (
     capture_submitted_statement_properties,
     get_result_by_name,
     relation,
+    snapshot_query,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
 from tests.functional.adapter.isolation import physical_name
@@ -1251,14 +1253,28 @@ class TestFlinkReportsOptionValuesAsListed(ConfluentFixtures):
                 for name in names
             ]
             query = " UNION ALL ".join(queries)
-            rows = project.run_sql(query, fetch="all")
-            actual = {(str(row[0]), str(row[1])): str(row[2]) for row in rows}
+            # SNAPSHOT runs the read to completion (project.run_sql's streaming fetch can return a
+            # partial result), and polling gives INFORMATION_SCHEMA time to catch up with the
+            # CREATEs: stop once every option this test set is reported, or after timeout seconds.
+            expected_keys = {
+                (name, option)
+                for name, options in zip(names, tables, strict=True)
+                for option in options
+            }
+            timeout = 60
+            deadline = time.monotonic() + timeout
+            while True:
+                rows = snapshot_query(project, query, fetch="all")
+                actual = {(str(row[0]), str(row[1])): str(row[2]) for row in rows}
+                if expected_keys <= actual.keys() or time.monotonic() >= deadline:
+                    break
+                time.sleep(2)
             tables_with_rows = {name for name, _ in actual.keys()}
             mismatches = []
             for name in names:
                 if name not in tables_with_rows:
                     mismatches.append(
-                        f"no TABLE_OPTIONS rows for {name} "
+                        f"no TABLE_OPTIONS rows for {name} after {timeout} s "
                         "(INFORMATION_SCHEMA may not have caught up yet)"
                     )
             for name, options in zip(names, tables, strict=True):
