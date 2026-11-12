@@ -274,14 +274,17 @@ def sweep_test_resources(
             # async and not awaited; cleanup doesn't reuse names.
             project.adapter.delete_statement(name)
 
-    # Function artifacts belong to the dbt project named in their description, which carries the
-    # relation prefix (see `FunctionFixtures`), so the relation selection applies to that name.
-    # Not the artifact's own name, which cuts a long project name short.
+    # Function artifacts are either uploaded by dbt, which records the dbt project in the
+    # description (it carries the relation prefix, see `FunctionFixtures`), or uploaded directly
+    # by a test (`udf_artifact_ids`), which has no description and is named in the class's
+    # namespace. The relation selection applies to the project in the first case and to the
+    # artifact's own name in the second. Not the name of a dbt-uploaded artifact, which cuts a
+    # long project name short.
     with project.adapter.connection_named("sweep_artifacts"):
         api = project.adapter.connections.get_thread_handle().get_artifacts_api()
         for artifact in api.list():
             project_name = artifact_project(artifact.description)
-            if project_name and relation_selected(project_name):
+            if relation_selected(project_name or artifact.display_name):
                 try:
                     api.delete(artifact.id)
                 except ArtifactNotFoundError:
