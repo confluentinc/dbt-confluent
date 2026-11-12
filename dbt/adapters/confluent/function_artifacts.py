@@ -1,9 +1,10 @@
 """Artifact upload and sweeping for the `function` materialization (#180).
 
 A function can name a local package (`artifact_path`) instead of an already-uploaded artifact.
-The artifact is named `<project>-<package file name>-<content hash>` (see `artifact_display_name`),
-so it is immutable and "same name" means "same content" from the same project: an unchanged
-package reuses the existing artifact, a changed one gets a new artifact.
+The artifact is named `<project>-<package file name>-<key hash>` (see `artifact_display_name`)
+and found by the `ArtifactKey` in its description, so it is immutable and "same key" means "same
+content" from the same project: an unchanged package reuses the existing artifact, a changed one
+gets a new artifact.
 
 Flink functions are immutable (drop + create), and an artifact can't gain versions, so replacing
 a function's package is a multi-step change: upload the new artifact, drop the old function,
@@ -28,8 +29,6 @@ from dbt_common.exceptions import CompilationError
 
 from dbt.adapters.events.logging import AdapterLogger
 
-from .naming import truncate_with_hash
-
 logger = AdapterLogger("Confluent")
 
 # Flink artifact IDs look like `cfa-xxxxxx`.
@@ -51,7 +50,8 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
     "python": ArtifactFormat(".zip", ArtifactContentFormat.ZIP, ArtifactRuntimeLanguage.PYTHON),
 }
 
-_DIGEST_LENGTH = 16
+# Characters of the key's hash that end an artifact name (the description has the whole key).
+_NAME_HASH_LENGTH = 8
 
 # Characters kept from a package file's name when it goes into an artifact name.
 _ILLEGAL_PACKAGE_CHARS = re.compile(r"[^A-Za-z0-9_-]")
@@ -76,11 +76,35 @@ class ArtifactConfig(NamedTuple):
     name: str
     project: str
     language: str
+    # The package's full content digest, recorded in the description.
+    digest: "ArtifactDigest"
+
+    @property
+    def key(self) -> "ArtifactKey":
+        return ArtifactKey(self.project, self.path.name, self.digest)
 
 
-def encode_description(project: str | None) -> str:
-    """The description of an artifact dbt uploaded for `project`."""
-    return json.dumps({"managed_by": MANAGED_BY, "project": project}, separators=(",", ":"))
+def encode_description(project: str, file_name: str, sha256: str) -> str:
+    """The description of an artifact dbt uploaded for `project` from the package `file_name`.
+
+    Carries everything the name may lose (it can be truncated, and its layout may change), so
+    the description is the stable record of what an artifact is. `sha256` is the full digest.
+    """
+    return json.dumps(
+        {"managed_by": MANAGED_BY, "project": project, "file_name": file_name, "sha256": sha256},
+        indent=2,
+    )
+
+
+def _managed_description(description: str | None) -> dict | None:
+    """The fields of a description that is `encode_description` output from dbt, else None."""
+    try:
+        marker = json.loads(description or "")
+    except ValueError:
+        return None
+    if not isinstance(marker, dict) or marker.get("managed_by") != MANAGED_BY:
+        return None
+    return marker
 
 
 def artifact_project(description: str | None) -> str | None:
@@ -88,14 +112,33 @@ def artifact_project(description: str | None) -> str | None:
 
     None if the description isn't `encode_description` output from dbt, or names no project.
     """
-    try:
-        marker = json.loads(description or "")
-    except ValueError:
-        return None
-    if not isinstance(marker, dict) or marker.get("managed_by") != MANAGED_BY:
-        return None
-    project = marker.get("project")
+    marker = _managed_description(description)
+    project = marker.get("project") if marker else None
     return project if isinstance(project, str) else None
+
+
+class ArtifactKey(NamedTuple):
+    """What identifies an uploaded package: the project, the file's name and its content.
+
+    Recorded in the artifact's description, so artifacts are found by it and not by their name,
+    whose layout is free to change.
+    """
+
+    project: str
+    file_name: str
+    sha256: str
+
+
+def artifact_key(description: str | None) -> ArtifactKey | None:
+    """The `ArtifactKey` in an artifact's `description`, else None if it isn't dbt's or is
+    missing a field."""
+    marker = _managed_description(description)
+    if marker is None:
+        return None
+    fields = [marker.get(f) for f in ArtifactKey._fields]
+    if not all(isinstance(f, str) for f in fields):
+        return None
+    return ArtifactKey(*fields)
 
 
 # The digest of a package file's content. Only `file_digest` makes one, so a value of this type
@@ -104,38 +147,34 @@ ArtifactDigest = NewType("ArtifactDigest", str)
 
 
 def file_digest(path: Path) -> ArtifactDigest:
-    """A short, stable digest of a file's content."""
+    """The full SHA-256 hex digest of a file's content."""
     sha = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             sha.update(chunk)
-    return ArtifactDigest(sha.hexdigest()[:_DIGEST_LENGTH])
+    return ArtifactDigest(sha.hexdigest())
 
 
-def artifact_display_name(project: str, package: str, digest: str) -> str:
-    """Name an artifact `<project>-<package>-<digest>`, so a person can tell which package it is.
+def artifact_display_name(key: ArtifactKey) -> str:
+    """Name an artifact `<project>-<package>-<hash>` so a person can tell which package it is.
 
-    The project and package are joined with `-`, which dbt forbids in a project name, so a name
-    maps back to exactly one (project, package) pair: `shop` + `eu_udfs` and `shop_eu` + `udfs`
-    can't collide. Name-based lookup relies on that to never reuse another project's artifact.
+    `package` is the file's name without its suffix, with anything but letters, digits, `_` and
+    `-` (e.g. the dots of a version) replaced by `_`, since the API's allowed characters are not
+    documented. The label (`<project>-<package>`) is cut to leave room for the hash, so only the
+    start of a long project or file name shows.
 
-    `package` is the package file's name without its suffix, with anything but letters, digits,
-    `_` and `-` (e.g. the dots of a version) replaced by `_`, since the API's allowed characters
-    are not documented. Two files whose names differ only there get the same label, which is fine:
-    the digest still tells their artifacts apart.
-
-    A label too long to leave room for the digest is cut short and ends in a hash of the full
-    label, so the file name goes first. The project survives whole only if it is at most
-    `MAX_ARTIFACT_NAME_LENGTH` minus the digest, the two `-`s and the label hash (36 characters
-    today); a longer project is itself cut and the file name is gone. Ownership never depends on
-    the name: it is the `project` in the description (`artifact_project`). The digest is never
-    cut, since it is what makes the name mean "this content".
+    `hash` is the start of a SHA-256 of the whole key (project, file name with its suffix, and
+    content digest), so the name is as unique as the key and never depends on the label: names
+    that sanitize or cut to the same label (`udfs-1.0.zip` and `udfs-1_0.zip`) still differ.
+    The name must be unique per environment, which is what makes an upload under another
+    project's name fail rather than overwrite. Ownership never depends on the name: it is the
+    `project` in the description (`artifact_project`).
     """
-    max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for the "-"
-    label = f"{project}-{_ILLEGAL_PACKAGE_CHARS.sub('_', package)}"
-    if len(label) > max_label:
-        label = truncate_with_hash(label, max_label, label)
-    return f"{label}-{digest}"
+    # NUL can't appear in any field, so no two keys join to the same text.
+    key_hash = hashlib.sha256("\0".join(key).encode()).hexdigest()[:_NAME_HASH_LENGTH]
+    package = _ILLEGAL_PACKAGE_CHARS.sub("_", Path(key.file_name).stem)
+    max_label = MAX_ARTIFACT_NAME_LENGTH - len(key_hash) - 1  # 1 for the "-"
+    return f"{key.project}-{package}"[:max_label] + f"-{key_hash}"
 
 
 def artifact_ids_in(external_artifacts: str) -> set[str]:
