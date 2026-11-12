@@ -14,6 +14,7 @@ import time
 import pytest
 from confluent_sql import ArtifactNotFoundError
 
+from dbt.adapters.confluent.function_artifacts import artifact_project
 from tests.functional.adapter._helpers import (
     drop_any_relation,
 )
@@ -273,12 +274,14 @@ def sweep_test_resources(
             # async and not awaited; cleanup doesn't reuse names.
             project.adapter.delete_statement(name)
 
-    # Function artifacts are named after the dbt project, which carries the relation prefix
-    # (see `FunctionFixtures`), so the relation selection applies to them too.
+    # Function artifacts belong to the dbt project named in their description, which carries the
+    # relation prefix (see `FunctionFixtures`), so the relation selection applies to that name.
+    # Not the artifact's own name, which cuts a long project name short.
     with project.adapter.connection_named("sweep_artifacts"):
         api = project.adapter.connections.get_thread_handle().get_artifacts_api()
         for artifact in api.list():
-            if relation_selected(artifact.display_name):
+            project_name = artifact_project(artifact.description)
+            if project_name and relation_selected(project_name):
                 try:
                     api.delete(artifact.id)
                 except ArtifactNotFoundError:

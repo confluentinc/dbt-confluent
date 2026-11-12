@@ -1,8 +1,9 @@
 """Artifact upload and sweeping for the `function` materialization (#180).
 
 A function can name a local package (`artifact_path`) instead of an already-uploaded artifact.
-The artifact is named after the package's content hash, so it is immutable and "same name" means
-"same content": an unchanged package reuses the existing artifact, a changed one gets a new artifact.
+The artifact is named `<project>-<package file name>-<content hash>` (see `artifact_display_name`),
+so it is immutable and "same name" means "same content" from the same project: an unchanged
+package reuses the existing artifact, a changed one gets a new artifact.
 
 Flink functions are immutable (drop + create), and an artifact can't gain versions, so replacing
 a function's package is a multi-step change: upload the new artifact, drop the old function,
@@ -51,6 +52,9 @@ ARTIFACT_FORMATS: dict[str, ArtifactFormat] = {
 }
 
 _DIGEST_LENGTH = 16
+
+# Characters kept from a package file's name when it goes into an artifact name.
+_ILLEGAL_PACKAGE_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 
 # The artifact API's limit on a display name (the driver rejects longer ones).
 MAX_ARTIFACT_NAME_LENGTH = 60
@@ -108,14 +112,27 @@ def file_digest(path: Path) -> ArtifactDigest:
     return ArtifactDigest(sha.hexdigest()[:_DIGEST_LENGTH])
 
 
-def artifact_display_name(project: str, digest: str) -> str:
-    """Name an artifact after the dbt `project`, plus the content digest.
+def artifact_display_name(project: str, package: str, digest: str) -> str:
+    """Name an artifact `<project>-<package>-<digest>`, so a person can tell which package it is.
+
+    The project and package are joined with `-`, which dbt forbids in a project name, so a name
+    maps back to exactly one (project, package) pair: `shop` + `eu_udfs` and `shop_eu` + `udfs`
+    can't collide. Name-based lookup relies on that to never reuse another project's artifact.
+
+    `package` is the package file's name without its suffix, with anything but letters, digits,
+    `_` and `-` (e.g. the dots of a version) replaced by `_`, since the API's allowed characters
+    are not documented. Two files whose names differ only there get the same label, which is fine:
+    the digest still tells their artifacts apart.
 
     A label too long to leave room for the digest is cut short and ends in a hash of the full
-    label. The digest is never cut, since it is what makes the name mean "this content".
+    label, so the file name goes first. The project survives whole only if it is at most
+    `MAX_ARTIFACT_NAME_LENGTH` minus the digest, the two `-`s and the label hash (36 characters
+    today); a longer project is itself cut and the file name is gone. Ownership never depends on
+    the name: it is the `project` in the description (`artifact_project`). The digest is never
+    cut, since it is what makes the name mean "this content".
     """
-    max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for '-'
-    label = project
+    max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for the "-"
+    label = f"{project}-{_ILLEGAL_PACKAGE_CHARS.sub('_', package)}"
     if len(label) > max_label:
         label = truncate_with_hash(label, max_label, label)
     return f"{label}-{digest}"

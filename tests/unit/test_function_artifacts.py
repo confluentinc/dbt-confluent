@@ -39,6 +39,10 @@ FUNCTION = "is_smaller"
 CLASS_NAME = "pkg.mod.is_smaller"
 PROJECT = "proj"
 DIGEST = fa.ArtifactDigest("0123456789abcdef")
+# What `<project>-<package>` may take before it is cut: the name, less the digest and its "-".
+LABEL_BUDGET = fa.MAX_ARTIFACT_NAME_LENGTH - len(DIGEST) - 1
+# A cut label ends in "-" and a 6-character hash, and the project is whole only up to there.
+LONGEST_PROJECT_KEPT_WHOLE = LABEL_BUDGET - len("-") - 6
 
 
 class FakeDriver:
@@ -247,7 +251,7 @@ def package(tmp_path: Path, content: bytes) -> functions.FunctionConfig:
         artifact_id=None,
         artifact_config=fa.ArtifactConfig(
             path=path,
-            name=fa.artifact_display_name(PROJECT, digest),
+            name=fa.artifact_display_name(PROJECT, "udf", digest),
             project=PROJECT,
             language="python",
         ),
@@ -312,8 +316,19 @@ class TestFileDigestAndName:
         c.write_bytes(b"y")
         assert fa.file_digest(a) == fa.file_digest(b) != fa.file_digest(c)
 
-    def test_name_is_the_project_plus_digest(self):
-        assert fa.artifact_display_name("proj", DIGEST) == f"proj-{DIGEST}"
+    def test_name_is_the_project_package_and_digest(self):
+        assert fa.artifact_display_name("proj", "udfs", DIGEST) == f"proj-udfs-{DIGEST}"
+
+    def test_projects_and_packages_that_split_the_same_text_differently_get_different_names(self):
+        # Only `-`, which a project name can't contain, tells where the project ends.
+        assert fa.artifact_display_name("shop", "eu_udfs", DIGEST) != fa.artifact_display_name(
+            "shop_eu", "udfs", DIGEST
+        )
+
+    def test_characters_the_api_may_reject_are_replaced_in_the_package_name(self):
+        assert fa.artifact_display_name("proj", "udfs-1.0.0 (beta)", DIGEST) == (
+            f"proj-udfs-1_0_0__beta_-{DIGEST}"
+        )
 
     def test_digest_is_16_hex_characters(self, tmp_path):
         path = tmp_path / "udf.zip"
@@ -323,27 +338,66 @@ class TestFileDigestAndName:
     @pytest.mark.parametrize("length", [1, 50, 200, 1000])
     def test_the_digest_is_never_cut_off_however_long_the_names(self, length):
         """The digest is what makes a name mean "this content", so it must survive any name."""
-        name = fa.artifact_display_name("j" * length, DIGEST)
+        name = fa.artifact_display_name("j" * length, "udfs", DIGEST)
         assert name.endswith("-" + DIGEST)
         assert len(name) <= fa.MAX_ARTIFACT_NAME_LENGTH
 
     def test_a_name_that_exactly_fits_is_left_as_is(self):
-        label_length = fa.MAX_ARTIFACT_NAME_LENGTH - len(DIGEST) - 1
-        project = "j" * label_length
-        name = fa.artifact_display_name(project, DIGEST)
-        assert name == f"{project}-{DIGEST}"
+        package = "udfs"
+        project = "j" * (LABEL_BUDGET - len(package) - 1)
+        name = fa.artifact_display_name(project, package, DIGEST)
+        assert name == f"{project}-{package}-{DIGEST}"
         assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
 
+    def test_a_name_one_character_over_is_cut_to_the_limit_and_ends_in_a_hash(self):
+        package = "udfs"
+        project = "j" * (LABEL_BUDGET - len(package))  # one over: the label gets a "-" too
+        uncut = f"{project}-{package}-{DIGEST}"
+        name = fa.artifact_display_name(project, package, DIGEST)
+        assert len(uncut) == fa.MAX_ARTIFACT_NAME_LENGTH + 1
+        assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
+        assert name != uncut
+        assert name.endswith(f"-{DIGEST}")
+
+    @pytest.mark.parametrize(
+        "project_length", [LONGEST_PROJECT_KEPT_WHOLE - 5, LONGEST_PROJECT_KEPT_WHOLE]
+    )
+    def test_a_project_that_fits_survives_whole_when_the_file_name_is_cut(self, project_length):
+        project = "j" * project_length
+        name = fa.artifact_display_name(project, "x" * 100, DIGEST)
+        assert name.startswith(f"{project}-")
+        assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
+
+    def test_a_project_one_character_too_long_is_cut_itself(self):
+        project = "j" * (LONGEST_PROJECT_KEPT_WHOLE + 1)
+        name = fa.artifact_display_name(project, "x" * 100, DIGEST)
+        assert not name.startswith(f"{project}-")
+        assert name.startswith("j" * LONGEST_PROJECT_KEPT_WHOLE + "-")
+
+    def test_a_long_project_leaves_no_room_for_the_file_name(self):
+        project = "j" * 40
+        name = fa.artifact_display_name(project, "udfs", DIGEST)
+        assert "udfs" not in name
+        assert name.startswith("j" * LONGEST_PROJECT_KEPT_WHOLE + "-")
+        assert name.endswith(f"-{DIGEST}")
+        assert len(name) <= fa.MAX_ARTIFACT_NAME_LENGTH
+
+    def test_a_long_label_keeps_the_start_of_the_project_and_the_digest(self):
+        name = fa.artifact_display_name("myproject", "x" * 100, DIGEST)
+        assert name.startswith("myproject-x")
+        assert name.endswith("-" + DIGEST)
+        assert len(name) <= fa.MAX_ARTIFACT_NAME_LENGTH
+
     def test_a_long_name_is_deterministic(self):
-        args = ("j" * 100, DIGEST)
+        args = ("j" * 100, "udfs", DIGEST)
         assert fa.artifact_display_name(*args) == fa.artifact_display_name(*args)
 
     def test_long_labels_that_differ_only_after_the_cut_get_different_names(self):
         # The labels differ only in their last characters, which truncation cuts off, so
         # only the hash of the full label tells the two names apart.
         shared = "j" * 100
-        one = fa.artifact_display_name(shared + "one", DIGEST)
-        two = fa.artifact_display_name(shared + "two", DIGEST)
+        one = fa.artifact_display_name(shared + "one", "udfs", DIGEST)
+        two = fa.artifact_display_name(shared + "two", "udfs", DIGEST)
         assert one != two
 
 
@@ -769,12 +823,12 @@ class TestAdapterValidateFunctionConfig:
         base = {"language": "python", "path": CLASS_NAME}
         return adapter.validate_function_config(base | config, relation())
 
-    def test_an_artifact_path_is_named_after_its_project_and_digest(self, tmp_path):
+    def test_an_artifact_path_is_named_after_its_project_file_and_digest(self, tmp_path):
         udf = self.validate(tmp_path, artifact_path="udf.zip")
         digest = fa.file_digest(tmp_path / "udf.zip")
         assert udf.artifact_config == fa.ArtifactConfig(
             path=(tmp_path / "udf.zip").resolve(),
-            name=fa.artifact_display_name(PROJECT, digest),
+            name=fa.artifact_display_name(PROJECT, "udf", digest),
             project=PROJECT,
             language="python",
         )
@@ -1019,7 +1073,7 @@ class TestFunctionArtifactsRepo:
         # The cached listing (taken before the winner existed) and one fresh one.
         assert len(driver.listed_languages) == 2
 
-    def test_a_package_requested_under_a_different_config_gets_the_first_upload(
+    def test_identical_content_under_a_different_name_is_its_own_artifact(
         self, driver, events, tmp_path
     ):
         first = artifact_of(package(tmp_path, b"v1"))
@@ -1029,9 +1083,9 @@ class TestFunctionArtifactsRepo:
         uploaded = artifacts.ensure(driver, first)
         shared = artifacts.ensure(driver, other)
 
-        assert shared is uploaded
-        assert events == [f"upload {first.name}"]
-        assert not any(a.display_name == OTHER_NAME for a in driver.artifacts.values())
+        assert shared is not uploaded
+        assert shared.display_name == OTHER_NAME
+        assert events == [f"upload {first.name}", f"upload {OTHER_NAME}"]
 
 
 class TestFunctionArtifactsRepoLogging:

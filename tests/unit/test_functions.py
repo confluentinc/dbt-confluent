@@ -436,12 +436,12 @@ class TestValidateArtifactPath:
         assert udf.artifact_config.path == (project_root / self.PACKAGE).resolve()
         assert udf.artifact_id is None
 
-    def test_the_artifact_is_named_after_its_project_and_content(self, project_root):
+    def test_the_artifact_is_named_after_its_project_package_and_content(self, project_root):
         udf = self.validate_path(project_root, artifact_path=self.PACKAGE)
         digest = file_digest(project_root / self.PACKAGE)
         assert udf.artifact_config == ArtifactConfig(
             path=(project_root / self.PACKAGE).resolve(),
-            name=artifact_display_name(PROJECT, digest),
+            name=artifact_display_name(PROJECT, Path(self.PACKAGE).stem, digest),
             project=PROJECT,
             language="python",
         )
