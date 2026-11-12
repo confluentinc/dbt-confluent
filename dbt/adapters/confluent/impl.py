@@ -36,6 +36,7 @@ from .dry_run_types import display_type, fitted_type
 from .function_artifacts_repo import FunctionArtifactsRepo
 from .naming import sanitize_statement_name
 from .option_values import option_values_match
+from .statement_sql import runs_model_sql
 from .utils import fetch_from_cursor
 
 logger = AdapterLogger("Confluent")
@@ -485,25 +486,38 @@ class ConfluentAdapter(SQLAdapter):
     def statement_needs_restart(self, statement_name: str) -> bool:
         """Return True if the long-running statement should be re-submitted.
 
-        True when the statement is missing (404, or 403 under pool-scoped
-        roles — see _handle_pool_scoped_403) or in a terminal phase
-        (COMPLETED, STOPPED, FAILED, DELETED). False for healthy phases,
-        including in-flight transitions (PENDING, RUNNING, DEGRADED, STOPPING,
-        DELETING) which we must not interrupt. No side effects.
+        Kept for macros that call it; dbt-confluent's own `decide_action` uses inspect_statement,
+        which returns the same answer and the statement's SQL from one lookup.
+        """
+        return self.inspect_statement(statement_name)["needs_restart"]
 
-        Used by `decide_action` (Jinja) to recover a streaming_table whose
-        INSERT died without the table being dropped.
+    @available
+    def inspect_statement(self, statement_name: str) -> dict[str, Any]:
+        """Look up the long-running statement once, for `decide_action` (Jinja).
+
+        Returns `needs_restart`: True when the statement is missing (404, or 403 under pool-scoped
+        roles — see _handle_pool_scoped_403) or in a terminal phase (COMPLETED, STOPPED, FAILED,
+        DELETED); False for healthy phases, including in-flight transitions (PENDING, RUNNING,
+        DEGRADED, STOPPING, DELETING) which we must not interrupt. And `sql`: the SQL Confluent
+        stores for the statement (exactly as submitted, query comment included), or None when
+        there's no statement to read. No side effects.
+
+        `decide_action` uses `needs_restart` to recover a streaming_table whose INSERT died without
+        the table being dropped, and `sql` for the logic drift check.
         """
         handle = self.connections.get_thread_handle()
         try:
             statement = handle.get_statement(statement_name)
         except StatementNotFoundError:
-            return True
+            return {"needs_restart": True, "sql": None}
         except OperationalError as e:
             if not self._handle_pool_scoped_403(e, statement_name, action="inspection"):
                 raise
-            return True
-        return statement.phase.is_terminal
+            return {"needs_restart": True, "sql": None}
+        return {
+            "needs_restart": statement.phase.is_terminal,
+            "sql": statement.spec.get("statement"),
+        }
 
     @available
     def delete_statement(self, statement_name: str, expect_exists: bool = True) -> None:
@@ -1341,6 +1355,32 @@ class ConfluentAdapter(SQLAdapter):
                 f"{bullets}\n"
                 f"Use --full-refresh to recreate the table."
             )
+
+    @available
+    def check_logic_drift(
+        self,
+        existing_relation: ConfluentRelation,
+        statement_name: str,
+        statement_sql: str,
+        model_sql: str,
+    ) -> None:
+        """Raise CompilationError if the statement doesn't run the model's current SQL.
+
+        `statement_sql` is the SQL Confluent stores for the statement (see inspect_statement), and
+        `model_sql` the model's compiled SQL. See statement_sql.runs_model_sql for what counts as a
+        match. A running statement can't be changed in place, so the remedy is --full-refresh, or
+        on_schema_drift='ignore' to keep the statement as it is.
+        """
+        if runs_model_sql(statement_sql, model_sql):
+            return
+        raise CompilationError(
+            f"SQL logic drift detected for {existing_relation}: statement '{statement_name}' isn't "
+            f"running the model's current SQL.\n"
+            f"A running streaming_table statement can't be changed in place. Use --full-refresh "
+            f"to recreate the table and its statement; this permanently deletes the table's "
+            f"Kafka topic and its data, so models that read from this table should be rebuilt "
+            f"too. To keep the running statement as it is, set on_schema_drift='ignore'."
+        )
 
     @available
     def get_columns_from_dry_run(
