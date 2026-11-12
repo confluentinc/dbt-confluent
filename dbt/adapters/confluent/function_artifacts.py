@@ -135,10 +135,10 @@ def artifact_key(description: str | None) -> ArtifactKey | None:
     marker = _managed_description(description)
     if marker is None:
         return None
-    fields = [marker.get(f) for f in ArtifactKey._fields]
-    if not all(isinstance(f, str) for f in fields):
+    project, file_name, sha256 = (marker.get(f) for f in ArtifactKey._fields)
+    if not (isinstance(project, str) and isinstance(file_name, str) and isinstance(sha256, str)):
         return None
-    return ArtifactKey(*fields)
+    return ArtifactKey(project, file_name, sha256)
 
 
 # The digest of a package file's content. Only `file_digest` makes one, so a value of this type
