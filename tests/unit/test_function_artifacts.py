@@ -38,7 +38,8 @@ OTHER_DATABASE = "cluster-b"
 FUNCTION = "is_smaller"
 CLASS_NAME = "pkg.mod.is_smaller"
 PROJECT = "proj"
-DIGEST = fa.ArtifactDigest("0123456789abcdef")
+DIGEST = fa.ArtifactDigest("01234567")
+FULL_SHA = fa.ArtifactDigest(DIGEST * 8)
 # What `<project>-<package>` may take before it is cut: the name, less the digest and its "-".
 LABEL_BUDGET = fa.MAX_ARTIFACT_NAME_LENGTH - len(DIGEST) - 1
 # A cut label ends in "-" and a 6-character hash, and the project is whole only up to there.
@@ -254,6 +255,7 @@ def package(tmp_path: Path, content: bytes) -> functions.FunctionConfig:
             name=fa.artifact_display_name(PROJECT, "udf", digest),
             project=PROJECT,
             language="python",
+            digest=digest,
         ),
     )
 
@@ -283,15 +285,43 @@ ID_UDF = functions.FunctionConfig(
 
 
 def managed(project: str = PROJECT) -> str:
-    return fa.encode_description(project)
+    return fa.encode_description(project, "udf.zip", FULL_SHA)
+
+
+def described(udf: functions.FunctionConfig) -> str:
+    """The description of the artifact dbt uploads for this package."""
+    return fa.encode_description(*artifact_of(udf).key)
 
 
 class TestDescription:
     def test_records_that_dbt_manages_the_artifact_and_for_which_project(self):
-        assert json.loads(fa.encode_description("my_project")) == {
+        description = fa.encode_description("my_project", "udfs.jar", FULL_SHA)
+        assert json.loads(description) == {
             "managed_by": "dbt-confluent",
             "project": "my_project",
+            "file_name": "udfs.jar",
+            "sha256": FULL_SHA,
         }
+
+    def test_is_pretty_printed_with_two_space_indentation(self):
+        description = fa.encode_description("my_project", "udfs.jar", FULL_SHA)
+        assert description.splitlines()[1] == '  "managed_by": "dbt-confluent",'
+
+    def test_the_key_of_an_artifact(self):
+        description = fa.encode_description("my_project", "udfs.jar", FULL_SHA)
+        assert fa.artifact_key(description) == fa.ArtifactKey("my_project", "udfs.jar", FULL_SHA)
+
+    @pytest.mark.parametrize(
+        "description",
+        [
+            None,
+            "hand made",
+            '{"managed_by": "someone", "project": "p", "file_name": "f", "sha256": "s"}',
+            '{"managed_by": "dbt-confluent", "project": "p"}',  # without a file name or digest
+        ],
+    )
+    def test_an_artifact_without_a_full_key_has_none(self, description):
+        assert fa.artifact_key(description) is None
 
     @pytest.mark.parametrize(
         "description, project",
@@ -330,10 +360,13 @@ class TestFileDigestAndName:
             f"proj-udfs-1_0_0__beta_-{DIGEST}"
         )
 
-    def test_digest_is_16_hex_characters(self, tmp_path):
+    def test_digest_is_the_full_sha256(self, tmp_path):
         path = tmp_path / "udf.zip"
         path.write_bytes(b"x")
-        assert re.fullmatch(r"[0-9a-f]{16}", fa.file_digest(path))
+        assert re.fullmatch(r"[0-9a-f]{64}", fa.file_digest(path))
+
+    def test_only_the_start_of_the_digest_goes_in_the_name(self):
+        assert fa.artifact_display_name("proj", "udfs", FULL_SHA) == f"proj-udfs-{FULL_SHA[:8]}"
 
     @pytest.mark.parametrize("length", [1, 50, 200, 1000])
     def test_the_digest_is_never_cut_off_however_long_the_names(self, length):
@@ -375,7 +408,7 @@ class TestFileDigestAndName:
         assert name.startswith("j" * LONGEST_PROJECT_KEPT_WHOLE + "-")
 
     def test_a_long_project_leaves_no_room_for_the_file_name(self):
-        project = "j" * 40
+        project = "j" * (LONGEST_PROJECT_KEPT_WHOLE + 10)
         name = fa.artifact_display_name(project, "udfs", DIGEST)
         assert "udfs" not in name
         assert name.startswith("j" * LONGEST_PROJECT_KEPT_WHOLE + "-")
@@ -406,7 +439,7 @@ class TestEnsureArtifact:
         udf = package(tmp_path, b"v1")
         artifact = ensure(driver, udf)
         assert artifact.display_name == artifact_of(udf).name
-        assert artifact.description == managed()
+        assert artifact.description == described(udf)
 
     def test_reuses_an_artifact_for_the_same_content(self, driver, events, tmp_path):
         udf = package(tmp_path, b"v1")
@@ -416,10 +449,21 @@ class TestEnsureArtifact:
         assert again.id == first.id
         assert events == [f"upload {artifact_of(udf).name}"]
 
-    def test_leaves_an_artifact_we_did_not_create_alone(self, driver, tmp_path):
+    def test_finds_an_artifact_by_its_description_whatever_its_name(
+        self, driver, events, tmp_path
+    ):
+        udf = package(tmp_path, b"v1")
+        renamed = driver.add("a name from some future layout", described(udf))
+        assert ensure(driver, udf).id == renamed.id
+        assert events == []
+
+    def test_does_not_take_an_artifact_we_did_not_create_even_under_our_name(
+        self, driver, tmp_path
+    ):
         udf = package(tmp_path, b"v1")
         theirs = driver.add(artifact_of(udf).name, "hand made")
-        assert ensure(driver, udf).id == theirs.id
+        with pytest.raises(ArtifactAlreadyExistsError):
+            ensure(driver, udf)
         assert theirs.description == "hand made"
 
     @pytest.mark.parametrize(
@@ -449,7 +493,9 @@ class TestEnsureArtifact:
 
     def test_an_existing_artifact_of_another_language_is_an_error(self, driver, tmp_path):
         udf = package(tmp_path, b"v1")  # python
-        driver.add(artifact_of(udf).name, managed(), runtime_language=ArtifactRuntimeLanguage.JAVA)
+        driver.add(
+            artifact_of(udf).name, described(udf), runtime_language=ArtifactRuntimeLanguage.JAVA
+        )
         with pytest.raises(DbtDatabaseError, match="two different languages"):
             ensure(driver, udf)
 
@@ -459,7 +505,7 @@ class TestEnsureArtifact:
         udf = package(tmp_path, b"v1")
 
         def lose_the_race(display_name, **_):
-            driver.add(display_name, managed())
+            driver.add(display_name, described(udf))
             raise ArtifactAlreadyExistsError("exists", display_name=display_name)
 
         monkeypatch.setattr(driver, "create", lose_the_race)
@@ -831,6 +877,7 @@ class TestAdapterValidateFunctionConfig:
             name=fa.artifact_display_name(PROJECT, "udf", digest),
             project=PROJECT,
             language="python",
+            digest=digest,
         )
 
     def test_a_package_is_read_once_between_validating_and_uploading(
@@ -883,12 +930,12 @@ class TestAdapterPlanFunctionChange:
         self, adapter, driver, tmp_path
     ):
         udf = package(tmp_path, b"v1")
-        artifact = driver.add(artifact_of(udf).name, managed())
+        artifact = driver.add(artifact_of(udf).name, described(udf))
         assert adapter.plan_function_change(self.live(artifact.id), udf) == []
 
     def test_a_function_on_another_artifact_is_changed(self, adapter, driver, tmp_path):
         udf = package(tmp_path, b"v2")
-        driver.add(artifact_of(udf).name, managed())
+        driver.add(artifact_of(udf).name, described(udf))
         changes = adapter.plan_function_change(self.live("cfa-older"), udf)
         assert changes and changes[0].startswith("artifact_id")
 
@@ -938,10 +985,10 @@ class TestFunctionArtifactsRepo:
 
     def test_the_artifact_listing_is_fetched_once(self, driver, tmp_path):
         udf = package(tmp_path, b"v1")
-        existing = driver.add(artifact_of(udf).name, managed())
+        existing = driver.add(artifact_of(udf).name, described(udf))
         artifacts = FunctionArtifactsRepo()
 
-        found = run_on_threads(lambda: artifacts.find(driver, artifact_of(udf).name))
+        found = run_on_threads(lambda: artifacts.find(driver, artifact_of(udf).key))
 
         assert [a.id for a in found] == [existing.id] * THREADS
         assert len(driver.listed_languages) == 1
@@ -957,7 +1004,8 @@ class TestFunctionArtifactsRepo:
         driver.list = failing_list  # type: ignore[method-assign]
         artifacts = FunctionArtifactsRepo()
 
-        outcomes = run_on_threads(lambda: artifacts.find(driver, "any-name"))
+        key = artifact_of(package(tmp_path, b"v1")).key
+        outcomes = run_on_threads(lambda: artifacts.find(driver, key))
 
         assert len(calls) == 1
         assert outcomes == [listing_error] * THREADS
@@ -1011,7 +1059,7 @@ class TestFunctionArtifactsRepo:
 
         uploaded = artifacts.ensure(driver, artifact_of(udf))
 
-        assert artifacts.find(driver, artifact_of(udf).name) is uploaded
+        assert artifacts.find(driver, artifact_of(udf).key) is uploaded
         assert len(driver.listed_languages) == 1  # only ensure's lookup
 
     def test_a_failed_upload_is_shared_not_retried(self, driver, tmp_path, monkeypatch):
@@ -1061,7 +1109,7 @@ class TestFunctionArtifactsRepo:
         def create_lost_to_a_concurrent_run(display_name, **_):
             attempts.append(display_name)
             # The other run's artifact appears after the build's shared listing was taken.
-            winner.append(driver.add(display_name, managed()))
+            winner.append(driver.add(display_name, described(udf)))
             raise ArtifactAlreadyExistsError("exists", display_name=display_name)
 
         driver.create = create_lost_to_a_concurrent_run  # type: ignore[method-assign]
@@ -1107,10 +1155,11 @@ class TestFunctionArtifactsRepoLogging:
             f"Hashing package {artifact_of(udf).path.name}"
         ]
 
-    def test_the_listing_is_logged_once(self, messages, driver):
+    def test_the_listing_is_logged_once(self, messages, driver, tmp_path):
+        key = artifact_of(package(tmp_path, b"v1")).key
         artifacts = FunctionArtifactsRepo()
 
-        run_on_threads(lambda: artifacts.find(driver, "any-name"))
+        run_on_threads(lambda: artifacts.find(driver, key))
 
         assert messages == ["Listing artifacts"]
 
@@ -1175,7 +1224,7 @@ class TestAdapterSharesPackageWork:
 
     def test_an_unchanged_function_plans_without_uploading(self, adapter, driver, tmp_path):
         udf = package(tmp_path, b"v1")
-        artifact = driver.add(artifact_of(udf).name, managed())
+        artifact = driver.add(artifact_of(udf).name, described(udf))
         live = functions.FunctionState(CLASS_NAME, "python", artifact.id, frozenset())
 
         assert adapter.plan_function_change(live, udf) == []

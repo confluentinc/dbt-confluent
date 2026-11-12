@@ -607,7 +607,7 @@ Confluent Cloud. The file name is without its extension, and characters other th
 `_` and `-` become `_`. The same package file always maps to the same artifact, whichever function
 uses it. Artifact names are limited to 60 characters, so when the project and file names are too
 long to leave room for the digest, they are cut short from the end and finish with a hash of the
-full name, so the file name goes first. A project name over 36 characters is itself cut, which leaves
+full name, so the file name goes first. A project name over 44 characters is itself cut, which leaves
 no room for the file name. The digest is never cut:
 
 - Functions that point at the same package file share one artifact: dbt hashes, looks up and uploads
@@ -622,8 +622,13 @@ in between (for example by a build step running alongside `dbt run`) would be up
 digest of its earlier contents. The digest is there to avoid repeating work, not to prove what was
 uploaded, so dbt doesn't check for this. Finish building packages before starting the run.
 
-The artifact's description records that dbt manages it (`managed_by`) and the dbt project that
-uploaded it.
+The artifact's description is a JSON object recording that dbt manages it (`managed_by`), the dbt
+project that uploaded it, the package's file name (extension included) and its full SHA-256. dbt
+finds an existing artifact by that project, file name and SHA-256, not by the artifact's name, so a
+renamed artifact is still found. An artifact whose description doesn't have all of them (including one
+you created by hand under the same name) is never reused, and the upload fails because the name is
+taken. The name carries only a shortened digest and may be truncated, so the description is the
+complete record.
 
 #### Changing an existing function
 

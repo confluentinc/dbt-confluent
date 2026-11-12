@@ -203,6 +203,7 @@ def validate_function_config(
             name=artifact_display_name(project, resolved_path.stem, package_digest),
             project=project,
             language=language,
+            digest=package_digest,
         )
     return FunctionConfig(
         language=language,
