@@ -21,7 +21,7 @@ import pytest
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
-from dbt.tests.util import relation_from_name, run_dbt, set_model_file
+from dbt.tests.util import relation_from_name, run_dbt, run_dbt_and_capture, set_model_file
 from tests.functional.adapter._helpers import (
     wait_for_absent,
     wait_for_running,
@@ -61,6 +61,17 @@ ADOPTED_STREAMING_TABLE = """
     alias='adopted_orders',
     statement_name='adopted-orders-insert',
     with={'changelog.mode': 'append'},
+) }}
+select order_id, price from {{ ref('my_streaming_source') }}
+"""
+
+ADOPTED_STREAMING_TABLE_IGNORE = """
+{{ config(
+    materialized='streaming_table',
+    alias='adopted_orders',
+    statement_name='adopted-orders-insert',
+    with={'changelog.mode': 'append'},
+    on_schema_drift='ignore',
 ) }}
 select order_id, price from {{ ref('my_streaming_source') }}
 """
@@ -187,8 +198,18 @@ class TestAdoptExistingPipeline(ConfluentFixtures):
             )
         planted_id = wait_for_running(adapter, insert_name).statement_id
 
-        # Adopt the healthy external statement: re-run must skip and leave it
-        # untouched (same statement_id), and must not recreate the table.
+        # The planted INSERT doesn't match dbt's rendering, so the adopt step fails with SQL
+        # logic drift and leaves the planted statement untouched (same statement_id).
+        results, logs = run_dbt(["run"], expect_pass=False)
+        assert "SQL logic drift detected" in logs
+        drift_stmt = self._get_statement(adapter, insert_name)
+        assert drift_stmt.statement_id == planted_id
+
+        # Switch the model to on_schema_drift='ignore': re-run must adopt the healthy external
+        # statement (skip and leave it untouched, same statement_id), and must not recreate the
+        # table.
+        model = relation_from_name(adapter, "adopted_streaming_table")
+        set_model_file(project, model, ADOPTED_STREAMING_TABLE_IGNORE)
         results = run_dbt(["run"])
         assert all(r.status == "success" for r in results)
         adopted_stmt = self._get_statement(adapter, insert_name)
