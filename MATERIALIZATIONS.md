@@ -597,6 +597,13 @@ flags:
   enable_experimental_function_materialization: true
 ```
 
+#### Credentials
+
+Every `function` needs credentials that can use the artifact API, whether it names an `artifact_id`
+or an `artifact_path`: `auth: oauth`, a Global API key, or a Cloud API key (a Flink-region key alone
+is not enough).  dbt fails with a compile error before running anything if the profile can't. See
+[Fine-grained credentials](README.md#fine-grained-credentials).
+
 #### Uploading the artifact
 
 With `artifact_path`, dbt uploads the package as the function's artifact, which needs credentials
@@ -847,7 +854,11 @@ A mapping with various tableflow topic-level configuration settings:
   - Attempting this change will succeed in disabling the external storage, but will fail (with a clear error message) trying to re-enable it before the grace period expires.
   - Re-run the model after waiting for the grace period to pass (instructions will be provided in the dbt run output),
     or use `--full-refresh` to drop the table entirely (including the data resident on the Kafka topic) and rebuild from scratch immediately.
-- Tableflow's control-plane routes require a Global API key (`global_api_key` / `global_api_secret`).
+- Tableflow's control-plane routes require one of:
+  - `auth: oauth`.
+  - A Global API key (`global_api_key` / `global_api_secret`).
+  - A Tableflow API key (`tableflow_api_key` / `tableflow_api_secret`) together with `database_kafka_cluster_id` (the `lkc-...` id of the `schema` cluster), since a Tableflow key can't look the cluster id up itself.
+  - A Flink-region or Cloud API key is not enough. dbt checks this before running any statement for a model that sets `tableflow`, and fails with a compile error if the profile can't use Tableflow.
   - If you previously ran your models with only the flink API key configured, you may need to generate a new key for Tableflow.
   - Note that a global API works for the Flink APIs as well, so you do not need to provide both.
 
