@@ -444,6 +444,7 @@ class TestValidateArtifactPath:
             name=artifact_display_name(PROJECT, Path(self.PACKAGE).stem, digest),
             project=PROJECT,
             language="python",
+            digest=digest,
         )
 
     def test_an_artifact_id_has_no_artifact_config(self):
