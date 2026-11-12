@@ -39,6 +39,10 @@ FUNCTION = "is_smaller"
 CLASS_NAME = "pkg.mod.is_smaller"
 PROJECT = "proj"
 DIGEST = fa.ArtifactDigest("0123456789abcdef")
+# What `<project>-<package>` may take before it is cut: the name, less the digest and its "-".
+LABEL_BUDGET = fa.MAX_ARTIFACT_NAME_LENGTH - len(DIGEST) - 1
+# A cut label ends in "-" and a 6-character hash, and the project is whole only up to there.
+LONGEST_PROJECT_KEPT_WHOLE = LABEL_BUDGET - len("-") - 6
 
 
 class FakeDriver:
@@ -339,12 +343,44 @@ class TestFileDigestAndName:
         assert len(name) <= fa.MAX_ARTIFACT_NAME_LENGTH
 
     def test_a_name_that_exactly_fits_is_left_as_is(self):
-        label_length = fa.MAX_ARTIFACT_NAME_LENGTH - len(DIGEST) - 1
         package = "udfs"
-        project = "j" * (label_length - len(package) - 1)
+        project = "j" * (LABEL_BUDGET - len(package) - 1)
         name = fa.artifact_display_name(project, package, DIGEST)
         assert name == f"{project}-{package}-{DIGEST}"
         assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
+
+    def test_a_name_one_character_over_is_cut_to_the_limit_and_ends_in_a_hash(self):
+        package = "udfs"
+        project = "j" * (LABEL_BUDGET - len(package))  # one over: the label gets a "-" too
+        uncut = f"{project}-{package}-{DIGEST}"
+        name = fa.artifact_display_name(project, package, DIGEST)
+        assert len(uncut) == fa.MAX_ARTIFACT_NAME_LENGTH + 1
+        assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
+        assert name != uncut
+        assert name.endswith(f"-{DIGEST}")
+
+    @pytest.mark.parametrize(
+        "project_length", [LONGEST_PROJECT_KEPT_WHOLE - 5, LONGEST_PROJECT_KEPT_WHOLE]
+    )
+    def test_a_project_that_fits_survives_whole_when_the_file_name_is_cut(self, project_length):
+        project = "j" * project_length
+        name = fa.artifact_display_name(project, "x" * 100, DIGEST)
+        assert name.startswith(f"{project}-")
+        assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
+
+    def test_a_project_one_character_too_long_is_cut_itself(self):
+        project = "j" * (LONGEST_PROJECT_KEPT_WHOLE + 1)
+        name = fa.artifact_display_name(project, "x" * 100, DIGEST)
+        assert not name.startswith(f"{project}-")
+        assert name.startswith("j" * LONGEST_PROJECT_KEPT_WHOLE + "-")
+
+    def test_a_long_project_leaves_no_room_for_the_file_name(self):
+        project = "j" * 40
+        name = fa.artifact_display_name(project, "udfs", DIGEST)
+        assert "udfs" not in name
+        assert name.startswith("j" * LONGEST_PROJECT_KEPT_WHOLE + "-")
+        assert name.endswith(f"-{DIGEST}")
+        assert len(name) <= fa.MAX_ARTIFACT_NAME_LENGTH
 
     def test_a_long_label_keeps_the_start_of_the_project_and_the_digest(self):
         name = fa.artifact_display_name("myproject", "x" * 100, DIGEST)

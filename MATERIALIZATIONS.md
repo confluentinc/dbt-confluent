@@ -607,7 +607,8 @@ Confluent Cloud. The file name is without its extension, and characters other th
 `_` and `-` become `_`. The same package file always maps to the same artifact, whichever function
 uses it. Artifact names are limited to 60 characters, so when the project and file names are too
 long to leave room for the digest, they are cut short from the end and finish with a hash of the
-full name; the digest is never cut:
+full name, so the file name goes first. A project name over 36 characters is itself cut, which leaves
+no room for the file name. The digest is never cut:
 
 - Functions that point at the same package file share one artifact: dbt hashes, looks up and uploads
   it once per run, however many functions use it or how many threads build them.

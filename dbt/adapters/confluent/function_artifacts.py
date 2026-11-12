@@ -1,8 +1,9 @@
 """Artifact upload and sweeping for the `function` materialization (#180).
 
 A function can name a local package (`artifact_path`) instead of an already-uploaded artifact.
-The artifact is named after the package's content hash, so it is immutable and "same name" means
-"same content": an unchanged package reuses the existing artifact, a changed one gets a new artifact.
+The artifact is named `<project>-<package file name>-<content hash>` (see `artifact_display_name`),
+so it is immutable and "same name" means "same content" from the same project: an unchanged
+package reuses the existing artifact, a changed one gets a new artifact.
 
 Flink functions are immutable (drop + create), and an artifact can't gain versions, so replacing
 a function's package is a multi-step change: upload the new artifact, drop the old function,
@@ -121,10 +122,14 @@ def artifact_display_name(project: str, package: str, digest: str) -> str:
     `package` is the package file's name without its suffix, with anything but letters, digits,
     `_` and `-` (e.g. the dots of a version) replaced by `_`, since the API's allowed characters
     are not documented. Two files whose names differ only there get the same label, which is fine:
-    the digest still tells their artifacts apart. A label too long to leave room for the digest is
-    cut short and ends in a hash of the full label, so the file name is cut from its end first
-    and the project survives whole. The digest is never cut, since it is what makes the name mean
-    "this content".
+    the digest still tells their artifacts apart.
+
+    A label too long to leave room for the digest is cut short and ends in a hash of the full
+    label, so the file name goes first. The project survives whole only if it is at most
+    `MAX_ARTIFACT_NAME_LENGTH` minus the digest, the two `-`s and the label hash (36 characters
+    today); a longer project is itself cut and the file name is gone. Ownership never depends on
+    the name: it is the `project` in the description (`artifact_project`). The digest is never
+    cut, since it is what makes the name mean "this content".
     """
     max_label = MAX_ARTIFACT_NAME_LENGTH - len(digest) - 1  # 1 for the "-"
     label = f"{project}-{_ILLEGAL_PACKAGE_CHARS.sub('_', package)}"

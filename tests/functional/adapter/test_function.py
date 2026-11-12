@@ -122,9 +122,11 @@ def our_artifacts(project) -> list:
 class FunctionFixtures(ConfluentFixtures):
     """Flag on by default (override `flags_enabled`).
 
-    Artifacts are named after the dbt project, so each class's project name carries its isolation
-    namespace: the artifacts it uploads can't collide with another class's or another session's,
-    and the class sweep (see `sweep_test_resources`) deletes them along with its functions.
+    Artifacts belong to the dbt project (named in their description), so each class's project name
+    carries its isolation namespace: the artifacts it uploads can't collide with another class's or
+    another session's, and the class sweep (see `sweep_test_resources`) deletes them along with its
+    functions. Look them up by that owner (`our_artifacts`), not by name: a long project name is cut
+    short in the artifact's name.
     """
 
     flags_enabled = True
