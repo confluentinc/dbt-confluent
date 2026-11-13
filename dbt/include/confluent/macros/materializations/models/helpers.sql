@@ -146,7 +146,9 @@ WITH (
      don't have a long-running statement to restart (`table`, `view`) or
      can't be safely restarted without dropping the table (`streaming_source`).
      It also opts into the logic drift check: the statement is looked up once,
-     here, and its SQL is compared with the model's on the skip and restart paths.
+     here, and a healthy statement's SQL is compared with the model's on the skip
+     path. A dead statement is re-submitted with the model's current SQL, unchecked
+     (see _prepare_restart).
 
      has_select_query: true if the model SQL is a SELECT (table,
      streaming_table), false if it's column definitions (streaming_source). #}
@@ -155,16 +157,18 @@ WITH (
     {% set existing_statement = adapter.inspect_statement(get_statement_name()) %}
   {% endif %}
   {% set action = _classify_action(existing_relation, existing_statement) %}
-  {# --empty and --sample rewrite each ref()/source() in the compiled SQL, so it can't be compared
-     with what the running statement executes: no logic check in those runs (GH-119). #}
+  {# Only a healthy statement (the skip path) is compared. --empty and --sample rewrite each
+     ref()/source() in the compiled SQL, so it can't be compared with what the running statement
+     executes: no logic check in those runs (GH-119). #}
   {% set statement_sql = none %}
-  {% if existing_statement and not flags.EMPTY and not invocation_args_dict.get('sample') %}
+  {% if action == 'skip' and existing_statement
+        and not flags.EMPTY and not invocation_args_dict.get('sample') %}
     {% set statement_sql = existing_statement.sql %}
   {% endif %}
   {% if action == 'create' %}
     {{ _prepare_create(existing_relation) }}
   {% elif action == 'restart' %}
-    {{ _prepare_restart(existing_relation, has_select_query, statement_sql) }}
+    {{ _prepare_restart(existing_relation, has_select_query) }}
   {% else %}
     {{ _prepare_skip(existing_relation, has_select_query, statement_sql) }}
   {% endif %}
@@ -212,24 +216,24 @@ WITH (
 {% endmacro %}
 
 
-{% macro _prepare_restart(existing_relation, has_select_query, statement_sql) %}
+{% macro _prepare_restart(existing_relation, has_select_query) %}
   {# Side effects for the 'restart' action: re-verify the schema, then delete the dead statement
      so the caller can re-submit it. Re-submitting INSERT against the existing table is only safe
      if the columns still match: the INSERT names the yml columns, so Flink rejects a column the
      table lacks, and fills a table column the model no longer selects with NULL, without an
      error. So we enforce a columns check even under on_schema_drift='ignore'.
 
-     The dead statement's SQL is compared with the model's (under on_schema_drift='fail') only
-     when it can still be read, i.e. the statement is in a terminal phase. When there's no
-     statement to read (deleted, or a 403 under pool-scoped roles), statement_sql is none and we
-     re-submit the model's SQL as written, with no logic check: there's nothing to compare
-     against (GH-119). #}
-  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=true, statement_sql=statement_sql) }}
+     The restart path deliberately runs no SQL logic check (GH-119): a dead statement, terminal
+     or missing, is re-submitted with the model's current SQL. Fixing a FAILED statement's SQL, or
+     stopping a statement to change it, must still recover without --full-refresh, and deleting
+     the statement would bypass a check here anyway. The re-submitted INSERT has no starting
+     offset (existing behavior), so it likely re-reads its sources from the beginning. #}
+  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=true) }}
   {{ log("Statement for " ~ existing_relation ~ " is missing or in a terminal phase. Re-submitting (no full refresh required).", info=True) }}
-  {# expect_exists=false: _classify_action already inspected this statement (and
-     warned if a pool-scoped 403 surfaced there), so a 403 on this delete is a
-     duplicate — suppress its loud warning. A terminal statement still exists and
-     deletes normally. #}
+  {# expect_exists=false: decide_action's lookup (adapter.inspect_statement) already
+     inspected this statement (and warned if a pool-scoped 403 surfaced there), so a
+     403 on this delete is a duplicate — suppress its loud warning. A terminal
+     statement still exists and deletes normally. #}
   {{ delete_statement_if_exists(get_statement_name(), expect_exists=false) }}
 {% endmacro %}
 
@@ -237,7 +241,9 @@ WITH (
 {% macro _prepare_skip(existing_relation, has_select_query, statement_sql=none) %}
   {# Side effects for the 'skip' action: enforce schema drift (and, for a recoverable
      materialization, logic drift against the running statement's SQL), then log. #}
-  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=false, statement_sql=statement_sql) }}
+  {{ _enforce_schema_drift(
+       existing_relation, has_select_query, restart=false, statement_sql=statement_sql
+  ) }}
   {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
 {% endmacro %}
 
@@ -245,7 +251,7 @@ WITH (
 {% macro _enforce_schema_drift(existing_relation, has_select_query, restart, statement_sql=none) %}
   {# Run the drift check appropriate to the on_schema_drift config:
        'fail'   — full check (columns + options + distribution); raises on any drift. Then, when
-                  statement_sql is given, the logic check: raises if the statement isn't running
+                  statement_sql is given (the skip path only), the logic check: raises if the statement isn't running
                   the model's current SQL. Schema first, so a column change (which changes the
                   SQL too) keeps its more specific error.
        'ignore' — no check, except the restart path still needs a columns-only check (benign
@@ -257,7 +263,9 @@ WITH (
   {% if on_schema_drift == 'fail' %}
     {{ check_for_schema_drift(existing_relation, has_select_query) }}
     {% if statement_sql is not none %}
-      {% do adapter.check_logic_drift(existing_relation, get_statement_name(), statement_sql, sql) %}
+      {% do adapter.check_logic_drift(
+           existing_relation, get_statement_name(), statement_sql, sql
+      ) %}
     {% endif %}
   {% elif on_schema_drift == 'ignore' %}
     {% if restart %}

@@ -79,19 +79,7 @@ class _Harness:
         self.existing = existing_relation
         self.adapter = MagicMock()
         self.adapter.Relation = ConfluentRelation
-        # Convert dict to SimpleNamespace so Jinja can access attributes with dot notation
-        if inspect_statement_result is not None and isinstance(inspect_statement_result, dict):
-            self.adapter.inspect_statement.return_value = SimpleNamespace(
-                **inspect_statement_result
-            )
-        else:
-            self.adapter.inspect_statement.return_value = inspect_statement_result
-
-        # For recording call order: attach the methods we care about to a parent mock.
-        self.call_parent = MagicMock()
-        self.adapter.attach_mock(self.adapter.inspect_statement, "inspect_statement")
-        self.adapter.attach_mock(self.adapter.check_logic_drift, "check_logic_drift")
-        self.adapter.attach_mock(self.adapter.delete_statement, "delete_statement")
+        self.adapter.inspect_statement.return_value = inspect_statement_result
 
         # Stand-ins for check_for_schema_drift's dependencies: it calls
         # generate_schema_check_temp_name, get_columns_from_dry_run, partition_drift_metadata,
@@ -122,13 +110,11 @@ class _Harness:
             execute=True,
         )
         env.globals["return"] = _raise_return
-        env.tests["none"] = lambda x: x is None
 
         # Prepend stub macros that the _prepare_* helpers call
         template_with_stubs = """
 {% macro disable_old_tableflow_before_drop(relation) %}{% endmacro %}
 {% macro drop_relation_if_exists(relation) %}{% endmacro %}
-{% macro check_for_schema_drift(relation, has_select_query, enforce='all') %}{% endmacro %}
 """ + MACRO_FILE.read_text()
         self.module = env.from_string(template_with_stubs).make_module(vars=env.globals)
 
@@ -143,7 +129,7 @@ class _Harness:
         return ""
 
     def _load_result(self, name):
-        return SimpleNamespace(table=object())
+        return {"table": object()}
 
     def _raise_compiler_error(self, message):
         raise CompilationError(message)
@@ -215,6 +201,13 @@ def test_healthy_fail_checks_logic():
     harness.adapter.check_logic_drift.assert_called_once_with(
         harness.existing, "dbt-p-my_model", STORED_SQL, MODEL_SQL
     )
+    # Check call order: check_schema_drift is called before check_logic_drift
+    method_names = harness.method_calls
+    assert "check_schema_drift" in method_names
+    assert "check_logic_drift" in method_names
+    schema_index = method_names.index("check_schema_drift")
+    logic_index = method_names.index("check_logic_drift")
+    assert schema_index < logic_index
 
 
 def test_healthy_ignore_no_check():
@@ -247,8 +240,8 @@ def test_healthy_without_sql_no_check():
     assert "check_logic_drift" not in harness.method_calls
 
 
-def test_terminal_fail_checks_before_delete():
-    """Terminal statement: check_logic_drift is called before delete_statement."""
+def test_terminal_fail_resubmits_without_check():
+    """Terminal statement: restart without check_logic_drift; delete_statement is called."""
     harness = _Harness(
         config={"on_schema_drift": "fail"},
         existing_relation=relation("my_model"),
@@ -258,34 +251,8 @@ def test_terminal_fail_checks_before_delete():
     action = harness.run(recoverable=True)
 
     assert action == "restart"
-    harness.adapter.check_logic_drift.assert_called_once_with(
-        harness.existing, "dbt-p-my_model", STORED_SQL, MODEL_SQL
-    )
-    # Check call order: inspect_statement, check_logic_drift, delete_statement
-    method_names = harness.method_calls
-    assert "inspect_statement" in method_names
-    assert "check_logic_drift" in method_names
-    assert "delete_statement" in method_names
-    inspect_index = method_names.index("inspect_statement")
-    logic_index = method_names.index("check_logic_drift")
-    delete_index = method_names.index("delete_statement")
-    assert inspect_index < logic_index < delete_index
-
-
-def test_terminal_drift_keeps_statement():
-    """Terminal statement, check_logic_drift raises: error propagates, delete not called."""
-    harness = _Harness(
-        config={"on_schema_drift": "fail"},
-        existing_relation=relation("my_model"),
-        inspect_statement_result={"needs_restart": True, "sql": STORED_SQL},
-    )
-    harness.adapter.check_logic_drift.side_effect = CompilationError("SQL logic drift detected")
-
-    with pytest.raises(CompilationError, match="SQL logic drift detected"):
-        harness.run(recoverable=True)
-
-    harness.adapter.check_logic_drift.assert_called_once()
-    assert "delete_statement" not in harness.method_calls
+    assert "check_logic_drift" not in harness.method_calls
+    harness.adapter.delete_statement.assert_called()
 
 
 def test_missing_restarts_without_check():
