@@ -129,7 +129,7 @@ class _Harness:
         return ""
 
     def _load_result(self, name):
-        return {"table": object()}
+        return SimpleNamespace(table=object())
 
     def _raise_compiler_error(self, message):
         raise CompilationError(message)

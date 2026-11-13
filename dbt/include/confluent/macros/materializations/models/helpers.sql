@@ -251,9 +251,9 @@ WITH (
 {% macro _enforce_schema_drift(existing_relation, has_select_query, restart, statement_sql=none) %}
   {# Run the drift check appropriate to the on_schema_drift config:
        'fail'   — full check (columns + options + distribution); raises on any drift. Then, when
-                  statement_sql is given (the skip path only), the logic check: raises if the statement isn't running
-                  the model's current SQL. Schema first, so a column change (which changes the
-                  SQL too) keeps its more specific error.
+                  statement_sql is given (the skip path only), the logic check: raises if the
+                  statement isn't running the model's current SQL. Schema first, so a column change
+                  (which changes the SQL too) keeps its more specific error.
        'ignore' — no check, except the restart path still needs a columns-only check (benign
                   options/distribution drift is fine, but a column mismatch would make the
                   re-submitted INSERT fail at Flink, or write NULL into a table column the model
