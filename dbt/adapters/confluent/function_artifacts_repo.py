@@ -104,12 +104,22 @@ class FunctionArtifactsRepo:
                     transfer_retries=function_artifacts.UPLOAD_TRANSFER_RETRIES
                 ),
             )
-        except ArtifactAlreadyExistsError:  # a concurrent run won the race
-            # The shared listing predates the winner's upload, so look again, uncached.
+        except ArtifactAlreadyExistsError as e:
+            # Usually a concurrent run that won the race. The shared listing predates its upload,
+            # so look again, uncached.
             winner = self._list_artifacts(conn).get(config.key)
-            if winner is None:
-                raise
-            return winner
+            if winner is not None:
+                return winner
+            # The name is taken by an artifact that isn't this package: one made by hand, one whose
+            # description was edited, or (very unlikely) another package whose name hash collides.
+            raise DbtDatabaseError(
+                f"Cannot upload package {config.path.name} as artifact '{config.name}': an "
+                "artifact with that name already exists, but its description doesn't match this "
+                f"package (project '{config.project}', file name '{config.path.name}', sha256 "
+                f"{config.digest}), so dbt won't reuse it. Delete that artifact if it is no "
+                "longer needed, or rename the package file, which gives it a different artifact "
+                "name."
+            ) from e
 
     def digest(self, path: Path) -> ArtifactDigest:
         """Digest of the package file's content, computed once per real path."""

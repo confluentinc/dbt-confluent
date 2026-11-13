@@ -622,13 +622,14 @@ in between (for example by a build step running alongside `dbt run`) would be up
 digest of its earlier contents. The digest is there to avoid repeating work, not to prove what was
 uploaded, so dbt doesn't check for this. Finish building packages before starting the run.
 
-The artifact's description is a JSON object recording that dbt manages it (`managed_by`), the dbt
+The artifact's description is a JSON object recording that dbt manages it, the dbt
 project that uploaded it, the package's file name (extension included) and its full SHA-256. dbt
-finds an existing artifact by that project, file name and SHA-256, not by the artifact's name, so a
-renamed artifact is still found. An artifact whose description doesn't have all of them (including one
-you created by hand under the same name) is never reused, and the upload fails because the name is
-taken. The name carries only a shortened hash of these and may be truncated, so the description is the
-complete record.
+finds an existing artifact by that project, file name and SHA-256, not by the artifact's name. An
+artifact whose description doesn't have all of them (including one you created by hand under the 
+same name) is never reused, and the upload fails with an error saying the name is taken by an
+artifact that isn't this package. Delete that artifact if it is no longer needed, or rename the
+package file to get a different artifact name. The name carries only a shortened hash of these and
+may be truncated, so the description is the complete record.
 
 #### Changing an existing function
 

@@ -438,7 +438,7 @@ class TestEnsureArtifact:
     ):
         udf = package(tmp_path, b"v1")
         theirs = driver.add(artifact_of(udf).name, "hand made")
-        with pytest.raises(ArtifactAlreadyExistsError):
+        with pytest.raises(DbtDatabaseError, match="description doesn't match"):
             ensure(driver, udf)
         assert theirs.description == "hand made"
 
@@ -491,15 +491,24 @@ class TestEnsureArtifact:
         assert artifact.display_name == artifact_of(udf).name
         assert len(driver.listed_languages) == 2  # the shared listing, then a fresh one
 
-    def test_an_already_exists_error_with_nothing_to_find_is_raised(
+    def test_a_taken_name_with_no_matching_artifact_says_how_to_resolve_it(
         self, driver, tmp_path, monkeypatch
     ):
+        udf = package(tmp_path, b"v1")
+
         def exists_but_invisible(display_name, **_):
             raise ArtifactAlreadyExistsError("exists", display_name=display_name)
 
         monkeypatch.setattr(driver, "create", exists_but_invisible)
-        with pytest.raises(ArtifactAlreadyExistsError):
-            ensure(driver, package(tmp_path, b"v1"))
+        with pytest.raises(DbtDatabaseError) as raised:
+            ensure(driver, udf)
+
+        message = str(raised.value)
+        assert artifact_of(udf).name in message
+        assert str(artifact_of(udf).digest) in message
+        assert "Delete that artifact" in message
+        assert "rename the package file" in message
+        assert isinstance(raised.value.__cause__, ArtifactAlreadyExistsError)
 
 
 class TestApplyFunction:
