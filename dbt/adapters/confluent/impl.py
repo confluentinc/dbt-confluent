@@ -1,5 +1,6 @@
 import re
 import sys
+import textwrap
 import threading
 import time
 from collections import Counter
@@ -485,6 +486,11 @@ class ConfluentAdapter(SQLAdapter):
     @available
     def statement_needs_restart(self, statement_name: str) -> bool:
         """Return True if the long-running statement should be re-submitted.
+
+        True when the statement is missing (404, or 403 under pool-scoped roles — see
+        _handle_pool_scoped_403) or in a terminal phase (COMPLETED, STOPPED, FAILED, DELETED). False
+        for healthy phases, including in-flight transitions (PENDING, RUNNING, DEGRADED, STOPPING,
+        DELETING) which we must not interrupt. No side effects.
 
         Kept for macros that call it; dbt-confluent's own `decide_action` uses inspect_statement,
         which returns the same answer and the statement's SQL from one lookup.
@@ -1368,18 +1374,33 @@ class ConfluentAdapter(SQLAdapter):
 
         `statement_sql` is the SQL Confluent stores for the statement (see inspect_statement), and
         `model_sql` the model's compiled SQL. See statement_sql.runs_model_sql for what counts as a
-        match. A running statement can't be changed in place, so the remedy is --full-refresh, or
-        on_schema_drift='ignore' to keep the statement as it is.
+        match. The error shows both, so the user can compare them, and the ways to resolve it: a
+        running statement can't be changed in place, so --full-refresh, or stop or delete the
+        statement and re-run.
         """
         if runs_model_sql(statement_sql, model_sql):
             return
+
+        def shown(sql: str) -> str:
+            """`sql` indented for the message, cut at 10,000 characters."""
+            text = sql.strip()
+            if len(text) > 10_000:
+                text = f"{text[:10_000]}\n... ({len(text) - 10_000} more characters)"
+            return textwrap.indent(text, "    ")
+
         raise CompilationError(
             f"SQL logic drift detected for {existing_relation}: statement '{statement_name}' isn't "
-            f"running the model's current SQL.\n"
-            f"A running streaming_table statement can't be changed in place. Use --full-refresh "
-            f"to recreate the table and its statement; this permanently deletes the table's "
-            f"Kafka topic and its data, so models that read from this table should be rebuilt "
-            f"too. To keep the running statement as it is, set on_schema_drift='ignore'."
+            "running the model's current SQL. Comments, whitespace and the case of reserved keywords "
+            "are ignored when comparing.\n\n"
+            f"The running statement's SQL:\n{shown(statement_sql)}\n\n"
+            f"The model's current SQL:\n{shown(model_sql)}\n\n"
+            "A running streaming_table statement can't be changed in place. To resolve, either:\n"
+            "  - Run with --full-refresh to recreate the table and its statement. This permanently "
+            "deletes the table's Kafka topic and its data, so models that read from this table should "
+            "be rebuilt too.\n"
+            "  - Or stop or delete the statement and re-run, which re-submits it with the model's SQL. "
+            "The table and its topic are kept, but the statement likely re-reads its sources from the "
+            "beginning."
         )
 
     @available
