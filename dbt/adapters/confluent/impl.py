@@ -1035,7 +1035,7 @@ class ConfluentAdapter(SQLAdapter):
         """
         if udf.artifact_config:
             artifact = self._artifacts_repo.find(
-                self.connections.get_thread_handle(), udf.artifact_config.name
+                self.connections.get_thread_handle(), udf.artifact_config.key
             )
             udf = udf._replace(artifact_id=artifact.id if artifact else None)
         return functions.plan_function_change(existing, udf)

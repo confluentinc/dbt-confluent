@@ -38,11 +38,15 @@ OTHER_DATABASE = "cluster-b"
 FUNCTION = "is_smaller"
 CLASS_NAME = "pkg.mod.is_smaller"
 PROJECT = "proj"
-DIGEST = fa.ArtifactDigest("0123456789abcdef")
-# What `<project>-<package>` may take before it is cut: the name, less the digest and its "-".
-LABEL_BUDGET = fa.MAX_ARTIFACT_NAME_LENGTH - len(DIGEST) - 1
-# A cut label ends in "-" and a 6-character hash, and the project is whole only up to there.
-LONGEST_PROJECT_KEPT_WHOLE = LABEL_BUDGET - len("-") - 6
+DIGEST = fa.ArtifactDigest("01234567")
+FULL_SHA = fa.ArtifactDigest(DIGEST * 8)
+# What `<project>-<package>` may take before it is cut: the name, less the key hash and its "-".
+LABEL_BUDGET = fa.MAX_ARTIFACT_NAME_LENGTH - fa._NAME_HASH_LENGTH - 1
+
+
+def key(project: str, file_name: str) -> fa.ArtifactKey:
+    """An artifact key for this project and file, with a fixed content digest."""
+    return fa.ArtifactKey(project, file_name, FULL_SHA)
 
 
 class FakeDriver:
@@ -251,9 +255,10 @@ def package(tmp_path: Path, content: bytes) -> functions.FunctionConfig:
         artifact_id=None,
         artifact_config=fa.ArtifactConfig(
             path=path,
-            name=fa.artifact_display_name(PROJECT, "udf", digest),
+            name=fa.artifact_display_name(fa.ArtifactKey(PROJECT, "udf.zip", digest)),
             project=PROJECT,
             language="python",
+            digest=digest,
         ),
     )
 
@@ -283,15 +288,43 @@ ID_UDF = functions.FunctionConfig(
 
 
 def managed(project: str = PROJECT) -> str:
-    return fa.encode_description(project)
+    return fa.encode_description(project, "udf.zip", FULL_SHA)
+
+
+def described(udf: functions.FunctionConfig) -> str:
+    """The description of the artifact dbt uploads for this package."""
+    return fa.encode_description(*artifact_of(udf).key)
 
 
 class TestDescription:
     def test_records_that_dbt_manages_the_artifact_and_for_which_project(self):
-        assert json.loads(fa.encode_description("my_project")) == {
+        description = fa.encode_description("my_project", "udfs.jar", FULL_SHA)
+        assert json.loads(description) == {
             "managed_by": "dbt-confluent",
             "project": "my_project",
+            "file_name": "udfs.jar",
+            "sha256": FULL_SHA,
         }
+
+    def test_is_pretty_printed_with_two_space_indentation(self):
+        description = fa.encode_description("my_project", "udfs.jar", FULL_SHA)
+        assert description.splitlines()[1] == '  "managed_by": "dbt-confluent",'
+
+    def test_the_key_of_an_artifact(self):
+        description = fa.encode_description("my_project", "udfs.jar", FULL_SHA)
+        assert fa.artifact_key(description) == fa.ArtifactKey("my_project", "udfs.jar", FULL_SHA)
+
+    @pytest.mark.parametrize(
+        "description",
+        [
+            None,
+            "hand made",
+            '{"managed_by": "someone", "project": "p", "file_name": "f", "sha256": "s"}',
+            '{"managed_by": "dbt-confluent", "project": "p"}',  # without a file name or digest
+        ],
+    )
+    def test_an_artifact_without_a_full_key_has_none(self, description):
+        assert fa.artifact_key(description) is None
 
     @pytest.mark.parametrize(
         "description, project",
@@ -316,89 +349,65 @@ class TestFileDigestAndName:
         c.write_bytes(b"y")
         assert fa.file_digest(a) == fa.file_digest(b) != fa.file_digest(c)
 
-    def test_name_is_the_project_package_and_digest(self):
-        assert fa.artifact_display_name("proj", "udfs", DIGEST) == f"proj-udfs-{DIGEST}"
-
-    def test_projects_and_packages_that_split_the_same_text_differently_get_different_names(self):
-        # Only `-`, which a project name can't contain, tells where the project ends.
-        assert fa.artifact_display_name("shop", "eu_udfs", DIGEST) != fa.artifact_display_name(
-            "shop_eu", "udfs", DIGEST
-        )
+    def test_name_is_the_project_package_and_key_hash(self):
+        name = fa.artifact_display_name(key("proj", "udfs.jar"))
+        assert re.fullmatch(r"proj-udfs-[0-9a-f]{8}", name)
 
     def test_characters_the_api_may_reject_are_replaced_in_the_package_name(self):
-        assert fa.artifact_display_name("proj", "udfs-1.0.0 (beta)", DIGEST) == (
-            f"proj-udfs-1_0_0__beta_-{DIGEST}"
-        )
+        name = fa.artifact_display_name(key("proj", "udfs-1.0.0 (beta).jar"))
+        assert name.startswith("proj-udfs-1_0_0__beta_-")
 
-    def test_digest_is_16_hex_characters(self, tmp_path):
+    def test_digest_is_the_full_sha256(self, tmp_path):
         path = tmp_path / "udf.zip"
         path.write_bytes(b"x")
-        assert re.fullmatch(r"[0-9a-f]{16}", fa.file_digest(path))
+        assert re.fullmatch(r"[0-9a-f]{64}", fa.file_digest(path))
 
-    @pytest.mark.parametrize("length", [1, 50, 200, 1000])
-    def test_the_digest_is_never_cut_off_however_long_the_names(self, length):
-        """The digest is what makes a name mean "this content", so it must survive any name."""
-        name = fa.artifact_display_name("j" * length, "udfs", DIGEST)
-        assert name.endswith("-" + DIGEST)
-        assert len(name) <= fa.MAX_ARTIFACT_NAME_LENGTH
-
-    def test_a_name_that_exactly_fits_is_left_as_is(self):
-        package = "udfs"
-        project = "j" * (LABEL_BUDGET - len(package) - 1)
-        name = fa.artifact_display_name(project, package, DIGEST)
-        assert name == f"{project}-{package}-{DIGEST}"
-        assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
-
-    def test_a_name_one_character_over_is_cut_to_the_limit_and_ends_in_a_hash(self):
-        package = "udfs"
-        project = "j" * (LABEL_BUDGET - len(package))  # one over: the label gets a "-" too
-        uncut = f"{project}-{package}-{DIGEST}"
-        name = fa.artifact_display_name(project, package, DIGEST)
-        assert len(uncut) == fa.MAX_ARTIFACT_NAME_LENGTH + 1
-        assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
-        assert name != uncut
-        assert name.endswith(f"-{DIGEST}")
+    def test_files_whose_names_sanitize_alike_still_get_different_names(self):
+        # Same project, same bytes, same sanitized label: only the raw file name differs.
+        dotted = fa.artifact_display_name(key("proj", "udfs-1.0.zip"))
+        underscored = fa.artifact_display_name(key("proj", "udfs-1_0.zip"))
+        assert dotted.rsplit("-", 1)[0] == underscored.rsplit("-", 1)[0]
+        assert dotted != underscored
 
     @pytest.mark.parametrize(
-        "project_length", [LONGEST_PROJECT_KEPT_WHOLE - 5, LONGEST_PROJECT_KEPT_WHOLE]
+        "differing",
+        [{"project": "other"}, {"file_name": "other.jar"}, {"sha256": FULL_SHA[::-1]}],
     )
-    def test_a_project_that_fits_survives_whole_when_the_file_name_is_cut(self, project_length):
-        project = "j" * project_length
-        name = fa.artifact_display_name(project, "x" * 100, DIGEST)
-        assert name.startswith(f"{project}-")
+    def test_any_part_of_the_key_changes_the_name(self, differing):
+        base = key("proj", "udfs.jar")
+        assert fa.artifact_display_name(base) != fa.artifact_display_name(
+            base._replace(**differing)
+        )
+
+    def test_fields_that_split_the_same_text_differently_get_different_names(self):
+        assert fa.artifact_display_name(key("ab", "c.jar")) != fa.artifact_display_name(
+            key("a", "bc.jar")
+        )
+
+    def test_a_name_is_deterministic(self):
+        assert fa.artifact_display_name(key("proj", "udfs.jar")) == fa.artifact_display_name(
+            key("proj", "udfs.jar")
+        )
+
+    def test_a_name_that_exactly_fits_is_left_as_is(self):
+        project = "j" * (LABEL_BUDGET - len("udfs") - 1)
+        name = fa.artifact_display_name(key(project, "udfs.jar"))
+        assert name.startswith(f"{project}-udfs-")
         assert len(name) == fa.MAX_ARTIFACT_NAME_LENGTH
 
-    def test_a_project_one_character_too_long_is_cut_itself(self):
-        project = "j" * (LONGEST_PROJECT_KEPT_WHOLE + 1)
-        name = fa.artifact_display_name(project, "x" * 100, DIGEST)
-        assert not name.startswith(f"{project}-")
-        assert name.startswith("j" * LONGEST_PROJECT_KEPT_WHOLE + "-")
-
-    def test_a_long_project_leaves_no_room_for_the_file_name(self):
-        project = "j" * 40
-        name = fa.artifact_display_name(project, "udfs", DIGEST)
-        assert "udfs" not in name
-        assert name.startswith("j" * LONGEST_PROJECT_KEPT_WHOLE + "-")
-        assert name.endswith(f"-{DIGEST}")
+    @pytest.mark.parametrize("length", [1, 50, 200, 1000])
+    def test_a_long_label_is_cut_to_the_limit_and_still_ends_in_the_hash(self, length):
+        long_key = key("proj", "x" * length + ".jar")
+        name = fa.artifact_display_name(long_key)
         assert len(name) <= fa.MAX_ARTIFACT_NAME_LENGTH
-
-    def test_a_long_label_keeps_the_start_of_the_project_and_the_digest(self):
-        name = fa.artifact_display_name("myproject", "x" * 100, DIGEST)
-        assert name.startswith("myproject-x")
-        assert name.endswith("-" + DIGEST)
-        assert len(name) <= fa.MAX_ARTIFACT_NAME_LENGTH
-
-    def test_a_long_name_is_deterministic(self):
-        args = ("j" * 100, "udfs", DIGEST)
-        assert fa.artifact_display_name(*args) == fa.artifact_display_name(*args)
+        assert name.startswith("proj-x")
+        assert re.search(r"-[0-9a-f]{8}$", name)
 
     def test_long_labels_that_differ_only_after_the_cut_get_different_names(self):
-        # The labels differ only in their last characters, which truncation cuts off, so
-        # only the hash of the full label tells the two names apart.
         shared = "j" * 100
-        one = fa.artifact_display_name(shared + "one", "udfs", DIGEST)
-        two = fa.artifact_display_name(shared + "two", "udfs", DIGEST)
-        assert one != two
+        assert fa.artifact_display_name(key(shared + "one", "udfs.jar")) != (
+            fa.artifact_display_name(key(shared + "two", "udfs.jar"))
+        )
 
 
 class TestEnsureArtifact:
@@ -406,7 +415,7 @@ class TestEnsureArtifact:
         udf = package(tmp_path, b"v1")
         artifact = ensure(driver, udf)
         assert artifact.display_name == artifact_of(udf).name
-        assert artifact.description == managed()
+        assert artifact.description == described(udf)
 
     def test_reuses_an_artifact_for_the_same_content(self, driver, events, tmp_path):
         udf = package(tmp_path, b"v1")
@@ -416,10 +425,21 @@ class TestEnsureArtifact:
         assert again.id == first.id
         assert events == [f"upload {artifact_of(udf).name}"]
 
-    def test_leaves_an_artifact_we_did_not_create_alone(self, driver, tmp_path):
+    def test_finds_an_artifact_by_its_description_whatever_its_name(
+        self, driver, events, tmp_path
+    ):
+        udf = package(tmp_path, b"v1")
+        renamed = driver.add("a name from some future layout", described(udf))
+        assert ensure(driver, udf).id == renamed.id
+        assert events == []
+
+    def test_does_not_take_an_artifact_we_did_not_create_even_under_our_name(
+        self, driver, tmp_path
+    ):
         udf = package(tmp_path, b"v1")
         theirs = driver.add(artifact_of(udf).name, "hand made")
-        assert ensure(driver, udf).id == theirs.id
+        with pytest.raises(DbtDatabaseError, match="description doesn't match"):
+            ensure(driver, udf)
         assert theirs.description == "hand made"
 
     @pytest.mark.parametrize(
@@ -449,7 +469,9 @@ class TestEnsureArtifact:
 
     def test_an_existing_artifact_of_another_language_is_an_error(self, driver, tmp_path):
         udf = package(tmp_path, b"v1")  # python
-        driver.add(artifact_of(udf).name, managed(), runtime_language=ArtifactRuntimeLanguage.JAVA)
+        driver.add(
+            artifact_of(udf).name, described(udf), runtime_language=ArtifactRuntimeLanguage.JAVA
+        )
         with pytest.raises(DbtDatabaseError, match="two different languages"):
             ensure(driver, udf)
 
@@ -459,7 +481,7 @@ class TestEnsureArtifact:
         udf = package(tmp_path, b"v1")
 
         def lose_the_race(display_name, **_):
-            driver.add(display_name, managed())
+            driver.add(display_name, described(udf))
             raise ArtifactAlreadyExistsError("exists", display_name=display_name)
 
         monkeypatch.setattr(driver, "create", lose_the_race)
@@ -469,15 +491,24 @@ class TestEnsureArtifact:
         assert artifact.display_name == artifact_of(udf).name
         assert len(driver.listed_languages) == 2  # the shared listing, then a fresh one
 
-    def test_an_already_exists_error_with_nothing_to_find_is_raised(
+    def test_a_taken_name_with_no_matching_artifact_says_how_to_resolve_it(
         self, driver, tmp_path, monkeypatch
     ):
+        udf = package(tmp_path, b"v1")
+
         def exists_but_invisible(display_name, **_):
             raise ArtifactAlreadyExistsError("exists", display_name=display_name)
 
         monkeypatch.setattr(driver, "create", exists_but_invisible)
-        with pytest.raises(ArtifactAlreadyExistsError):
-            ensure(driver, package(tmp_path, b"v1"))
+        with pytest.raises(DbtDatabaseError) as raised:
+            ensure(driver, udf)
+
+        message = str(raised.value)
+        assert artifact_of(udf).name in message
+        assert str(artifact_of(udf).digest) in message
+        assert "Delete that artifact" in message
+        assert "rename the package file" in message
+        assert isinstance(raised.value.__cause__, ArtifactAlreadyExistsError)
 
 
 class TestApplyFunction:
@@ -828,9 +859,10 @@ class TestAdapterValidateFunctionConfig:
         digest = fa.file_digest(tmp_path / "udf.zip")
         assert udf.artifact_config == fa.ArtifactConfig(
             path=(tmp_path / "udf.zip").resolve(),
-            name=fa.artifact_display_name(PROJECT, "udf", digest),
+            name=fa.artifact_display_name(fa.ArtifactKey(PROJECT, "udf.zip", digest)),
             project=PROJECT,
             language="python",
+            digest=digest,
         )
 
     def test_a_package_is_read_once_between_validating_and_uploading(
@@ -883,12 +915,12 @@ class TestAdapterPlanFunctionChange:
         self, adapter, driver, tmp_path
     ):
         udf = package(tmp_path, b"v1")
-        artifact = driver.add(artifact_of(udf).name, managed())
+        artifact = driver.add(artifact_of(udf).name, described(udf))
         assert adapter.plan_function_change(self.live(artifact.id), udf) == []
 
     def test_a_function_on_another_artifact_is_changed(self, adapter, driver, tmp_path):
         udf = package(tmp_path, b"v2")
-        driver.add(artifact_of(udf).name, managed())
+        driver.add(artifact_of(udf).name, described(udf))
         changes = adapter.plan_function_change(self.live("cfa-older"), udf)
         assert changes and changes[0].startswith("artifact_id")
 
@@ -938,10 +970,10 @@ class TestFunctionArtifactsRepo:
 
     def test_the_artifact_listing_is_fetched_once(self, driver, tmp_path):
         udf = package(tmp_path, b"v1")
-        existing = driver.add(artifact_of(udf).name, managed())
+        existing = driver.add(artifact_of(udf).name, described(udf))
         artifacts = FunctionArtifactsRepo()
 
-        found = run_on_threads(lambda: artifacts.find(driver, artifact_of(udf).name))
+        found = run_on_threads(lambda: artifacts.find(driver, artifact_of(udf).key))
 
         assert [a.id for a in found] == [existing.id] * THREADS
         assert len(driver.listed_languages) == 1
@@ -957,7 +989,8 @@ class TestFunctionArtifactsRepo:
         driver.list = failing_list  # type: ignore[method-assign]
         artifacts = FunctionArtifactsRepo()
 
-        outcomes = run_on_threads(lambda: artifacts.find(driver, "any-name"))
+        key = artifact_of(package(tmp_path, b"v1")).key
+        outcomes = run_on_threads(lambda: artifacts.find(driver, key))
 
         assert len(calls) == 1
         assert outcomes == [listing_error] * THREADS
@@ -1011,7 +1044,7 @@ class TestFunctionArtifactsRepo:
 
         uploaded = artifacts.ensure(driver, artifact_of(udf))
 
-        assert artifacts.find(driver, artifact_of(udf).name) is uploaded
+        assert artifacts.find(driver, artifact_of(udf).key) is uploaded
         assert len(driver.listed_languages) == 1  # only ensure's lookup
 
     def test_a_failed_upload_is_shared_not_retried(self, driver, tmp_path, monkeypatch):
@@ -1061,7 +1094,7 @@ class TestFunctionArtifactsRepo:
         def create_lost_to_a_concurrent_run(display_name, **_):
             attempts.append(display_name)
             # The other run's artifact appears after the build's shared listing was taken.
-            winner.append(driver.add(display_name, managed()))
+            winner.append(driver.add(display_name, described(udf)))
             raise ArtifactAlreadyExistsError("exists", display_name=display_name)
 
         driver.create = create_lost_to_a_concurrent_run  # type: ignore[method-assign]
@@ -1107,10 +1140,11 @@ class TestFunctionArtifactsRepoLogging:
             f"Hashing package {artifact_of(udf).path.name}"
         ]
 
-    def test_the_listing_is_logged_once(self, messages, driver):
+    def test_the_listing_is_logged_once(self, messages, driver, tmp_path):
+        key = artifact_of(package(tmp_path, b"v1")).key
         artifacts = FunctionArtifactsRepo()
 
-        run_on_threads(lambda: artifacts.find(driver, "any-name"))
+        run_on_threads(lambda: artifacts.find(driver, key))
 
         assert messages == ["Listing artifacts"]
 
@@ -1175,7 +1209,7 @@ class TestAdapterSharesPackageWork:
 
     def test_an_unchanged_function_plans_without_uploading(self, adapter, driver, tmp_path):
         udf = package(tmp_path, b"v1")
-        artifact = driver.add(artifact_of(udf).name, managed())
+        artifact = driver.add(artifact_of(udf).name, described(udf))
         live = functions.FunctionState(CLASS_NAME, "python", artifact.id, frozenset())
 
         assert adapter.plan_function_change(live, udf) == []
