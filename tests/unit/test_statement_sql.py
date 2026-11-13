@@ -5,6 +5,7 @@ import time
 import pytest
 import sqlparse.keywords
 import sqlparse.lexer
+from sqlparse import tokens as T
 
 from dbt.adapters.confluent.statement_sql import (
     FLINK_SQL_REGEX,
@@ -137,6 +138,10 @@ MATCHES = {  # id -> (stored statement, model SQL); runs_model_sql must be True
         _new_shape("select   replace(p, '\\', '/')   from t"),
         "select replace(p, '\\', '/') from t",
     ),
+    "double_slash_comment_edited": (
+        _new_shape("select a // old note\nfrom t"),
+        "select a // new note\nfrom t",
+    ),
 }
 CHANGES = {  # id -> (stored statement, model SQL); runs_model_sql must be False
     "where_value_changed": (_new_shape(M), M.replace("100", "0")),
@@ -204,6 +209,14 @@ CHANGES = {  # id -> (stored statement, model SQL); runs_model_sql must be False
         "select m [']'] , '-- x' as c from t",
     ),
     "qualified_name_case": (_new_shape("select t.value from t"), "select t.VALUE from t"),
+    "double_slash_comment_hides_change": (
+        _new_shape("select a // the /* thing\nfrom t /*+ OPTIONS('x'='1') */"),
+        "select a // the /* thing\nfrom u /*+ OPTIONS('x'='2') */",
+    ),
+    "http_url_in_literal": (
+        _new_shape("select 'http://a' from t"),
+        "select 'http://b' from t",
+    ),
 }
 
 
@@ -258,6 +271,16 @@ def test_normalize_sql():
     )
     assert normalize_sql("select `select`, type from t") == "SELECT `select` , type FROM t"
     assert normalize_sql("select a from t group\n   by a") == "SELECT a FROM t GROUP BY a"
+    assert normalize_sql("select a // note\nfrom t") == "SELECT a FROM t"
+    assert (
+        normalize_sql("select a // the /* thing\nfrom t /*+ OPTIONS('x'='1') */")
+        == "SELECT a FROM t /*+ OPTIONS('x'='1') */"
+    )
+    assert (
+        normalize_sql("select a // don't\nfrom t where b = 'x'") == "SELECT a FROM t WHERE b = 'x'"
+    )
+    assert normalize_sql("select a from t // end") == "SELECT a FROM t"
+    assert normalize_sql("select 'http://a' as u from t") == "SELECT 'http://a' AS u FROM t"
 
 
 def test_sqlparse_lexing_assumptions():
@@ -303,7 +326,8 @@ def test_sqlparse_lexing_assumptions():
     assert string_values[0] == "'C:\\'"
     assert string_values[1] == "'x'"
 
-    assert len(FLINK_SQL_REGEX) == len(sqlparse.keywords.SQL_REGEX) - 1
+    assert len(FLINK_SQL_REGEX) == len(sqlparse.keywords.SQL_REGEX)
+    assert FLINK_SQL_REGEX[0] == (r"//.*?(\r\n|\r|\n|$)", T.Comment.Single)
     for regex, _ in FLINK_SQL_REGEX:
         assert r"|\'" not in regex and r"|\"" not in regex and r"[^\\]" not in regex
 

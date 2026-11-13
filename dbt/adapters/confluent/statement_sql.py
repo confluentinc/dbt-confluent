@@ -75,12 +75,15 @@ RESERVED_KEYWORDS = frozenset(
     }
 )
 # fmt: on
-# sqlparse's default rules, adjusted to Flink's lexer (probe 356ad1c0): a backslash isn't an escape
-# inside quotes, and `[...]` isn't a bracketed name (Flink uses brackets only for array and map
-# access). Without this, `'C:\'` followed by another quote would swallow the SQL after it into a
-# string and hide changes there. A private Lexer, so sqlparse's shared default instance (dbt-core
-# uses it) is untouched.
+# sqlparse's default rules, adjusted to Flink's lexer (probes 356ad1c0, eb9c2bec): `//` starts a
+# comment to the end of the line, a backslash isn't an escape inside quotes, and `[...]` isn't a
+# bracketed name (Flink uses brackets only for array and map access). Without this, `'C:\'`
+# followed by another quote would swallow the SQL after it into a string, and a `/*` inside a `//`
+# comment would swallow the SQL up to the next `*/`, hiding changes there. A private Lexer, so
+# sqlparse's shared default instance (dbt-core uses it) is untouched.
 FLINK_SQL_REGEX = [
+    (r"//.*?(\r\n|\r|\n|$)", T.Comment.Single),
+] + [
     (r"'(''|[^'])*'", ttype)
     if regex == r"'(''|\\'|[^'])*'"
     else (r'"(""|[^"])*"', ttype)

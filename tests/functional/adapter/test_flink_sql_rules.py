@@ -80,9 +80,10 @@ class TestFlinkSqlRules(ConfluentFixtures):
         )
 
     def test_lexer_rules(self, project, rules_table):
-        """Flink reads `/*+ ... */` hints (a bogus option value is rejected), `/* + ... */` is a
-        plain comment, `#` is a lexical error, a backslash isn't an escape in a string, and block
-        comments don't nest. Collects every broken rule, so one run shows all of them."""
+        """Flink reads `//` as a comment to the end of the line, `/*+ ... */` hints (a bogus
+        option value is rejected), `/* + ... */` is a plain comment, `#` is a lexical error, a
+        backslash isn't an escape in a string, and block comments don't nest. Collects every
+        broken rule, so one run shows all of them."""
         t = rules_table
         accepted = {
             "a valid hint": (
@@ -92,6 +93,10 @@ class TestFlinkSqlRules(ConfluentFixtures):
                 f"SELECT id FROM {t} /* + OPTIONS('scan.startup.mode'='no-such-mode') */"
             ),
             "a string ending in a backslash": f"SELECT 'C:\\' AS p FROM {t}",
+            "a `//` comment at the end of a line": f"SELECT id // trailing\nFROM {t}",
+            "`//` as a comment (only if `//` is a comment)": f"SELECT 4 // 2\nFROM {t}",
+            "a `/*` inside a `//` comment": f"SELECT id // see /* x\nFROM {t}",
+            "a quote after `//`": f"SELECT id // don't\nFROM {t}",
         }
         parse_errors = {
             "`#`": f"SELECT id # x\nFROM {t}",

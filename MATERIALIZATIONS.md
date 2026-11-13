@@ -1088,8 +1088,8 @@ select order_id, round(price, 4) as price from {{ ref('source') }}
 
 **What's ignored.** Both sides are normalized before comparing:
 
-- Comments (`--`, `/* */`) are dropped. SQL hints (`/*+ ... */`) are not: Flink applies them, so a
-  change to a hint is reported.
+- Comments (`--`, `//`, `/* */`) are dropped. SQL hints (`/*+ ... */`) are not: Flink applies them,
+  so a change to a hint is reported.
 - Whitespace and layout don't matter: indentation, line breaks, and spacing around operators and
   commas.
 - The case of Flink's reserved keywords (`SELECT`, `FROM`, `WHERE`, `AS`, `COUNT`, `CAST`, ...) is
