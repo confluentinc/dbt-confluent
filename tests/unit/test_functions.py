@@ -18,6 +18,7 @@ from dbt.adapters.base.relation import BaseRelation
 from dbt.adapters.confluent import function_artifacts, functions
 from dbt.adapters.confluent.function_artifacts import (
     ArtifactConfig,
+    ArtifactKey,
     artifact_display_name,
     file_digest,
 )
@@ -441,10 +442,24 @@ class TestValidateArtifactPath:
         digest = file_digest(project_root / self.PACKAGE)
         assert udf.artifact_config == ArtifactConfig(
             path=(project_root / self.PACKAGE).resolve(),
-            name=artifact_display_name(PROJECT, Path(self.PACKAGE).stem, digest),
+            name=artifact_display_name(ArtifactKey(PROJECT, Path(self.PACKAGE).name, digest)),
             project=PROJECT,
             language="python",
+            digest=digest,
         )
+
+    def test_a_project_name_too_long_for_the_description_is_rejected(self, project_root):
+        long_project = "p" * function_artifacts.MAX_ARTIFACT_DESCRIPTION_LENGTH
+        config = java_config(language="python", artifact_id=None, artifact_path=self.PACKAGE)
+        with pytest.raises(CompilationError, match="API's limit"):
+            functions.validate_function_config(
+                config,
+                CATALOG,
+                DATABASE,
+                project_root=project_root,
+                project=long_project,
+                function=FUNCTION,
+            )
 
     def test_an_artifact_id_has_no_artifact_config(self):
         assert validate(java_config()).artifact_config is None

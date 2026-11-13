@@ -602,13 +602,13 @@ flags:
 With `artifact_path`, dbt uploads the package as the function's artifact, which needs credentials
 that can use the artifact API (`auth: oauth`, or a [Global API key](#tableflow) as for
 Tableflow). The artifact is named after the project, the package file's name and the package's
-content (`<project>-<file name>-<digest>`, e.g. `shop-udfs-3f2a9c...`), so it is recognizable in
+content (`<project>-<file name>-<hash>`, e.g. `shop-udfs-3f2a9c1b`), so it is recognizable in
 Confluent Cloud. The file name is without its extension, and characters other than letters, digits,
-`_` and `-` become `_`. The same package file always maps to the same artifact, whichever function
-uses it. Artifact names are limited to 60 characters, so when the project and file names are too
-long to leave room for the digest, they are cut short from the end and finish with a hash of the
-full name, so the file name goes first. A project name over 36 characters is itself cut, which leaves
-no room for the file name. The digest is never cut:
+`_` and `-` become `_`. The hash is the start of a SHA-256 of the project, the full file name and the
+package's content, so two files whose names look alike once cleaned up (`udfs-1.0.zip` and
+`udfs-1_0.zip`) still get different artifacts. The same package file always maps to the same
+artifact, whichever function uses it. Artifact names are limited to 60 characters, so a long project
+and file name are cut short from the end to leave room for the hash, which is never cut:
 
 - Functions that point at the same package file share one artifact: dbt hashes, looks up and uploads
   it once per run, however many functions use it or how many threads build them.
@@ -622,8 +622,14 @@ in between (for example by a build step running alongside `dbt run`) would be up
 digest of its earlier contents. The digest is there to avoid repeating work, not to prove what was
 uploaded, so dbt doesn't check for this. Finish building packages before starting the run.
 
-The artifact's description records that dbt manages it (`managed_by`) and the dbt project that
-uploaded it.
+The artifact's description is a JSON object recording that dbt manages it, the dbt
+project that uploaded it, the package's file name (extension included) and its full SHA-256. dbt
+finds an existing artifact by that project, file name and SHA-256, not by the artifact's name. An
+artifact whose description doesn't have all of them (including one you created by hand under the 
+same name) is never reused, and the upload fails with an error saying the name is taken by an
+artifact that isn't this package. Delete that artifact if it is no longer needed, or rename the
+package file to get a different artifact name. The name carries only a shortened hash of these and
+may be truncated, so the description is the complete record.
 
 #### Changing an existing function
 
