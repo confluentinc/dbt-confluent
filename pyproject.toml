@@ -34,6 +34,7 @@ dependencies = [
   "agate~=1.0",
   "httpx>=0.23.0,<0.29.0",
   "confluent-sql~=0.8.0",
+  "sqlparse>=0.5.5,<0.6",
 ]
 
 [dependency-groups]
