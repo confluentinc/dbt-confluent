@@ -24,7 +24,9 @@ from .function_artifacts import (
     ARTIFACT_ID_PATTERN,
     ArtifactConfig,
     ArtifactDigest,
+    ArtifactKey,
     artifact_display_name,
+    check_description_length,
     file_digest,
 )
 
@@ -198,11 +200,14 @@ def validate_function_config(
     artifact_config = None
     if resolved_path:
         package_digest = digest(resolved_path)
+        key = ArtifactKey(project, resolved_path.name, package_digest)
+        check_description_length(key)
         artifact_config = ArtifactConfig(
             path=resolved_path,
-            name=artifact_display_name(project, resolved_path.stem, package_digest),
+            name=artifact_display_name(key),
             project=project,
             language=language,
+            digest=package_digest,
         )
     return FunctionConfig(
         language=language,
