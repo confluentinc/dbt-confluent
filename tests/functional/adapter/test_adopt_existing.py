@@ -21,8 +21,9 @@ import pytest
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.execution_mode import ExecutionMode
 
-from dbt.tests.util import relation_from_name, run_dbt, run_dbt_and_capture, set_model_file
+from dbt.tests.util import relation_from_name, run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
+    get_result_by_name,
     wait_for_absent,
     wait_for_running,
 )
@@ -200,8 +201,11 @@ class TestAdoptExistingPipeline(ConfluentFixtures):
 
         # The planted INSERT doesn't match dbt's rendering, so the adopt step fails with SQL
         # logic drift and leaves the planted statement untouched (same statement_id).
-        results, logs = run_dbt(["run"], expect_pass=False)
-        assert "SQL logic drift detected" in logs
+        results = run_dbt(["run"], expect_pass=False)
+        result = get_result_by_name(results, "adopted_streaming_table")
+        assert result is not None, "adopted_streaming_table not found in results"
+        assert result.status.name == "Error", result.message
+        assert "SQL logic drift detected" in result.message
         drift_stmt = self._get_statement(adapter, insert_name)
         assert drift_stmt.statement_id == planted_id
 

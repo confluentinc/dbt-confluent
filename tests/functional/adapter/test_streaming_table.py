@@ -716,6 +716,30 @@ class TestInsertWritesByName:
 
 # -- SQL logic drift detection (#119) --
 
+# Intentionally UNBOUNDED (no `number-of-rows`). The streaming_table that reads from this source
+# is recoverable: on a re-run, decide_action classifies its long-running INSERT and restarts it
+# if the statement is missing or terminal. A bounded faker source makes that INSERT *complete*
+# (reach a terminal phase), which would turn a no-change second run into a restart and break the
+# skip-path tests (test_unchanged_rerun_skips, test_yml_reorder_skips). Keeping the source
+# unbounded keeps the INSERT RUNNING/healthy across re-runs, matching production, so the second
+# run skips. ConfluentFixtures' class_clean_up deletes every statement by label, so an unbounded
+# source leaks no compute.
+SOURCE_FOR_LOGIC_DRIFT = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'changelog.mode': 'append',
+    }
+) }}
+order_id BIGINT,
+price DECIMAL(10, 2),
+order_time TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND,
+PRIMARY KEY(`order_id`) NOT ENFORCED
+"""
+
 LOGIC_TABLE = """
 {{ config(
     materialized='streaming_table',
@@ -781,7 +805,7 @@ class TestLogicDrift(ConfluentFixtures):
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield {
-            "my_streaming_source.sql": MY_STREAMING_SOURCE,
+            "my_streaming_source.sql": SOURCE_FOR_LOGIC_DRIFT,
             "logic_table.sql": LOGIC_TABLE,
             "logic_table_ignore.sql": LOGIC_TABLE_IGNORE,
             "models.yml": LOGIC_DRIFT_MODELS_YML,
@@ -798,7 +822,7 @@ class TestLogicDrift(ConfluentFixtures):
         """An unchanged re-run skips the model and leaves the statement untouched (no false
         drift)."""
         adapter = project.adapter
-        run_dbt(["run", "--select", "logic_table"])
+        run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table")
         run_dbt(["run", "--select", "logic_table"])
         second_id = self._get_statement_id(adapter, "logic_table")
@@ -807,7 +831,7 @@ class TestLogicDrift(ConfluentFixtures):
     def test_yml_reorder_skips(self, project):
         """Reordering the yml columns doesn't change the SQL, so it's not drift."""
         adapter = project.adapter
-        run_dbt(["run", "--select", "logic_table"])
+        run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table")
         yml_path = (project.project_root, "models", "models.yml")
         write_file(LOGIC_DRIFT_MODELS_YML_REORDERED, *yml_path)
@@ -822,12 +846,15 @@ class TestLogicDrift(ConfluentFixtures):
         """Changing the model's SQL logic (min_id var) fails the run with a SQL logic drift
         error, and the statement is left unchanged."""
         adapter = project.adapter
-        run_dbt(["run", "--select", "logic_table"])
+        run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table")
-        results, logs = run_dbt_and_capture(
+        results = run_dbt(
             ["run", "--vars", "{min_id: 5}", "--select", "logic_table"], expect_pass=False
         )
-        assert "SQL logic drift detected" in logs
+        result = get_result_by_name(results, "logic_table")
+        assert result is not None, "logic_table not found in results"
+        assert result.status.name == "Error", result.message
+        assert "SQL logic drift detected" in result.message
         second_id = self._get_statement_id(adapter, "logic_table")
         assert first_id == second_id
 
@@ -835,7 +862,7 @@ class TestLogicDrift(ConfluentFixtures):
         """The same logic change on a model with on_schema_drift='ignore' succeeds and leaves
         the statement untouched (no drift check)."""
         adapter = project.adapter
-        run_dbt(["run", "--select", "logic_table_ignore"])
+        run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table_ignore")
         run_dbt(["run", "--vars", "{min_id: 5}", "--select", "logic_table_ignore"])
         second_id = self._get_statement_id(adapter, "logic_table_ignore")
@@ -846,16 +873,19 @@ class TestLogicDrift(ConfluentFixtures):
         SQL is checked before it's deleted, so the run fails with the logic drift message, and
         the stopped statement is still there (not deleted)."""
         adapter = project.adapter
-        run_dbt(["run", "--select", "logic_table"])
+        run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table")
         insert_name = adapter.get_statement_name(model_name="logic_table", project_name=self.NAME)
         with adapter.connection_named("stop_stmt"):
             conn = adapter.connections.get_thread_connection()
             conn.handle.stop_statement(insert_name)
-        results, logs = run_dbt_and_capture(
+        results = run_dbt(
             ["run", "--vars", "{min_id: 5}", "--select", "logic_table"], expect_pass=False
         )
-        assert "SQL logic drift detected" in logs
+        result = get_result_by_name(results, "logic_table")
+        assert result is not None, "logic_table not found in results"
+        assert result.status.name == "Error", result.message
+        assert "SQL logic drift detected" in result.message
         with adapter.connection_named("check_stopped"):
             conn = adapter.connections.get_thread_connection()
             stmt = conn.handle.get_statement(insert_name)
@@ -867,7 +897,7 @@ class TestLogicDrift(ConfluentFixtures):
         resubmitted (new statement_id, not terminal) and the run succeeds, logging the restart
         message."""
         adapter = project.adapter
-        run_dbt(["run", "--select", "logic_table"])
+        run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table")
         insert_name = adapter.get_statement_name(model_name="logic_table", project_name=self.NAME)
         with adapter.connection_named("stop_stmt"):
@@ -887,7 +917,7 @@ class TestLogicDrift(ConfluentFixtures):
         """Restart path with missing statement: delete the INSERT, then run with changed SQL.
         The run succeeds and resubmits (no logic check on a missing statement)."""
         adapter = project.adapter
-        run_dbt(["run", "--select", "logic_table"])
+        run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table")
         insert_name = adapter.get_statement_name(model_name="logic_table", project_name=self.NAME)
         with adapter.connection_named("delete_stmt"):
