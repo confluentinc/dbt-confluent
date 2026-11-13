@@ -7,8 +7,8 @@ from tests.functional.adapter._helpers import (
     get_result_by_name,
     relation,
     wait_for_absent,
+    wait_for_running,
     wait_for_snapshot_rows,
-    wait_for_terminal,
 )
 from tests.functional.adapter.fixtures import ConfluentFixtures
 from tests.functional.adapter.isolation import physical_name
@@ -379,7 +379,7 @@ class TestDeadStatementRestart(ConfluentFixtures):
             "models.yml": SIMPLE_MODELS_YML,
         }
 
-    def test_terminal_insert_statement_is_resubmitted(self, project, dbt_profile_data):
+    def test_terminal_insert_statement_is_resubmitted(self, project):
         adapter = project.adapter
         insert_name = adapter.get_statement_name(
             model_name="my_streaming_table", project_name=self.NAME
@@ -824,7 +824,8 @@ class TestLogicDrift(ConfluentFixtures):
         adapter = project.adapter
         run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table")
-        run_dbt(["run", "--select", "logic_table"])
+        results = run_dbt(["run", "--select", "logic_table"])
+        assert get_result_by_name(results, "logic_table").message == "SKIP"
         second_id = self._get_statement_id(adapter, "logic_table")
         assert first_id == second_id
 
@@ -836,7 +837,8 @@ class TestLogicDrift(ConfluentFixtures):
         yml_path = (project.project_root, "models", "models.yml")
         write_file(LOGIC_DRIFT_MODELS_YML_REORDERED, *yml_path)
         try:
-            run_dbt(["run", "--select", "logic_table"])
+            results = run_dbt(["run", "--select", "logic_table"])
+            assert get_result_by_name(results, "logic_table").message == "SKIP"
             second_id = self._get_statement_id(adapter, "logic_table")
             assert first_id == second_id
         finally:
@@ -864,14 +866,16 @@ class TestLogicDrift(ConfluentFixtures):
         adapter = project.adapter
         run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table_ignore")
-        run_dbt(["run", "--vars", "{min_id: 5}", "--select", "logic_table_ignore"])
+        results = run_dbt(["run", "--vars", "{min_id: 5}", "--select", "logic_table_ignore"])
+        assert get_result_by_name(results, "logic_table_ignore").message == "SKIP"
         second_id = self._get_statement_id(adapter, "logic_table_ignore")
         assert first_id == second_id
 
-    def test_stopped_statement_with_changed_sql_fails(self, project):
-        """Restart path: stop the INSERT with changed SQL, then run. The terminal statement's
-        SQL is checked before it's deleted, so the run fails with the logic drift message, and
-        the stopped statement is still there (not deleted)."""
+    def test_stopped_statement_with_changed_sql_resubmits(self, project):
+        """Restart path: stop the INSERT, then run with changed SQL. A dead statement isn't
+        checked, so the run re-submits it with the model's current SQL (new statement_id, not
+        terminal, running `order_id > 5`). Then stop it again and run with no vars, so the class
+        is back on `min_id = 0` for the tests after this one."""
         adapter = project.adapter
         run_dbt(["run"])
         first_id = self._get_statement_id(adapter, "logic_table")
@@ -879,18 +883,24 @@ class TestLogicDrift(ConfluentFixtures):
         with adapter.connection_named("stop_stmt"):
             conn = adapter.connections.get_thread_connection()
             conn.handle.stop_statement(insert_name)
-        results = run_dbt(
-            ["run", "--vars", "{min_id: 5}", "--select", "logic_table"], expect_pass=False
+        results, logs = run_dbt_and_capture(
+            ["run", "--vars", "{min_id: 5}", "--select", "logic_table"]
         )
-        result = get_result_by_name(results, "logic_table")
-        assert result is not None, "logic_table not found in results"
-        assert result.status.name == "Error", result.message
-        assert "SQL logic drift detected" in result.message
-        with adapter.connection_named("check_stopped"):
+        assert all(r.status == "success" for r in results)
+        assert "Re-submitting (no full refresh required)." in logs
+        # wait_for_running fails if the statement reaches a terminal phase. Waiting for RUNNING
+        # also leaves it in a stable phase for the stop below.
+        resubmitted = wait_for_running(adapter, insert_name)
+        assert resubmitted.statement_id != first_id
+        assert "order_id > 5" in resubmitted.spec.get("statement", "")
+
+        # Restore: the following tests' plain `run_dbt(["run"])` would report drift against
+        # `order_id > 5`. Stopping it again and running with no vars re-submits `min_id = 0`.
+        with adapter.connection_named("stop_stmt_restore"):
             conn = adapter.connections.get_thread_connection()
-            stmt = conn.handle.get_statement(insert_name)
-        assert stmt.statement_id == first_id
-        assert stmt.phase.is_terminal
+            conn.handle.stop_statement(insert_name)
+        results = run_dbt(["run", "--select", "logic_table"])
+        assert all(r.status == "success" for r in results)
 
     def test_stopped_statement_unchanged_restarts(self, project):
         """Restart path: stop the INSERT with unchanged SQL, then run. The statement is

@@ -193,7 +193,7 @@ class TestAdoptExistingPipeline(ConfluentFixtures):
             conn = adapter.connections.get_thread_connection()
             cursor = conn.handle.cursor(mode=ExecutionMode.STREAMING_QUERY)
             cursor.execute(
-                f"INSERT INTO {adopted} SELECT order_id, price FROM {source}",
+                f"INSERT INTO {adopted} SELECT order_id, price FROM {source} WHERE order_id > 0",
                 statement_name=insert_name,
                 statement_labels=[label],
             )
