@@ -26,6 +26,7 @@ from .function_artifacts import (
     ArtifactDigest,
     ArtifactKey,
     artifact_display_name,
+    check_description_length,
     file_digest,
 )
 
@@ -200,6 +201,7 @@ def validate_function_config(
     if resolved_path:
         package_digest = digest(resolved_path)
         key = ArtifactKey(project, resolved_path.name, package_digest)
+        check_description_length(key)
         artifact_config = ArtifactConfig(
             path=resolved_path,
             name=artifact_display_name(key),

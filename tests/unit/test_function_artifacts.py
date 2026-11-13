@@ -288,17 +288,23 @@ ID_UDF = functions.FunctionConfig(
 
 
 def managed(project: str = PROJECT) -> str:
-    return fa.encode_description(project, "udf.zip", FULL_SHA)
+    return fa.encode_description(key(project, "udf.zip"))
 
 
 def described(udf: functions.FunctionConfig) -> str:
     """The description of the artifact dbt uploads for this package."""
-    return fa.encode_description(*artifact_of(udf).key)
+    return fa.encode_description(artifact_of(udf).key)
+
+
+def description_room() -> int:
+    """Characters a description has left for the project and file name together."""
+    overhead = len(fa.encode_description(key("", "")))
+    return fa.MAX_ARTIFACT_DESCRIPTION_LENGTH - overhead
 
 
 class TestDescription:
     def test_records_that_dbt_manages_the_artifact_and_for_which_project(self):
-        description = fa.encode_description("my_project", "udfs.jar", FULL_SHA)
+        description = fa.encode_description(key("my_project", "udfs.jar"))
         assert json.loads(description) == {
             "managed_by": "dbt-confluent",
             "project": "my_project",
@@ -306,12 +312,23 @@ class TestDescription:
             "sha256": FULL_SHA,
         }
 
-    def test_is_pretty_printed_with_two_space_indentation(self):
-        description = fa.encode_description("my_project", "udfs.jar", FULL_SHA)
-        assert description.splitlines()[1] == '  "managed_by": "dbt-confluent",'
+    def test_is_compact_json_to_save_room_for_the_project_and_file_name(self):
+        description = fa.encode_description(key("my_project", "udfs.jar"))
+        assert "\n" not in description
+        assert description.startswith('{"managed_by":"dbt-confluent","project":')
+
+    def test_a_key_that_fits_the_api_limit_passes(self):
+        at_the_limit = key("p" * (description_room() - len("f.zip")), "f.zip")
+        assert len(fa.encode_description(at_the_limit)) == fa.MAX_ARTIFACT_DESCRIPTION_LENGTH
+        fa.check_description_length(at_the_limit)  # no error
+
+    def test_a_key_over_the_api_limit_is_rejected_not_truncated(self):
+        too_long = key("p" * (description_room() - len("f.zip") + 1), "f.zip")
+        with pytest.raises(CompilationError, match="over the artifact API's limit of 256"):
+            fa.check_description_length(too_long)
 
     def test_the_key_of_an_artifact(self):
-        description = fa.encode_description("my_project", "udfs.jar", FULL_SHA)
+        description = fa.encode_description(key("my_project", "udfs.jar"))
         assert fa.artifact_key(description) == fa.ArtifactKey("my_project", "udfs.jar", FULL_SHA)
 
     @pytest.mark.parametrize(

@@ -59,6 +59,10 @@ _ILLEGAL_PACKAGE_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 # The artifact API's limit on a display name (the driver rejects longer ones).
 MAX_ARTIFACT_NAME_LENGTH = 60
 
+# The artifact API's limit on a description (documented; the server doesn't enforce it). Unlike
+# the name, the description can't be cut to fit: it is the key lookup parses.
+MAX_ARTIFACT_DESCRIPTION_LENGTH = 256
+
 # Seconds the driver allows for transferring the package, passed explicitly so the timeouts
 # that wait on an upload (see `function_artifacts_repo`) are sized from it rather than from a default.
 UPLOAD_TIMEOUT_SECS = 300
@@ -84,16 +88,48 @@ class ArtifactConfig(NamedTuple):
         return ArtifactKey(self.project, self.path.name, self.digest)
 
 
-def encode_description(project: str, file_name: str, sha256: str) -> str:
-    """The description of an artifact dbt uploaded for `project` from the package `file_name`.
+class ArtifactKey(NamedTuple):
+    """What identifies an uploaded package: the project, the file's name and its content.
+
+    Recorded in the artifact's description, so artifacts are found by it and not by their name,
+    whose layout is free to change.
+    """
+
+    project: str
+    file_name: str
+    sha256: str
+
+
+def encode_description(key: ArtifactKey) -> str:
+    """The description of the artifact dbt uploaded for `key`: its project, package file name
+    and full content digest.
 
     Carries everything the name may lose (it can be truncated, and its layout may change), so
-    the description is the stable record of what an artifact is. `sha256` is the full digest.
+    the description is the stable record of what an artifact is.
+
+    Compact JSON, to leave as much of `MAX_ARTIFACT_DESCRIPTION_LENGTH` as possible for the
+    project and file name; see `check_description_length`.
     """
     return json.dumps(
-        {"managed_by": MANAGED_BY, "project": project, "file_name": file_name, "sha256": sha256},
-        indent=2,
+        {"managed_by": MANAGED_BY, **key._asdict()},
+        separators=(",", ":"),
     )
+
+
+def check_description_length(key: ArtifactKey) -> None:
+    """Raise a CompilationError if the description for `key` would exceed the API's limit.
+
+    The description can't be truncated, since lookup and ownership read the key back from it, so
+    a project or file name too long to fit is rejected before upload instead.
+    """
+    length = len(encode_description(key))
+    if length > MAX_ARTIFACT_DESCRIPTION_LENGTH:
+        raise CompilationError(
+            f"Cannot upload package {key.file_name!r}: the artifact description recording its "
+            f"project ({key.project!r}) and file name would be {length} characters, over the "
+            f"artifact API's limit of {MAX_ARTIFACT_DESCRIPTION_LENGTH}. Shorten the file "
+            "name or the dbt project name."
+        )
 
 
 def _managed_description(description: str | None) -> dict | None:
@@ -115,18 +151,6 @@ def artifact_project(description: str | None) -> str | None:
     marker = _managed_description(description)
     project = marker.get("project") if marker else None
     return project if isinstance(project, str) else None
-
-
-class ArtifactKey(NamedTuple):
-    """What identifies an uploaded package: the project, the file's name and its content.
-
-    Recorded in the artifact's description, so artifacts are found by it and not by their name,
-    whose layout is free to change.
-    """
-
-    project: str
-    file_name: str
-    sha256: str
 
 
 def artifact_key(description: str | None) -> ArtifactKey | None:

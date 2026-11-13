@@ -98,7 +98,7 @@ class FunctionArtifactsRepo:
                 file=config.path,
                 content_format=artifact_format.content_format,
                 runtime_language=artifact_format.runtime_language,
-                description=function_artifacts.encode_description(*config.key),
+                description=function_artifacts.encode_description(config.key),
                 upload_timeout=function_artifacts.UPLOAD_TIMEOUT_SECS,
                 upload_retry=UploadRetry(
                     transfer_retries=function_artifacts.UPLOAD_TRANSFER_RETRIES
