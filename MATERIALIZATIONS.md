@@ -1082,7 +1082,9 @@ select order_id, round(price, 4) as price from {{ ref('source') }}
 
 **What's ignored.** Comments (`--`, `//`, `/* */`), whitespace and layout, the case of Flink's
 reserved keywords when they're unquoted (`SELECT`, `FROM`, `WHERE`, `AS`, `COUNT`, `CAST`, ...),
-dbt's query comment, and the INSERT's column list (so reordering the yml columns isn't drift).
+dbt's query comment, and the INSERT's column list, which isn't compared: reordering the yml
+columns isn't drift, and neither is adding or dropping a yml column while the SELECT stays the same
+(dbt's contract check catches that when the statement is next re-submitted).
 Inside a SQL hint (`/*+ ... */`) the same applies, but the hint itself counts: Flink applies it.
 
 **What's still reported**, even when the result wouldn't change: a case change to anything else
@@ -1119,7 +1121,7 @@ each one as above.
 finishes, so there's nothing to compare. Use `--full-refresh` after changing a `table`'s logic.
 
 #### When Drift is Detected
-If drift is detected, the run will fail with a compilation error. Use `--full-refresh` to drop and recreate the table with the new schema or options.
+If drift is detected, the run will fail with a compilation error. Use `--full-refresh` to drop and recreate the table with the new schema or options. For SQL logic drift on a `streaming_table`, see [Query Logic Changes](#query-logic-changes) for the ways out, including one that keeps the table's data.
 
 ### Deterministic Statement Names
 

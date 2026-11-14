@@ -151,25 +151,25 @@ WITH (
 
      has_select_query: true if the model SQL is a SELECT (table,
      streaming_table), false if it's column definitions (streaming_source). #}
-  {% set statement = none %}
+  {% set inspected = none %}
   {% if recoverable and existing_relation and not should_full_refresh() %}
-    {% set statement = adapter.inspect_statement(get_statement_name()) %}
+    {% set inspected = adapter.inspect_statement(get_statement_name()) %}
   {% endif %}
-  {% set action = _classify_action(existing_relation, statement) %}
+  {% set action = _classify_action(existing_relation, inspected) %}
   {% if action == 'create' %}
     {{ _prepare_create(existing_relation) }}
   {% elif action == 'restart' %}
     {{ _prepare_restart(existing_relation, has_select_query) }}
   {% else %}
-    {{ _prepare_skip(existing_relation, has_select_query, statement) }}
+    {{ _prepare_skip(existing_relation, has_select_query, inspected) }}
   {% endif %}
   {{ return(action) }}
 {% endmacro %}
 
 
-{% macro _classify_action(existing_relation, statement) %}
+{% macro _classify_action(existing_relation, inspected) %}
   {# Pure decision: return the action from state already read, no mutations.
-     statement is decide_action's inspect_statement result, or none when the
+     inspected is decide_action's inspect_statement result, or none when the
      materialization isn't recoverable. The on_schema_drift config does not
      affect the action — it only changes which drift the _prepare_* steps
      enforce — so it is validated there, not here. #}
@@ -179,7 +179,7 @@ WITH (
   {% if should_full_refresh() %}
     {{ return('create') }}
   {% endif %}
-  {% if statement and statement.needs_restart %}
+  {% if inspected and inspected.needs_restart %}
     {{ return('restart') }}
   {% endif %}
   {{ return('skip') }}
@@ -229,22 +229,22 @@ WITH (
 {% endmacro %}
 
 
-{% macro _prepare_skip(existing_relation, has_select_query, statement=none) %}
+{% macro _prepare_skip(existing_relation, has_select_query, inspected=none) %}
   {# Side effects for the 'skip' action: enforce schema drift (and, given the
-     statement, SQL logic drift), then log. #}
-  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=false, statement=statement) }}
+     inspected statement, SQL logic drift), then log. #}
+  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=false, inspected=inspected) }}
   {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
 {% endmacro %}
 
 
-{% macro _enforce_schema_drift(existing_relation, has_select_query, restart, statement=none) %}
+{% macro _enforce_schema_drift(existing_relation, has_select_query, restart, inspected=none) %}
   {# Run the drift check appropriate to the on_schema_drift config:
        'fail'   — full check (columns + options + distribution); raises on any drift. Then,
-                  given a statement (the skip path of a recoverable materialization), the SQL
-                  logic check: raises if the statement isn't running the model's current SQL.
-                  Schema first, so a column change (which changes the SQL too) keeps its more
-                  specific error. Not in --empty or --sample runs: they rewrite each
-                  ref()/source() in the compiled SQL, so it can't be compared.
+                  given the inspected statement (the skip path of a recoverable
+                  materialization), the SQL logic check: raises if the statement isn't running
+                  the model's current SQL. Schema first, so a column change (which changes the SQL
+                  too) keeps its more specific error. Not in --empty or --sample runs: they
+                  rewrite each ref()/source() in the compiled SQL, so it can't be compared.
        'ignore' — no check, except the restart path still needs a columns-only check (benign
                   options/distribution drift is fine, but a column mismatch would make the
                   re-submitted INSERT fail at Flink, or write NULL into a table column the model
@@ -253,8 +253,8 @@ WITH (
   {% set on_schema_drift = config.get('on_schema_drift', 'fail') %}
   {% if on_schema_drift == 'fail' %}
     {{ check_for_schema_drift(existing_relation, has_select_query) }}
-    {% if statement and not flags.EMPTY and not invocation_args_dict.get('sample') %}
-      {% do adapter.check_logic_drift(existing_relation, get_statement_name(), statement.sql, sql) %}
+    {% if inspected and not flags.EMPTY and not invocation_args_dict.get('sample') %}
+      {% do adapter.check_logic_drift(existing_relation, get_statement_name(), inspected.sql, sql) %}
     {% endif %}
   {% elif on_schema_drift == 'ignore' %}
     {% if restart %}

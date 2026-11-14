@@ -230,7 +230,12 @@ REGEX_MODEL = "select a from t where p like 'a.b*' or q = 'C:\\' or r in (1, 2)"
             id="columns-reordered",
         ),
         pytest.param(
-            CURRENT.replace("(id, price)", "(`id`, `price`)"), MODEL, True, id="quoted-columns"
+            CURRENT.replace("(id, price)", "(`id`, `price`)").replace(
+                "select id, price\n", "select `id`, `price`\n"
+            ),
+            MODEL,
+            True,
+            id="quoted-columns",
         ),
         pytest.param(
             CURRENT,
@@ -247,6 +252,12 @@ REGEX_MODEL = "select a from t where p like 'a.b*' or q = 'C:\\' or r in (1, 2)"
             id="query-comment-appended",
         ),
         pytest.param(CURRENT, MODEL.replace("'US'", "'EU'"), False, id="changed-literal"),
+        pytest.param(
+            CURRENT.replace("select id, price\n", "select price, id\n"),
+            MODEL,
+            False,
+            id="column-lists-differ",
+        ),
         pytest.param(
             f"INSERT INTO `env`.`lkc`.`tbl` SELECT * FROM ({MODEL})",
             MODEL,

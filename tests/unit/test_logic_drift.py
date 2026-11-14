@@ -104,7 +104,7 @@ def _render_decide_action(
     *,
     config,
     existing,
-    statement,
+    inspected,
     recoverable=True,
     full_refresh=False,
     empty=False,
@@ -113,7 +113,7 @@ def _render_decide_action(
     """Render helpers.sql and run decide_action. Returns (action, adapter mock)."""
     adapter = MagicMock()
     adapter.Relation = ConfluentRelation
-    adapter.inspect_statement.return_value = statement
+    adapter.inspect_statement.return_value = inspected
     adapter.generate_schema_check_temp_name.return_value = "__dbt_tmp_schema_check_my_model"
     # Opaque stand-in: the dry-run path, so check_for_schema_drift creates no temp table.
     adapter.get_columns_from_dry_run.return_value = object()
@@ -160,8 +160,8 @@ MISSING = {"needs_restart": True, "sql": None}
         pytest.param(
             {"invocation_args": {"sample": "3 days"}}, "skip", True, False, id="healthy-sample-run"
         ),
-        pytest.param({"statement": TERMINAL}, "restart", True, False, id="terminal-restarts"),
-        pytest.param({"statement": MISSING}, "restart", True, False, id="missing-restarts"),
+        pytest.param({"inspected": TERMINAL}, "restart", True, False, id="terminal-restarts"),
+        pytest.param({"inspected": MISSING}, "restart", True, False, id="missing-restarts"),
         pytest.param({"existing": None}, "create", False, False, id="no-relation"),
         pytest.param({"full_refresh": True}, "create", False, False, id="full-refresh"),
         pytest.param({"recoverable": False}, "skip", False, False, id="not-recoverable"),
@@ -171,7 +171,7 @@ def test_decide_action_wiring(kwargs, expected_action, looked_up, logic_checked)
     arguments = {
         "config": {"on_schema_drift": "fail"},
         "existing": relation("my_model"),
-        "statement": HEALTHY,
+        "inspected": HEALTHY,
         **kwargs,
     }
 

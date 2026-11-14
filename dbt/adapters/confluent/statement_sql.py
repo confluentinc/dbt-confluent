@@ -107,10 +107,12 @@ RELATION = rf"{NAME}(?: \. {NAME})*"
 COLUMNS = rf"{NAME}(?: , {NAME})*"
 # Each shape matches a whole normalized statement, tokens joined by single spaces; {sql} is where
 # the normalized model SQL goes. The relation and column lists come from the model's config and
-# yml, so any names match there (a yml column reorder isn't a logic change).
+# yml, so any names match there (a yml column reorder isn't a logic change), but the two column
+# lists must be the same, as dbt renders them: different lists would move values between columns.
 INSERT_SHAPES = (
     # 0.5.0+: INSERT INTO <t> (<cols>) select <cols> from ( <sql> ) as model_subq
-    rf"INSERT INTO {RELATION} \( {COLUMNS} \) SELECT {COLUMNS} FROM \( {{sql}} \) AS model_subq",
+    rf"INSERT INTO {RELATION} \( (?P<columns>{COLUMNS}) \) SELECT (?P=columns) FROM \( {{sql}} \)"
+    r" AS model_subq",
     # Before 0.5.0: INSERT INTO <t> <sql>
     rf"INSERT INTO {RELATION} {{sql}}",
 )
