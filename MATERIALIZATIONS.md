@@ -313,7 +313,7 @@ Adoption is purely name-based: the adapter does not track which tool created a r
 - **Schema should match.** Under the default `on_schema_drift='fail'`, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT before adopting; any mismatch fails the run. With `config(on_schema_drift='ignore')`, enforcement depends on the adoption path:
     - **Healthy statement → skip:** the running statement is left untouched and nothing is re-submitted, so **no drift is enforced at all, including columns and SQL logic.** A mismatch is silently tolerated; you must align the model to the existing schema yourself.
     - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs, and so does dbt's contract check of the SELECT against the yml `columns` (the INSERT names only the yml columns, so Flink would fill any other table column with NULL); benign options/distribution drift is relaxed.
-- **The statement should run the model's SQL.** Under the default `on_schema_drift='fail'`, a healthy statement must execute the model's compiled SQL (see [Query Logic Changes](#query-logic-changes)); a statement written by hand rarely matches dbt's rendering, so adopting it fails the run. Set `on_schema_drift='ignore'` to adopt it as it is.
+- **The statement should run the model's SQL.** Under the default `on_schema_drift='fail'`, a healthy statement must execute the model's compiled SQL (see [Query Logic Changes](#query-logic-changes)); a statement written by hand rarely matches dbt's rendering, so adopting it fails the run. For example, `ref()` renders a fully qualified, back-quoted name such as `` `env`.`cluster`.`orders` ``, where a hand-written INSERT usually says `orders`. Set `on_schema_drift='ignore'` to adopt it as it is.
 - **The yml lists every column, with its type.** Before re-submitting a missing or terminal statement, dbt runs its contract check, whatever `on_schema_drift` is set to: the model's yml `columns` must list every column the SELECT returns, with its `data_type`. If any is missing, the restart fails with dbt's contract error, and nothing writes to the table until the yml is fixed. A healthy statement is skipped without the check.
 - **Same `name_prefix`.** The prefix is prepended to `alias` and `statement_name` too, so adoption only finds resources created with the same prefix (or none). A target with a different prefix creates its own copies instead.
 - **Names are sanitized.** The `statement_name` you configure is normalized to Flink's constraints (see [Flink Naming Constraints](#flink-naming-constraints)) before lookup, so it must match the existing statement's actual name. Statements already named within those constraints (lowercase alphanumeric + hyphens) match verbatim.
@@ -1091,6 +1091,10 @@ Inside a SQL hint (`/*+ ... */`) the same applies, but the hint itself counts: F
 reordering; an optional `AS` or extra parentheses; a different number format; and any change inside
 a string literal or a back-quoted name. A model whose compiled SQL differs on every run (for
 example, it uses `run_started_at`) is reported every time; set `on_schema_drift='ignore'` on it.
+So is a model that compiles differently without being edited: after upgrading dbt, dbt-confluent
+or a package the model uses (for example, if how `ref()` renders changes), or in a `--defer` run
+where a `ref()` resolves to another environment's relation than the one the running statement
+reads.
 
 **What isn't checked.** `on_schema_drift='ignore'` models; `--empty` and `--sample` runs (they
 rewrite the model's `ref()`s and `source()`s); and a missing or terminal statement, which is
