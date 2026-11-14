@@ -150,14 +150,17 @@ def get_result_by_name(results, name):
 
 
 def assert_drift_error(results, name):
-    """Assert that a specific result failed with a drift detection error."""
+    """Assert that a specific result failed with a schema-drift error.
+
+    Matches "schema drift detected", so a "SQL logic drift detected" error doesn't satisfy it.
+    """
     result = get_result_by_name(results, name)
     assert result is not None, f"{name} not found in results"
     assert result.status.name == "Error", (
         f"{name} expected status 'Error' but got '{result.status.name}'"
     )
-    assert "drift detected" in result.message.lower(), (
-        f"{name} error was not a drift error: {result.message}"
+    assert "schema drift detected" in result.message.lower(), (
+        f"{name} error was not a schema drift error: {result.message}"
     )
 
 

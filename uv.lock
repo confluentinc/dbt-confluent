@@ -323,6 +323,7 @@ dependencies = [
     { name = "dbt-common" },
     { name = "dbt-core" },
     { name = "httpx" },
+    { name = "sqlparse" },
 ]
 
 [package.dev-dependencies]
@@ -361,6 +362,7 @@ requires-dist = [
     { name = "dbt-common", specifier = "~=1.12" },
     { name = "dbt-core", specifier = "~=1.11.0" },
     { name = "httpx", specifier = ">=0.23.0,<0.29.0" },
+    { name = "sqlparse", specifier = ">=0.5.5,<0.6" },
 ]
 
 [package.metadata.requires-dev]

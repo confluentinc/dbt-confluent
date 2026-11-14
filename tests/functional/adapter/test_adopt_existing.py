@@ -6,10 +6,10 @@ created outside dbt (e.g. by a previous tool or a manual deployment):
   - `alias` maps the model to an existing table name.
   - `statement_name` maps the model to an existing statement name.
 
-Once mapped, dbt manages their lifecycle without recreating them: a healthy
-(any non-terminal phase) statement is adopted as-is (skip), and a dead/missing
-one is re-submitted under the same adopted name (restart) — the table is never
-dropped.
+Once mapped, dbt manages their lifecycle without recreating them: a healthy (any non-terminal
+phase) statement is adopted as-is (skip) if it runs the model's SQL; otherwise the run fails with
+SQL logic drift under the default `on_schema_drift='fail'`. A dead/missing statement is
+re-submitted under the same adopted name (restart) — the table is never dropped.
 
 Adoption is purely name-based: the adapter looks resources up by name and does
 not track which tool created them. This test plants the INSERT out of band (raw
@@ -23,6 +23,7 @@ from confluent_sql.execution_mode import ExecutionMode
 
 from dbt.tests.util import relation_from_name, run_dbt, set_model_file
 from tests.functional.adapter._helpers import (
+    get_result_by_name,
     wait_for_absent,
     wait_for_running,
 )
@@ -61,6 +62,17 @@ ADOPTED_STREAMING_TABLE = """
     alias='adopted_orders',
     statement_name='adopted-orders-insert',
     with={'changelog.mode': 'append'},
+) }}
+select order_id, price from {{ ref('my_streaming_source') }}
+"""
+
+ADOPTED_STREAMING_TABLE_IGNORE = """
+{{ config(
+    materialized='streaming_table',
+    alias='adopted_orders',
+    statement_name='adopted-orders-insert',
+    with={'changelog.mode': 'append'},
+    on_schema_drift='ignore',
 ) }}
 select order_id, price from {{ ref('my_streaming_source') }}
 """
@@ -181,14 +193,27 @@ class TestAdoptExistingPipeline(ConfluentFixtures):
             conn = adapter.connections.get_thread_connection()
             cursor = conn.handle.cursor(mode=ExecutionMode.STREAMING_QUERY)
             cursor.execute(
-                f"INSERT INTO {adopted} SELECT order_id, price FROM {source}",
+                f"INSERT INTO {adopted} SELECT order_id, price FROM {source} WHERE order_id > 0",
                 statement_name=insert_name,
                 statement_labels=[label],
             )
         planted_id = wait_for_running(adapter, insert_name).statement_id
 
-        # Adopt the healthy external statement: re-run must skip and leave it
-        # untouched (same statement_id), and must not recreate the table.
+        # The planted INSERT doesn't match dbt's rendering, so the adopt step fails with SQL
+        # logic drift and leaves the planted statement untouched (same statement_id).
+        results = run_dbt(["run"], expect_pass=False)
+        result = get_result_by_name(results, "adopted_streaming_table")
+        assert result is not None, "adopted_streaming_table not found in results"
+        assert result.status.name == "Error", result.message
+        assert "SQL logic drift detected" in result.message
+        drift_stmt = self._get_statement(adapter, insert_name)
+        assert drift_stmt.statement_id == planted_id
+
+        # Switch the model to on_schema_drift='ignore': re-run must adopt the healthy external
+        # statement (skip and leave it untouched, same statement_id), and must not recreate the
+        # table.
+        model = relation_from_name(adapter, "adopted_streaming_table")
+        set_model_file(project, model, ADOPTED_STREAMING_TABLE_IGNORE)
         results = run_dbt(["run"])
         assert all(r.status == "success" for r in results)
         adopted_stmt = self._get_statement(adapter, insert_name)
