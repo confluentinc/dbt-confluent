@@ -1,8 +1,8 @@
 """Unit tests for ConfluentAdapter.statement_needs_restart.
 
-This is the decision input for the streaming-statement recovery path in
-`decide_action` (Jinja): True means re-submit the long-running INSERT.
-Terminal phases and a missing statement (404, or 403 under pool-scoped
+`statement_needs_restart` is kept as a wrapper around `inspect_statement` for macros that call it;
+`decide_action` (Jinja) uses `inspect_statement` directly. True means re-submit the long-running
+INSERT. Terminal phases and a missing statement (404, or 403 under pool-scoped
 roles, which return 403 instead of 404 for a missing / cross-pool
 statement) return True; healthy phases — including in-flight transitions —
 return False.

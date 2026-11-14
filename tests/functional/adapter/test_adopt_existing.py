@@ -6,10 +6,10 @@ created outside dbt (e.g. by a previous tool or a manual deployment):
   - `alias` maps the model to an existing table name.
   - `statement_name` maps the model to an existing statement name.
 
-Once mapped, dbt manages their lifecycle without recreating them: a healthy
-(any non-terminal phase) statement is adopted as-is (skip), and a dead/missing
-one is re-submitted under the same adopted name (restart) — the table is never
-dropped.
+Once mapped, dbt manages their lifecycle without recreating them: a healthy (any non-terminal
+phase) statement is adopted as-is (skip) if it runs the model's SQL; otherwise the run fails with
+SQL logic drift under the default `on_schema_drift='fail'`. A dead/missing statement is
+re-submitted under the same adopted name (restart) — the table is never dropped.
 
 Adoption is purely name-based: the adapter looks resources up by name and does
 not track which tool created them. This test plants the INSERT out of band (raw

@@ -1125,8 +1125,11 @@ select order_id, round(price, 4) as price from {{ ref('source') }}
 
 **When drift is reported**, decide whether the running statement or the model is right:
 
-- To apply the model's SQL, stop or delete the statement and re-run. The table and its topic are
-  kept, but the statement likely re-reads its sources from the beginning.
+- To apply the model's SQL, stop or delete the statement, wait until it's stopped or gone (a
+  statement that's still stopping counts as running, so the run reports drift again), and re-run.
+  The table and its topic are kept, but the statement likely re-reads its sources from the
+  beginning, so the table can end up with rows from both the old and the new SQL (duplicates, for
+  an append table).
 - To rebuild from scratch, run with `--full-refresh`. This deletes the topic and its data.
 - To keep the statement as it is, set `on_schema_drift='ignore'` on the model. This also turns off
   its column and options drift checks.

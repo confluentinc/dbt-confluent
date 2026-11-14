@@ -792,9 +792,10 @@ models:
 
 class TestLogicDrift(ConfluentFixtures):
     """SQL logic drift detection (#119): a streaming_table whose compiled SQL differs from what
-    its running statement executes is reported as drift on the skip path, and on the restart path
-    when the dead statement's SQL can still be read. The comparison ignores dbt's query comment,
-    the INSERT's column list, and whitespace around the SQL."""
+    its running statement executes is reported as drift on the skip path. Both sides are normalized
+    first (comments, whitespace, the case of reserved keywords), and dbt's query comment and the
+    INSERT's column list are ignored. A dead statement (stopped or missing) takes the restart path
+    and is re-submitted with the model's current SQL, unchecked."""
 
     NAME = "logicdrift"
 
@@ -937,3 +938,4 @@ class TestLogicDrift(ConfluentFixtures):
         assert all(r.status == "success" for r in results)
         second_id = self._get_statement_id(adapter, "logic_table")
         assert second_id != first_id
+        wait_for_running(adapter, insert_name)

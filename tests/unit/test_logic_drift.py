@@ -35,7 +35,10 @@ class TestCheckLogicDrift:
         assert "The running statement's SQL:" in message and "amount > 100" in message
         assert "The model's current SQL:" in message and "and x = 1" in message
         assert "--full-refresh" in message
-        assert "stop or delete the statement and re-run" in message
+        assert (
+            "stop or delete the statement, wait until it's stopped or gone, and re-run" in message
+        )
+        assert "rows from both the old and the new SQL" in message
         assert "on_schema_drift='ignore'" not in message
 
     def test_long_sql_is_cut(self):

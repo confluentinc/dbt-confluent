@@ -217,6 +217,10 @@ CHANGES = {  # id -> (stored statement, model SQL); runs_model_sql must be False
         _new_shape("select 'http://a' from t"),
         "select 'http://b' from t",
     ),
+    "dollar_quote_hides_change": (
+        _new_shape("select $a$, 'cost $a$', '-- z' as b from t"),
+        "select $a$, 'cost $a$', '-- z' as c from t",
+    ),
 }
 
 
@@ -326,12 +330,16 @@ def test_sqlparse_lexing_assumptions():
     assert string_values[0] == "'C:\\'"
     assert string_values[1] == "'x'"
 
-    assert len(FLINK_SQL_REGEX) == len(sqlparse.keywords.SQL_REGEX)
+    assert len(FLINK_SQL_REGEX) == len(sqlparse.keywords.SQL_REGEX) - 1
     assert FLINK_SQL_REGEX[0] == (r"//.*?(\r\n|\r|\n|$)", T.Comment.Single)
     for regex, _ in FLINK_SQL_REGEX:
-        assert r"|\'" not in regex and r"|\"" not in regex and r"[^\\]" not in regex
+        assert r"|\\'" not in regex and r'|\\"' not in regex and r"[^\\]" not in regex
+    assert any(r"|\\'" in r for r, _ in sqlparse.keywords.SQL_REGEX)
+    assert any(r'|\\"' in r for r, _ in sqlparse.keywords.SQL_REGEX)
+    assert r"((?<![\w\"\$])\$(?:[_A-ZÀ-Ü]\w*)?\$)[\s\S]*?\1" not in [r for r, _ in FLINK_SQL_REGEX]
 
     # Shared default lexer unchanged
-    default_tokens = list(sqlparse.lexer.tokenize("'C:\\'"))
+    default_tokens = list(sqlparse.lexer.tokenize("select 'C:\\' as a, 'x' as b"))
     default_strings = [val for ttype, val in default_tokens if ttype in sqlparse.tokens.String]
     assert len(default_strings) == 1
+    assert default_strings[0] == "'C:\\' as a, '"

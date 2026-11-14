@@ -1398,9 +1398,10 @@ class ConfluentAdapter(SQLAdapter):
             "  - Run with --full-refresh to recreate the table and its statement. This permanently "
             "deletes the table's Kafka topic and its data, so models that read from this table should "
             "be rebuilt too.\n"
-            "  - Or stop or delete the statement and re-run, which re-submits it with the model's SQL. "
-            "The table and its topic are kept, but the statement likely re-reads its sources from the "
-            "beginning."
+            "  - Or stop or delete the statement, wait until it's stopped or gone, and re-run, which "
+            "re-submits it with the model's SQL. The table and its topic are kept, but the statement "
+            "likely re-reads its sources from the beginning, so the table can end up with rows from "
+            "both the old and the new SQL (duplicates, for an append table)."
         )
 
     @available

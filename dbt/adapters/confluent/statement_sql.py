@@ -77,10 +77,11 @@ RESERVED_KEYWORDS = frozenset(
 # fmt: on
 # sqlparse's default rules, adjusted to Flink's lexer (probes 356ad1c0, eb9c2bec): `//` starts a
 # comment to the end of the line, a backslash isn't an escape inside quotes, and `[...]` isn't a
-# bracketed name (Flink uses brackets only for array and map access). Without this, `'C:\'`
-# followed by another quote would swallow the SQL after it into a string, and a `/*` inside a `//`
-# comment would swallow the SQL up to the next `*/`, hiding changes there. A private Lexer, so
-# sqlparse's shared default instance (dbt-core uses it) is untouched.
+# bracketed name (Flink uses brackets only for array and map access), nor is `$tag$...$tag$` a
+# dollar-quoted string (a Postgres form Flink doesn't have). Without this, `'C:\'` followed by
+# another quote would swallow the SQL after it into a string, and a `/*` inside a `//` comment
+# would swallow the SQL up to the next `*/`, hiding changes there. A private Lexer, so sqlparse's
+# shared default instance (dbt-core uses it) is untouched.
 FLINK_SQL_REGEX = [
     (r"//.*?(\r\n|\r|\n|$)", T.Comment.Single),
 ] + [
@@ -90,7 +91,11 @@ FLINK_SQL_REGEX = [
     if regex in (r'"(""|\\"|[^"])*"', r'(""|".*?[^\\]")')
     else (regex, ttype)
     for regex, ttype in keywords.SQL_REGEX
-    if regex != r"(?<![\w\])])(\[[^\]\[]+\])"
+    if regex
+    not in (
+        r"(?<![\w\])])(\[[^\]\[]+\])",
+        r"((?<![\w\"\$])\$(?:[_A-ZÀ-Ü]\w*)?\$)[\s\S]*?\1",
+    )
 ]
 LEXER = Lexer()
 LEXER.default_initialization()
