@@ -745,7 +745,8 @@ LOGIC_TABLE = """
     materialized='streaming_table',
     with={'changelog.mode': 'append'},
 ) }}
-select order_id, price from {{ ref('my_streaming_source') }} where order_id > {{ var('min_id', 0) }}
+select order_id, price from {{ ref('my_streaming_source') }}
+where order_id > {{ var('min_id', 0) }}
 """
 
 LOGIC_TABLE_IGNORE = """
@@ -754,7 +755,8 @@ LOGIC_TABLE_IGNORE = """
     with={'changelog.mode': 'append'},
     on_schema_drift='ignore',
 ) }}
-select order_id, price from {{ ref('my_streaming_source') }} where order_id > {{ var('min_id', 0) }}
+select order_id, price from {{ ref('my_streaming_source') }}
+where order_id > {{ var('min_id', 0) }}
 """
 
 LOGIC_DRIFT_MODELS_YML = """

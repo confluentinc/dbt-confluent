@@ -336,7 +336,8 @@ def test_sqlparse_lexing_assumptions():
         assert r"|\\'" not in regex and r'|\\"' not in regex and r"[^\\]" not in regex
     assert any(r"|\\'" in r for r, _ in sqlparse.keywords.SQL_REGEX)
     assert any(r'|\\"' in r for r, _ in sqlparse.keywords.SQL_REGEX)
-    assert r"((?<![\w\"\$])\$(?:[_A-ZÀ-Ü]\w*)?\$)[\s\S]*?\1" not in [r for r, _ in FLINK_SQL_REGEX]
+    dollar_rule = r"((?<![\w\"\$])\$(?:[_A-ZÀ-Ü]\w*)?\$)[\s\S]*?\1"
+    assert dollar_rule not in [r for r, _ in FLINK_SQL_REGEX]
 
     # Shared default lexer unchanged
     default_tokens = list(sqlparse.lexer.tokenize("select 'C:\\' as a, 'x' as b"))

@@ -488,9 +488,9 @@ class ConfluentAdapter(SQLAdapter):
         """Return True if the long-running statement should be re-submitted.
 
         True when the statement is missing (404, or 403 under pool-scoped roles — see
-        _handle_pool_scoped_403) or in a terminal phase (COMPLETED, STOPPED, FAILED, DELETED). False
-        for healthy phases, including in-flight transitions (PENDING, RUNNING, DEGRADED, STOPPING,
-        DELETING) which we must not interrupt. No side effects.
+        _handle_pool_scoped_403) or in a terminal phase (COMPLETED, STOPPED, FAILED,
+        DELETED). False for healthy phases, including in-flight transitions (PENDING, RUNNING,
+        DEGRADED, STOPPING, DELETING) which we must not interrupt. No side effects.
 
         Kept for macros that call it; dbt-confluent's own `decide_action` uses inspect_statement,
         which returns the same answer and the statement's SQL from one lookup.
@@ -1389,19 +1389,20 @@ class ConfluentAdapter(SQLAdapter):
             return textwrap.indent(text, "    ")
 
         raise CompilationError(
-            f"SQL logic drift detected for {existing_relation}: statement '{statement_name}' isn't "
-            "running the model's current SQL. Comments, whitespace and the case of reserved keywords "
-            "are ignored when comparing.\n\n"
+            f"SQL logic drift detected for {existing_relation}: statement '{statement_name}' "
+            f"isn't running the model's current SQL. Comments, whitespace and the case of "
+            "reserved keywords are ignored when comparing.\n\n"
             f"The running statement's SQL:\n{shown(statement_sql)}\n\n"
             f"The model's current SQL:\n{shown(model_sql)}\n\n"
             "A running streaming_table statement can't be changed in place. To resolve, either:\n"
-            "  - Run with --full-refresh to recreate the table and its statement. This permanently "
-            "deletes the table's Kafka topic and its data, so models that read from this table should "
-            "be rebuilt too.\n"
-            "  - Or stop or delete the statement, wait until it's stopped or gone, and re-run, which "
-            "re-submits it with the model's SQL. The table and its topic are kept, but the statement "
-            "likely re-reads its sources from the beginning, so the table can end up with rows from "
-            "both the old and the new SQL (duplicates, for an append table)."
+            "  - Run with --full-refresh to recreate the table and its statement. This "
+            "permanently deletes the table's Kafka topic and its data, so models that read "
+            "from this table should be rebuilt too.\n"
+            "  - Or stop or delete the statement, wait until it's stopped or gone, and "
+            "re-run, which re-submits it with the model's SQL. The table and its topic are "
+            "kept, but the statement likely re-reads its sources from the beginning, so the "
+            "table can end up with rows from both the old and the new SQL (duplicates, for "
+            "an append table)."
         )
 
     @available
