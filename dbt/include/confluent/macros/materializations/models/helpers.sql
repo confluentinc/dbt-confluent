@@ -145,33 +145,41 @@ WITH (
      `streaming_table` is recoverable today; other materializations either
      don't have a long-running statement to restart (`table`, `view`) or
      can't be safely restarted without dropping the table (`streaming_source`).
+     `recoverable` also opts into the SQL logic check: the statement is looked up
+     once, here, and `_enforce_schema_drift` compares a healthy statement's SQL
+     with the model's.
 
      has_select_query: true if the model SQL is a SELECT (table,
      streaming_table), false if it's column definitions (streaming_source). #}
-  {% set action = _classify_action(existing_relation, recoverable) %}
+  {% set inspected = none %}
+  {% if recoverable and existing_relation and not should_full_refresh() %}
+    {% set inspected = adapter.inspect_statement(get_statement_name()) %}
+  {% endif %}
+  {% set action = _classify_action(existing_relation, inspected) %}
   {% if action == 'create' %}
     {{ _prepare_create(existing_relation) }}
   {% elif action == 'restart' %}
     {{ _prepare_restart(existing_relation, has_select_query) }}
   {% else %}
-    {{ _prepare_skip(existing_relation, has_select_query) }}
+    {{ _prepare_skip(existing_relation, has_select_query, inspected) }}
   {% endif %}
   {{ return(action) }}
 {% endmacro %}
 
 
-{% macro _classify_action(existing_relation, recoverable) %}
-  {# Pure decision: read state and return the action, no mutations
-     (statement_needs_restart is a read-only API call). The on_schema_drift
-     config does not affect the action — it only changes which drift the
-     _prepare_* steps enforce — so it is validated there, not here. #}
+{% macro _classify_action(existing_relation, inspected) %}
+  {# Pure decision: return the action from state already read, no mutations.
+     inspected is decide_action's inspect_statement result, or none when the
+     materialization isn't recoverable. The on_schema_drift config does not
+     affect the action — it only changes which drift the _prepare_* steps
+     enforce — so it is validated there, not here. #}
   {% if not existing_relation %}
     {{ return('create') }}
   {% endif %}
   {% if should_full_refresh() %}
     {{ return('create') }}
   {% endif %}
-  {% if recoverable and adapter.statement_needs_restart(get_statement_name()) %}
+  {% if inspected and inspected.needs_restart %}
     {{ return('restart') }}
   {% endif %}
   {{ return('skip') }}
@@ -204,10 +212,16 @@ WITH (
      so the caller can re-submit it. Re-submitting INSERT against the existing table is only safe
      if the columns still match: the INSERT names the yml columns, so Flink rejects a column the
      table lacks, and fills a table column the model no longer selects with NULL, without an
-     error. So we enforce a columns check even under on_schema_drift='ignore'. #}
+     error. So we enforce a columns check even under on_schema_drift='ignore'.
+
+     The restart path deliberately runs no SQL logic check: a dead statement, terminal or
+     missing, is re-submitted with the model's current SQL. Fixing a FAILED statement's SQL, or
+     stopping a statement to change it, must still recover without --full-refresh, and deleting
+     the statement would get around a check here anyway. The re-submitted INSERT has no starting
+     offset (existing behavior), so it likely re-reads its sources from the beginning. #}
   {{ _enforce_schema_drift(existing_relation, has_select_query, restart=true) }}
   {{ log("Statement for " ~ existing_relation ~ " is missing or in a terminal phase. Re-submitting (no full refresh required).", info=True) }}
-  {# expect_exists=false: _classify_action already inspected this statement (and
+  {# expect_exists=false: decide_action already inspected this statement (and
      warned if a pool-scoped 403 surfaced there), so a 403 on this delete is a
      duplicate — suppress its loud warning. A terminal statement still exists and
      deletes normally. #}
@@ -215,24 +229,33 @@ WITH (
 {% endmacro %}
 
 
-{% macro _prepare_skip(existing_relation, has_select_query) %}
-  {# Side effects for the 'skip' action: enforce schema drift, then log. #}
-  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=false) }}
+{% macro _prepare_skip(existing_relation, has_select_query, inspected=none) %}
+  {# Side effects for the 'skip' action: enforce schema drift (and, given the
+     inspected statement, SQL logic drift), then log. #}
+  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=false, inspected=inspected) }}
   {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
 {% endmacro %}
 
 
-{% macro _enforce_schema_drift(existing_relation, has_select_query, restart) %}
+{% macro _enforce_schema_drift(existing_relation, has_select_query, restart, inspected=none) %}
   {# Run the drift check appropriate to the on_schema_drift config:
-       'fail'   — full check (columns + options + distribution); raises on any drift.
+       'fail'   — full check (columns + options + distribution); raises on any drift. Then,
+                  given the inspected statement (the skip path of a recoverable
+                  materialization), the SQL logic check: raises if the statement isn't running
+                  the model's current SQL. Schema first, so a column change (which changes the SQL
+                  too) keeps its more specific error. Not in --empty or --sample runs: they
+                  rewrite each ref()/source() in the compiled SQL, so it can't be compared.
        'ignore' — no check, except the restart path still needs a columns-only check (benign
                   options/distribution drift is fine, but a column mismatch would make the
                   re-submitted INSERT fail at Flink, or write NULL into a table column the model
-                  no longer selects).
+                  no longer selects). No logic check.
      Validated here, the single place on_schema_drift is consumed. #}
   {% set on_schema_drift = config.get('on_schema_drift', 'fail') %}
   {% if on_schema_drift == 'fail' %}
     {{ check_for_schema_drift(existing_relation, has_select_query) }}
+    {% if inspected and not flags.EMPTY and not invocation_args_dict.get('sample') %}
+      {% do adapter.check_logic_drift(existing_relation, get_statement_name(), inspected.sql, sql) %}
+    {% endif %}
   {% elif on_schema_drift == 'ignore' %}
     {% if restart %}
       {{ check_for_schema_drift(existing_relation, has_select_query, enforce='columns') }}
