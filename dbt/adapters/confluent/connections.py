@@ -10,6 +10,9 @@ from typing import TYPE_CHECKING, Any, Literal
 import confluent_sql
 from confluent_sql import DEFAULT_TIMEOUTS, HIDDEN_LABEL, Cursor
 from confluent_sql.exceptions import (
+    AmbiguousClusterError,
+    AmbiguousOrganizationError,
+    ClusterMismatchError,
     ComputePoolExhaustedError,
     OperationalError,
     StatementNotFoundError,
@@ -37,6 +40,7 @@ from dbt.adapters.events.types import (
     SQLQuery,
     SQLQueryStatus,
 )
+from dbt.adapters.exceptions import FailedToConnectError
 from dbt.adapters.sql import SQLConnectionManager
 
 from .__version__ import version
@@ -63,8 +67,11 @@ class ConfluentCredentials(Credentials):
     profiles.yml to connect to new adapter
     """
 
-    # Add credentials members here, like:
-    organization_id: str
+    # Optional with `auth: oauth` or a Global API key, where the driver infers it (and, if it is
+    # supplied, verifies the credential can reach that organization). Required with any other
+    # API key, which can't discover it: see `_validate_inferable`. An empty string (what
+    # `dbt init` writes for a blank prompt) means omitted.
+    organization_id: str | None = None
     # Authentication mode passed straight through to confluent_sql.connect()'s own `auth`
     # parameter. "api_key" (default) uses the key pairs below; "oauth" opens a browser for
     # interactive Confluent Cloud sign-in instead, and no key pair should be configured.
@@ -90,6 +97,9 @@ class ConfluentCredentials(Credentials):
     # Optional ("poolless"): when omitted, Confluent Cloud Flink runs statements
     # in the environment+region default compute pool (provisioning if necessary).
     compute_pool_id: str | None = None
+    # Optional with `auth: oauth` or a Global API key: the driver infers whichever is omitted
+    # from the Kafka cluster named by `dbname` (or `database_kafka_cluster_id`), and checks the
+    # one that is supplied against it. Not derivable for private networking: pass `endpoint`.
     cloud_provider: str | None = None
     cloud_region: str | None = None
     endpoint: str | None = None
@@ -127,32 +137,132 @@ class ConfluentCredentials(Credentials):
         """
         if self.endpoint:
             return self.endpoint
-        else:
-            return f"{self.cloud_provider}-{self.cloud_region}-{self.organization_id}"
+        # The organization and cloud settings may all be omitted, to be inferred by the driver,
+        # which needs the network (or a browser login): no business of a telemetry hash computed
+        # before any connection exists. So when the organization is omitted, fall back to the
+        # environment id, which is globally unique (`environment_id` is an alias of `database`:
+        # see `_ALIASES`), and leave out whatever else is missing.
+        account = self.organization_id or self.database
+        return "-".join(part for part in (self.cloud_provider, self.cloud_region, account) if part)
 
     def _connection_keys(self):
         """
         List of keys to display in the `dbt debug` output.
+
+        Whichever of the organization and the cloud settings are omitted (to be inferred) are
+        left out, rather than shown as `None`.
         """
-        keys = (
-            "organization_id",
-            "database",
-            "schema",
-            "compute_pool_id",
-            "name_prefix",
-            "auth",
-        )
+        keys = ["database", "schema", "compute_pool_id", "name_prefix", "auth"]
+        if self.organization_id:
+            keys.insert(0, "organization_id")
         if self.endpoint:
-            return (*keys, "endpoint")
+            keys.append("endpoint")
         else:
-            return (*keys, "cloud_provider", "cloud_region")
+            keys.extend(k for k in ("cloud_provider", "cloud_region") if getattr(self, k))
+        return tuple(keys)
+
+    @property
+    def can_infer_from_control_plane(self) -> bool:
+        """Whether the driver can look up the organization and cloud settings itself: only
+        with `auth: oauth` or a Global API key, the credentials that reach the control plane
+        organization and cluster lookups. (A `cloud_*` or `tableflow_*` key can't.)"""
+        return self.auth == "oauth" or bool(self.global_api_key or self.global_api_secret)
 
     def __post_init__(self):
-        """Reject an invalid `name_prefix` when the profile loads."""
+        """Reject an invalid `name_prefix`, or omissions the driver can't make up for, when the
+        profile loads."""
         try:
             validate_name_prefix(self.name_prefix)
         except ValueError as e:
             raise DbtRuntimeError(str(e)) from e
+        self._validate_inferable()
+
+    def _validate_inferable(self) -> None:
+        """With only a Flink-region or scoped key (not `auth: oauth` or a Global API key) nothing
+        can be inferred, so the organization, and the cloud settings or an `endpoint`, must be
+        in the profile. The driver would refuse these too, but only at connect time with a
+        message that doesn't name profile fields. A profile with no credentials at all is left
+        for the driver to reject: that's the real problem to report."""
+        any_key = any(
+            (
+                self.flink_api_key,
+                self.flink_api_secret,
+                self.cloud_api_key,
+                self.cloud_api_secret,
+                self.tableflow_api_key,
+                self.tableflow_api_secret,
+            )
+        )
+        if self.can_infer_from_control_plane or not any_key:
+            return
+        if not self.organization_id:
+            raise DbtRuntimeError(
+                "`organization_id` is required in your profile with a Flink-region API key: "
+                "only `auth: oauth` or a Global API key (`global_api_key`/`global_api_secret`) "
+                "lets it be inferred."
+            )
+        if not self.endpoint and not (self.cloud_provider and self.cloud_region):
+            raise DbtRuntimeError(
+                "Set `cloud_provider` and `cloud_region` (or `endpoint`) in your profile: with a "
+                "Flink-region API key they can't be inferred. Only `auth: oauth` or a Global API "
+                "key (`global_api_key`/`global_api_secret`) lets them be inferred from the "
+                "Kafka cluster named by `dbname`."
+            )
+
+
+# `ClusterMismatchError` names the driver's parameters; these are the profile fields behind them.
+_PROFILE_FIELD_FOR_DRIVER_PARAMETER = {"database": "dbname"}
+
+
+def _mismatch_remedies(parameters: list[str]) -> str:
+    """How to fix a `ClusterMismatchError`, which depends on what mismatched: omitting a cloud
+    setting takes the cluster's value, but a `dbname` that doesn't match can only be corrected
+    (the cluster was picked by `database_kafka_cluster_id`, so the id or the name is wrong)."""
+    remedies = []
+    cloud_settings = [p for p in parameters if p in ("cloud_provider", "cloud_region")]
+    if cloud_settings:
+        omit = " / ".join(f"`{p}`" for p in cloud_settings)
+        remedies.append(f"correct or omit {omit} to use the cluster's")
+    if "database" in parameters:
+        remedies.append(
+            "make `dbname` the name of the cluster `database_kafka_cluster_id` selects, "
+            "or correct that id"
+        )
+    return "To fix this: " + "; ".join(remedies) + "."
+
+
+def _explain_connect_failure(e: Exception) -> FailedToConnectError | None:
+    """Re-word the driver's inference failures from `connect()` as guidance naming the profile
+    fields to set, or None if `e` isn't one of them. The driver's own messages speak of
+    `connect()` arguments, which a dbt user never sees."""
+    if isinstance(e, AmbiguousOrganizationError):
+        candidates = "\n".join(
+            f"  {org_id}" + (f" ({name})" if name else "") for org_id, name in e.organizations
+        )
+        return FailedToConnectError(
+            "Your credentials can reach several Confluent Cloud organizations, so "
+            "`organization_id` must be set in your profile to choose one:\n" + candidates
+        )
+    if isinstance(e, AmbiguousClusterError):
+        candidates = "\n".join(
+            f"  {cluster_id} ({cloud}, {region})" for cluster_id, cloud, region in e.clusters
+        )
+        return FailedToConnectError(
+            "Several Kafka clusters in your environment are named as your profile's `dbname` "
+            "says, so the cloud settings can't be inferred. Set `database_kafka_cluster_id` "
+            "in your profile to the cluster you mean:\n" + candidates
+        )
+    if isinstance(e, ClusterMismatchError):
+        details = "\n".join(
+            f"  `{_PROFILE_FIELD_FOR_DRIVER_PARAMETER.get(parameter, parameter)}` is "
+            f"'{supplied}' in your profile, but the cluster's is '{actual}'"
+            for parameter, supplied, actual in e.mismatches
+        )
+        return FailedToConnectError(
+            f"Your profile disagrees with Kafka cluster {e.cluster_id}:\n{details}\n"
+            + _mismatch_remedies(e.parameters)
+        )
+    return None
 
 
 def _execute_query_with_retry(
@@ -609,7 +719,9 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 database_kafka_cluster_id=credentials.database_kafka_cluster_id,
                 environment_id=credentials.database,
                 compute_pool_id=credentials.compute_pool_id,
-                organization_id=credentials.organization_id,
+                # "" = omitted: the driver infers it (oauth / Global key), or rejects it. A supplied
+                # value makes the driver verify the credential can reach that organization.
+                organization_id=credentials.organization_id or "",
                 cloud_provider=credentials.cloud_provider,
                 cloud_region=credentials.cloud_region,
                 endpoint=credentials.endpoint,
@@ -625,9 +737,12 @@ class ConfluentConnectionManager(SQLConnectionManager):
             connection.state = "open"
             connection.handle = handle
             return connection
-        except Exception:
+        except Exception as e:
             connection.state = "fail"
             connection.handle = None
+            explained = _explain_connect_failure(e)
+            if explained is not None:
+                raise explained from e
             raise
 
     @classmethod
