@@ -863,7 +863,7 @@ A mapping with various tableflow topic-level configuration settings:
 - Tableflow's control-plane routes require one of:
   - `auth: oauth`.
   - A Global API key (`global_api_key` / `global_api_secret`).
-  - A Tableflow API key (`tableflow_api_key` / `tableflow_api_secret`) together with `database_kafka_cluster_id` (the `lkc-...` id of the `schema` cluster), since a Tableflow key can't look the cluster id up itself.
+  - A Tableflow API key (`tableflow_api_key` / `tableflow_api_secret`) together with `database_kafka_cluster_id` (the `lkc-...` id of the `schema`, or `dbname`, cluster), since a Tableflow key can't look the cluster id up itself.
   - A Flink-region or Cloud API key is not enough. dbt checks this before running any statement for a model that sets `tableflow`, and fails with a compile error if the profile can't use Tableflow.
   - If you previously ran your models with only the flink API key configured, you may need to generate a new key for Tableflow.
   - Note that a global API works for the Flink APIs as well, so you do not need to provide both.
