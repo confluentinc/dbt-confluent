@@ -62,6 +62,31 @@ You have several options for configuring your credentials:
 
 `dbt init` will prompt you for a choice and ensure your profile is configured correctly.
 
+### Organization, cloud provider and region
+
+With `auth: oauth` or a Global API key, you can leave out `organization_id`, `cloud_provider` and `cloud_region`, and the driver finds them:
+
+```yaml
+my_project:
+  target: dev
+  outputs:
+    dev:
+      type: confluent
+      auth: oauth                 # or global_api_key / global_api_secret
+      environment_id: env-xxxxxx
+      dbname: my_kafka_cluster    # a Kafka cluster; its cloud and region are looked up
+      threads: 1
+```
+
+Your profile's `dbname` names the Kafka cluster. (It is an alias for dbt's `schema`: see [Concept mapping](#concept-mapping).)
+
+- **`organization_id`** is used when your credentials can reach exactly one organization. If they can reach several, connecting fails and lists them: set `organization_id` to choose one. If you do set it, the driver checks that you can reach it.
+- **`cloud_provider` and `cloud_region`** are read from the Kafka cluster named by `dbname` (or by `database_kafka_cluster_id`, if set). If you set only one of them, the other is filled in from the cluster and the one you set is checked against it, so a wrong value fails with an error naming the setting. A complete provider and region pair is trusted as given, with no lookup.
+- If several Kafka clusters in your environment share the `dbname`, set `database_kafka_cluster_id` to the `lkc-...` id of the one you mean.
+- **Private networking** can't be inferred. Keep setting `endpoint`.
+
+With a Flink-region API key, or the scoped keys alone, nothing can be inferred: `organization_id`, and either `cloud_provider` and `cloud_region` or an `endpoint`, are required, and `dbt debug` and every command say so when the profile loads.
+
 ### Fine-grained credentials
 
 Using OAuth, or a Global API key, is the most convenient way to get started because those credentials cover all operations performed by this adapter.
@@ -72,11 +97,11 @@ you will need to provide additional credentials to use some of the more advanced
 
 - **Tableflow**
   - Requires `tableflow_api_key` & `tableflow_api_secret` (created with `confluent api-key create --resource tableflow`).
-  - You must also set `database_kafka_cluster_id` to the `lkc-...` id of the Kafka cluster behind your profile's `schema`, since Tableflow needs it and a scoped key can't look it up.
+  - You must also set `database_kafka_cluster_id` to the `lkc-...` id of the Kafka cluster behind your profile's `schema` (or `dbname`), since Tableflow needs it and a scoped key can't look it up.
 - **UDFs**
   - Requires `cloud_api_key` & `cloud_api_secret` (created with `confluent api-key create --resource cloud`) to interact with the artifacts APIs.
 
-Tableflow always targets the Kafka cluster behind your profile's `schema` (whatever the credentials), so models using `tableflow`
+Whatever the credentials, Tableflow always targets the Kafka cluster behind your profile's `schema` (or `dbname`), so models using `tableflow`
 must live in that schema. A model whose `+schema` override points at another cluster fails with an error.
 
 These keys are ignored when `global_api_key` is set - a Global API key always takes precedence if given.
@@ -284,6 +309,10 @@ export CONFLUENT_COMPUTE_POOL_ID_2=lfcp-yyyyy
 # MATERIALIZATIONS.md#tableflow), and they are skipped if either of these is unset.
 export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
+
+# Optional: also run the tests that use `auth: oauth`. They open a browser for an interactive
+# Confluent Cloud sign-in, so they are skipped unless this is set.
+export RUN_OAUTH_TESTS=1
 
 # test_scoped_credentials.py also needs the Flink-region pair above, the Global key, and a Cloud key
 # (`confluent api-key create --resource cloud`), a Tableflow key (`--resource tableflow`) and the
