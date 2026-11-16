@@ -6,6 +6,8 @@ exact token lists; `test_same` and `test_different` cover what needs a compariso
 comments, folded keywords, and changes that must stay visible).
 """
 
+import time
+
 import pytest
 
 from dbt.adapters.confluent.statement_sql import (
@@ -64,6 +66,8 @@ TOKENS = [
     pytest.param("", [], id="T22-empty"),
     pytest.param(";", [], id="T22-only-semicolon"),
     pytest.param("'😀 café' é😀", ["'😀 café'", "é😀"], id="T23-non-ascii-and-non-bmp"),
+    pytest.param(f"_{'x' * 16}'c'", [f"_{'x' * 16}'c'"], id="T24-charset-name-up-to-16-chars"),
+    pytest.param(f"_{'x' * 17}'c'", [f"_{'x' * 17}", "'c'"], id="T24-longer-name-is-a-word"),
 ]
 
 SAME = [
@@ -176,6 +180,17 @@ DIFFERENT = [
 @pytest.mark.parametrize("sql,expected", TOKENS)
 def test_tokens(sql, expected):
     assert normalize_sql(sql) == expected
+
+
+def test_underscore_chain_is_linear():
+    """A long chain of `_` names with no spaces once made the charset-prefix pattern rescan the
+    rest of the chain at every name: quadratic, about 23 s for one text near Confluent's cap
+    (131,072 characters). Capped, it's linear (well under a tenth of a second); the limit leaves
+    room for slow machines."""
+    chain = "SELECT " + "-".join(["_a"] * 43_000) + " FROM t"
+    start = time.perf_counter()
+    normalize_sql(chain)
+    assert time.perf_counter() - start < 2
 
 
 @pytest.mark.parametrize("a,b", SAME)

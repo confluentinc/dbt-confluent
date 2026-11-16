@@ -88,8 +88,10 @@ TOKEN_KINDS = (
     # E'...': a backslash escapes the next character.
     ("escaped_string", r"[eE]'(?:[^'\\]|\\.|'')*'"),
     # '...', optionally prefixed (N, X, U&, _charset). '' is a quote; a backslash is an ordinary
-    # character.
-    ("string", r"(?:[xXnN]|[uU]&|_[A-Za-z0-9][A-Za-z0-9:._-]*)?'(?:[^']|'')*'"),
+    # character. The charset name is capped at 16 characters: the longest Calcite accepts is 10
+    # (ISO-8859-1), and without a cap a long chain of `_` names with no spaces (`_a-_a-...`) is
+    # rescanned at every name, which is quadratic.
+    ("string", r"(?:[xXnN]|[uU]&|_[A-Za-z0-9][A-Za-z0-9:._-]{0,15})?'(?:[^']|'')*'"),
     ("quoted_name", rf'[uU]&"(?:[^"]|"")*"|{BACK_QUOTED}'),
     ("number", r"(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"),
     ("word", WORD),
