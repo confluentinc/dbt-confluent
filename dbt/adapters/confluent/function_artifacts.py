@@ -21,6 +21,7 @@ it. An artifact without it, or from another project, is never deleted by dbt.
 import hashlib
 import json
 import re
+import shlex
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import NamedTuple, NewType
@@ -275,13 +276,32 @@ DEFAULT_LISTING_FILE = "confluent_function_artifacts.json"
 
 
 def render_listing(project: str, artifacts: Iterable[ProjectArtifact]) -> str:
-    """The `list_function_artifacts` file: this project's artifacts and who uses them."""
+    """The `list_function_artifacts` file: this project's artifacts and who uses them, in the
+    order given."""
     entries = [
         {"id": a.artifact.id, "name": a.artifact.display_name, "referenced_by": a.functions}
-        for a in sorted(artifacts, key=lambda a: a.artifact.id)
+        for a in artifacts
     ]
     listing = {"format_version": LISTING_FORMAT_VERSION, "project": project, "artifacts": entries}
     return json.dumps(listing, indent=2) + "\n"
+
+
+def _check_list_file(list_file: object) -> None:
+    """Fail unless `list_file` is a non-empty string: the macro forwards `--args` unchanged, so
+    an empty or falsy one would otherwise silently fall back to a default or drop the
+    restriction to the listed artifacts."""
+    if not isinstance(list_file, str) or not list_file:
+        raise CompilationError(
+            f"list_file must be a non-empty file path, not {list_file!r}; "
+            "leave it out to use the default"
+        )
+
+
+def _sweep_command(args: dict[str, object]) -> str:
+    """A shell command running `sweep_function_artifacts` with `args`. JSON is valid YAML, so
+    its quoting survives the flow mapping, and the shell quoting keeps it one argument."""
+    flow = ", ".join(f"{k}: {json.dumps(v)}" for k, v in args.items())
+    return f"dbt run-operation sweep_function_artifacts --args {shlex.quote('{' + flow + '}')}"
 
 
 class ListingError(ValueError):
@@ -350,12 +370,15 @@ class ArtifactSweeper:
         `list_file` is relative to the project root; by default it is in `target_path`. Passed to
         `sweep` as `list_file`, it limits the sweep to what existed now.
         """
-        list_file = list_file or str(Path(target_path) / DEFAULT_LISTING_FILE)
+        if list_file is None:
+            list_file = str(Path(target_path) / DEFAULT_LISTING_FILE)
+        _check_list_file(list_file)
         path = Path(self._project_root) / list_file
         scan = self._scan_project_artifacts()
+        artifacts = sorted(scan.artifacts, key=lambda a: a.artifact.id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_listing(self._project, scan.artifacts))
-        for entry in sorted(scan.artifacts, key=lambda a: a.artifact.id):
+        path.write_text(render_listing(self._project, artifacts))
+        for entry in artifacts:
             functions = [_unqualified(f, self._database, self._schema) for f in entry.functions]
             used = f"used by {_first_and_count(functions)}" if functions else "unused"
             logger.info(f"{entry.label}: {used}")
@@ -365,8 +388,8 @@ class ArtifactSweeper:
             shown = path
         logger.info(f"Wrote {len(scan.artifacts)} artifact(s) of this project to {shown}")
         logger.info(
-            "To delete any unused artifacts from this list: dbt run-operation "
-            f"sweep_function_artifacts --args '{{delete: true, list_file: {list_file}}}'"
+            "To delete any unused artifacts from this list: "
+            f"{_sweep_command({'delete': True, 'list_file': list_file})}"
         )
 
     def sweep(self, delete: bool = False, list_file: str | None = None) -> None:
@@ -382,11 +405,8 @@ class ArtifactSweeper:
                 f"delete must be true or false, not {delete!r}; pass it unquoted: "
                 "--args '{delete: true}'"
             )
-        if list_file is not None and (not isinstance(list_file, str) or not list_file):
-            raise CompilationError(
-                f"list_file must be a non-empty file path, not {list_file!r}; "
-                "leave it out to consider every unused artifact"
-            )
+        if list_file is not None:
+            _check_list_file(list_file)
         candidates = self._read_candidates(list_file) if list_file is not None else None
         scan = self._unused_artifacts(candidates)
         for skipped in scan.skipped:
@@ -409,12 +429,12 @@ class ArtifactSweeper:
         else:
             for artifact in scan.unused:
                 logger.info(f"Unused: {artifact_label(artifact)}")
-            args = "delete: true"
+            args: dict[str, object] = {"delete": True}
             if list_file is not None:
-                args += f", list_file: {list_file}"
+                args["list_file"] = list_file
             logger.info(
                 "To delete the unused artifacts, once no statement depends on them: "
-                f"dbt run-operation sweep_function_artifacts --args '{{{args}}}'"
+                f"{_sweep_command(args)}"
             )
 
     def _read_candidates(self, file: str) -> list[str]:

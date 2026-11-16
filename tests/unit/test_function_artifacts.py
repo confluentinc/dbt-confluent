@@ -7,6 +7,7 @@ against in-memory fakes of the driver connection and of Flink.
 
 import json
 import re
+import shlex
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from confluent_sql import (
     ArtifactAlreadyExistsError,
     ArtifactContentFormat,
@@ -922,7 +924,7 @@ class TestListFunctionArtifacts:
         ]
         assert summary.startswith("Wrote 3 artifact(s)")
         assert hint.endswith(
-            f"--args '{{delete: true, list_file: target/{fa.DEFAULT_LISTING_FILE}}}'"
+            f"""--args '{{delete: true, list_file: "target/{fa.DEFAULT_LISTING_FILE}"}}'"""
         )
 
     def test_the_written_path_is_relative_when_under_the_working_directory(
@@ -954,7 +956,24 @@ class TestListFunctionArtifacts:
         adapter.list_function_artifacts(explicit_file)
 
         *_, hint = [call.args[0] for call in logger.info.call_args_list]
-        assert f"delete: true, list_file: {explicit_file}}}'" in hint
+        assert f'delete: true, list_file: "{explicit_file}"}}\'' in hint
+
+    def test_the_sweep_hint_quotes_an_awkward_file_name(self, adapter, driver, logger):
+        driver.add("unused", managed())
+        awkward_file = "my dir/it's: a, file.json"
+
+        adapter.list_function_artifacts(awkward_file)
+
+        *_, hint = [call.args[0] for call in logger.info.call_args_list]
+        command = shlex.split(hint.split(": ", 1)[1])
+        assert yaml.safe_load(command[-1]) == {"delete": True, "list_file": awkward_file}
+
+    @pytest.mark.parametrize("list_file", ["", 0, False, [], 5])
+    def test_an_empty_or_non_string_file_is_rejected(self, adapter, driver, list_file):
+        driver.add("unused", managed())
+
+        with pytest.raises(CompilationError, match="list_file must be a non-empty file path"):
+            adapter.list_function_artifacts(list_file)
 
     def test_an_explicit_file_is_relative_to_the_project(self, adapter, driver):
         driver.add("unused", managed())
@@ -1128,7 +1147,7 @@ class TestSweepWithCandidates:
         adapter.sweep_function_artifacts(list_file=self.FILE)
 
         _, hint = self.infos(logger)
-        assert f"--args '{{delete: true, list_file: {self.FILE}}}'" in hint
+        assert f"""--args '{{delete: true, list_file: "{self.FILE}"}}'""" in hint
         assert set(driver.artifacts) == {unused.id}
 
     def test_an_empty_list_considers_nothing(self, adapter, driver):

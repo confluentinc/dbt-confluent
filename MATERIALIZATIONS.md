@@ -730,7 +730,7 @@ but the same principles apply. Always follow the same procedure:
 - Resubmit any statements to ensure they pick up the new artifact.
 - Remove the old artifact only after all statements have been resubmitted.
 
-**Limiting the scope of the sweep.** For more explict control over what artifacts the sweep will
+**Limiting the scope of the sweep.** For more explicit control over what artifacts the sweep will
 consider as candidates for removal, you can list the artifacts ahead of time and provide that
 list - possibly modified - back to the sweep command:
 
