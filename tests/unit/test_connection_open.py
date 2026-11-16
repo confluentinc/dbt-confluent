@@ -204,6 +204,47 @@ class TestOpenExplainsInferenceFailures:
         assert "database" not in message.replace("database_kafka_cluster_id", "")
 
     @pytest.mark.parametrize(
+        ("mismatches", "expect_omit", "expect_fix_dbname"),
+        [
+            pytest.param(
+                [("cloud_region", "us-east-1", "us-west-2")],
+                ["`cloud_region`"],
+                False,
+                id="region only",
+            ),
+            pytest.param(
+                [("cloud_provider", "gcp", "aws"), ("cloud_region", "x", "us-west-2")],
+                ["`cloud_provider` / `cloud_region`"],
+                False,
+                id="provider and region",
+            ),
+            pytest.param([("database", "my_db", "other_db")], [], True, id="dbname only"),
+            pytest.param(
+                [("database", "my_db", "other_db"), ("cloud_provider", "gcp", "aws")],
+                ["`cloud_provider`"],
+                True,
+                id="dbname and provider",
+            ),
+        ],
+    )
+    def test_cluster_mismatch_advice_fits_what_mismatched(
+        self, connect, mismatches, expect_omit, expect_fix_dbname
+    ):
+        """Omitting a cloud setting takes the cluster's value, but it can't fix a `dbname` that
+        doesn't match the cluster `database_kafka_cluster_id` selected: that one can only be
+        corrected."""
+        message = self.failing_open(connect, ClusterMismatchError("lkc-1", mismatches))
+
+        advice = message.split("To fix this:")[1]
+        for omit in expect_omit:
+            assert f"correct or omit {omit} to use the cluster's" in advice
+        if not expect_omit:
+            assert "omit" not in advice
+        assert ("make `dbname` the name of the cluster" in advice) is expect_fix_dbname
+        if expect_fix_dbname:
+            assert "`database_kafka_cluster_id`" in advice
+
+    @pytest.mark.parametrize(
         "error",
         [
             OperationalError("something else broke"),

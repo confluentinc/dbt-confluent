@@ -214,6 +214,23 @@ class ConfluentCredentials(Credentials):
 _PROFILE_FIELD_FOR_DRIVER_PARAMETER = {"database": "dbname"}
 
 
+def _mismatch_remedies(parameters: list[str]) -> str:
+    """How to fix a `ClusterMismatchError`, which depends on what mismatched: omitting a cloud
+    setting takes the cluster's value, but a `dbname` that doesn't match can only be corrected
+    (the cluster was picked by `database_kafka_cluster_id`, so the id or the name is wrong)."""
+    remedies = []
+    cloud_settings = [p for p in parameters if p in ("cloud_provider", "cloud_region")]
+    if cloud_settings:
+        omit = " / ".join(f"`{p}`" for p in cloud_settings)
+        remedies.append(f"correct or omit {omit} to use the cluster's")
+    if "database" in parameters:
+        remedies.append(
+            "make `dbname` the name of the cluster `database_kafka_cluster_id` selects, "
+            "or correct that id"
+        )
+    return "To fix this: " + "; ".join(remedies) + "."
+
+
 def _explain_connect_failure(e: Exception) -> FailedToConnectError | None:
     """Re-word the driver's inference failures from `connect()` as guidance naming the profile
     fields to set, or None if `e` isn't one of them. The driver's own messages speak of
@@ -243,8 +260,7 @@ def _explain_connect_failure(e: Exception) -> FailedToConnectError | None:
         )
         return FailedToConnectError(
             f"Your profile disagrees with Kafka cluster {e.cluster_id}:\n{details}\n"
-            "Correct those settings, or omit `cloud_provider` / `cloud_region` to use the "
-            "cluster's."
+            + _mismatch_remedies(e.parameters)
         )
     return None
 

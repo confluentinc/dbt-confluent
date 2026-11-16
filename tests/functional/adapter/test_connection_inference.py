@@ -11,7 +11,9 @@ the end runs a real `dbt run` from a minimal profile.
 The OAuth tests open a browser, so they need `RUN_OAUTH_TESTS` set (see
 `skip_unless_oauth_tests_enabled`). The driver shares one OAuth login per process and refuses a
 later connection that names a different organization, so each OAuth class starts and ends with
-`oauth_discard_login()`.
+`oauth_discard_login()`. They are also marked `serial`: a login listens on a fixed local port,
+and xdist's `loadscope` can put two classes of this module on different workers, whose logins
+would collide (`PORT_IN_USE`). Run them without `-n` (`pytest -m serial`).
 
 Which tests can run depends on the account:
 - An account that reaches several organizations can't infer one: the tests that expect inference
@@ -63,8 +65,8 @@ def open_connection(**profile):
     `organization_id` / `cloud_provider` / `cloud_region` the test supplies: none by default."""
     credentials = ConfluentCredentials.from_dict(
         {
-            "environment_id": os.getenv("CONFLUENT_ENV_ID", "env-unset"),
-            "dbname": os.getenv("CONFLUENT_TEST_DBNAME", "unset"),
+            "environment_id": os.environ["CONFLUENT_ENV_ID"],
+            "dbname": os.environ["CONFLUENT_TEST_DBNAME"],
             "compute_pool_id": os.getenv("CONFLUENT_COMPUTE_POOL_ID"),
             **profile,
         }
@@ -85,8 +87,13 @@ def skip_if_ambiguous_organization(open_it):
 
 
 @pytest.fixture
-def opened():
-    """Collects connections opened by a test, closing them afterwards."""
+def opened(unique_schema):
+    """Collects connections opened by a test, closing them afterwards.
+
+    Depends on `unique_schema` for its side effect: that fixture is where the functional suite
+    skips, rather than errors, when the environment isn't configured. Without it, these
+    connection-only tests would try to connect with whatever happened to be set (the Global key
+    alone, say) instead of skipping."""
     connections = []
 
     def open_and_track(**profile):
@@ -212,6 +219,7 @@ class TestGlobalKeyInference(_InferenceTests):
     PROFILE = GLOBAL_KEY_PROFILE
 
 
+@pytest.mark.serial
 @pytest.mark.usefixtures("clean_oauth_login")
 class TestOAuthInference(_InferenceTests):
     PROFILE = OAUTH_PROFILE
@@ -288,6 +296,7 @@ class TestGlobalKeyDbtRunFromMinimalProfile(_DbtRunFromMinimalProfile):
         return minimal_profile(dbt_profile_target, GLOBAL_KEY_PROFILE)
 
 
+@pytest.mark.serial
 class TestOAuthDbtRunFromMinimalProfile(_DbtRunFromMinimalProfile):
     NAME = "inference_oauth"
     EXPECTED_AUTH = "oauth"

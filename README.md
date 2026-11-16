@@ -311,7 +311,8 @@ export CONFLUENT_GLOBAL_API_KEY=xxx
 export CONFLUENT_GLOBAL_API_SECRET=xxx
 
 # Optional: also run the tests that use `auth: oauth`. They open a browser for an interactive
-# Confluent Cloud sign-in, so they are skipped unless this is set.
+# Confluent Cloud sign-in, so they are skipped unless this is set. They are marked `serial` (a
+# login listens on a fixed local port), so run them without `-n`: `pytest -m serial`.
 export RUN_OAUTH_TESTS=1
 
 # test_scoped_credentials.py also needs the Flink-region pair above, the Global key, and a Cloud key
