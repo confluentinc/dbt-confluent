@@ -1082,9 +1082,9 @@ select order_id, round(price, 4) as price from {{ ref('source') }}
 
 **What's ignored.** Comments (`--`, `//`, `/* */`), whitespace and layout, the case of Flink's
 reserved keywords when they're unquoted (`SELECT`, `FROM`, `WHERE`, `AS`, `COUNT`, `CAST`, ...),
-dbt's query comment, and the INSERT's column list, which isn't compared: reordering the yml
-columns isn't drift, and neither is adding or dropping a yml column while the SELECT stays the same
-(dbt's contract check catches that when the statement is next re-submitted).
+dbt's query comment, and the INSERT's column list, which isn't compared. Reordering the yml
+columns isn't drift, and neither is adding or dropping a yml column while the model's SELECT stays
+the same (dbt's contract check catches that when the statement is next re-submitted).
 Inside a SQL hint (`/*+ ... */`) the same applies, but the hint itself counts: Flink applies it.
 
 **What's still reported**, even when the result wouldn't change: a case change to anything else
@@ -1103,8 +1103,9 @@ rewrite the model's `ref()`s and `source()`s); and a missing or terminal stateme
 re-submitted with the model's current SQL. Changes the SQL text doesn't show, such as
 `statement_properties` or `compute_pool_id`, aren't compared either.
 
-**When drift is reported**, the error shows both SQL texts. A running statement can't be changed in
-place, so decide which one is right:
+**When drift is reported**, the error shows both SQL texts as written: the running statement's as
+Confluent stores it, and the model's as compiled. A running statement can't be changed in place,
+so decide which one is right:
 
 - To apply the model's SQL and keep the table, stop or delete the statement, wait until it's
   stopped or gone, and re-run. The statement likely re-reads its sources from the beginning, so the
