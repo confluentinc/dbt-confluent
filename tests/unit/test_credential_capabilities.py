@@ -61,3 +61,15 @@ class TestRequireCredentials:
     def test_tableflow_credentials_missing(self):
         with pytest.raises(CompilationError, match="database_kafka_cluster_id"):
             adapter_for({**FLINK, **TABLEFLOW}).require_tableflow_credentials()
+
+
+class TestRequireTableflowSchema:
+    def test_model_in_profile_schema_allowed(self):
+        adapter = adapter_for(GLOBAL)
+        adapter.require_tableflow_schema(adapter.config.credentials.schema)
+
+    def test_model_in_other_schema_refused(self):
+        adapter = adapter_for(GLOBAL)
+        other_schema = f"not-{adapter.config.credentials.schema}"
+        with pytest.raises(CompilationError, match=other_schema):
+            adapter.require_tableflow_schema(other_schema)

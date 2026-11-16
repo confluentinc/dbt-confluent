@@ -72,9 +72,12 @@ you will need to provide additional credentials to use some of the more advanced
 
 - **Tableflow**
   - Requires `tableflow_api_key` & `tableflow_api_secret` (created with `confluent api-key create --resource tableflow`).
-  - You must also set `database_kafka_cluster_id` to the `lkc-...` id of your Kafka cluster, since Tableflow needs it and a scoped key can't look it up.
+  - You must also set `database_kafka_cluster_id` to the `lkc-...` id of the Kafka cluster behind your profile's `schema`, since Tableflow needs it and a scoped key can't look it up.
 - **UDFs**
   - Requires `cloud_api_key` & `cloud_api_secret` (created with `confluent api-key create --resource cloud`) to interact with the artifacts APIs.
+
+Tableflow always targets the Kafka cluster behind your profile's `schema` (whatever the credentials), so models using `tableflow`
+must live in that schema. A model whose `+schema` override points at another cluster fails with an error.
 
 These keys are ignored when `global_api_key` is set - a Global API key always takes precedence if given.
 

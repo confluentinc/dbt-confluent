@@ -252,6 +252,23 @@ class ConfluentAdapter(SQLAdapter):
                 "your profile -- see README.md#fine-grained-credentials."
             )
 
+    @available
+    def require_tableflow_schema(self, schema: str) -> None:
+        """Raise before any Tableflow call if the model isn't in the profile's `schema`.
+
+        The driver aims every Tableflow call at the Kafka cluster behind the profile's
+        `schema`, so a model with a `+schema` override would enable Tableflow on the wrong
+        cluster.
+        """
+        profile_schema = self.config.credentials.schema
+        if schema != profile_schema:
+            raise CompilationError(
+                f"`tableflow` is only supported on models in the profile's `schema` "
+                f"('{profile_schema}'), but this model's schema is '{schema}'. Tableflow calls "
+                f"always target the Kafka cluster behind the profile's `schema` -- see "
+                f"README.md#fine-grained-credentials."
+            )
+
     @classmethod
     def quote(cls, identifier: str) -> str:
         """

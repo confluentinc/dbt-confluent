@@ -16,7 +16,7 @@
   {% endfor %}
   {% do adapter.validate_materialization_config(config.get('materialized'), observed_config) %}
   {#- Before any DDL: ensure_tableflow_config runs last, after the table exists. -#}
-  {% if execute and config.get('tableflow') %}{% do adapter.require_tableflow_credentials() %}{% endif %}
+  {% if execute and config.get('tableflow') %}{% do adapter.require_tableflow_credentials() %}{% do adapter.require_tableflow_schema(this.schema) %}{% endif %}
 {% endmacro %}
 
 
