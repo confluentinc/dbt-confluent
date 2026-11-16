@@ -1,4 +1,4 @@
-"""Unit tests for ConfluentAdapter.statement_needs_restart.
+"""Unit tests for ConfluentAdapter.statement_needs_restart and inspect_statement.
 
 This is the decision input for the streaming-statement recovery path in
 `decide_action` (Jinja): True means re-submit the long-running INSERT.
@@ -85,3 +85,38 @@ class TestStatementNeedsRestart:
         )
         with pytest.raises(OperationalError):
             needs_restart(adapter)
+
+
+class TestInspectStatement:
+    """inspect_statement returns needs_restart (covered above through statement_needs_restart)
+    and the statement's stored SQL, from one lookup."""
+
+    def test_healthy_statement_returns_its_sql(self):
+        adapter = _adapter_with_phase(Phase.RUNNING)
+        _handle(adapter).get_statement.return_value.spec = {"statement": "INSERT INTO t SELECT 1"}
+
+        assert adapter.inspect_statement("any-name") == {
+            "needs_restart": False,
+            "sql": "INSERT INTO t SELECT 1",
+        }
+        _handle(adapter).get_statement.assert_called_once_with("any-name")
+
+    def test_healthy_statement_without_text_has_no_sql(self):
+        adapter = _adapter_with_phase(Phase.RUNNING)
+        _handle(adapter).get_statement.return_value.spec = {}
+
+        assert adapter.inspect_statement("any-name") == {"needs_restart": False, "sql": None}
+
+    def test_missing_statement_has_no_sql(self):
+        assert _adapter_with_phase(None).inspect_statement("any-name") == {
+            "needs_restart": True,
+            "sql": None,
+        }
+
+    def test_403_has_no_sql(self):
+        adapter = _adapter()
+        _handle(adapter).get_statement.side_effect = OperationalError(
+            "error sending request '403'", http_status_code=403
+        )
+        with patch("dbt.adapters.confluent.impl.logger"):
+            assert adapter.inspect_statement("any-name") == {"needs_restart": True, "sql": None}

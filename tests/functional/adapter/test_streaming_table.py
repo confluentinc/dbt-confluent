@@ -7,6 +7,7 @@ from tests.functional.adapter._helpers import (
     get_result_by_name,
     relation,
     wait_for_absent,
+    wait_for_running,
     wait_for_snapshot_rows,
     wait_for_terminal,
 )
@@ -728,3 +729,139 @@ class TestInsertWritesByName:
             assert "enforced contract that failed" in result.message, result.message
         finally:
             write_file(BY_NAME_MODELS_YML, *yml_path)
+
+
+# Unbounded (no `number-of-rows`), so the INSERT stays RUNNING across re-runs and a re-run takes
+# the skip path, where the SQL logic check runs. A bounded source would let the INSERT complete,
+# and the next run would restart it instead.
+LOGIC_SOURCE = """
+{{ config(
+    materialized='streaming_source',
+    connector='faker',
+    with={
+        'rows-per-second': '1',
+        'changelog.mode': 'append',
+    }
+) }}
+order_id BIGINT,
+price DECIMAL(10, 2),
+order_time TIMESTAMP(3),
+WATERMARK FOR order_time AS order_time - INTERVAL '5' SECOND,
+PRIMARY KEY(`order_id`) NOT ENFORCED
+"""
+
+# `min_id` changes the logic without changing the columns; `drift` sets on_schema_drift.
+LOGIC_TABLE = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+    on_schema_drift=var('drift', 'fail'),
+) }}
+select order_id, price from {{ ref('my_streaming_source') }}
+where order_id > {{ var('min_id', 0) }}
+"""
+
+# The same logic as LOGIC_TABLE; only keyword case, comments and layout differ.
+LOGIC_TABLE_COSMETIC = """
+{{ config(
+    materialized='streaming_table',
+    with={'changelog.mode': 'append'},
+    on_schema_drift=var('drift', 'fail'),
+) }}
+-- Same logic, different layout.
+SELECT order_id,
+       price  /* the price */
+FROM {{ ref('my_streaming_source') }}
+WHERE order_id > {{ var('min_id', 0) }}
+"""
+
+LOGIC_MODELS_YML = """
+models:
+  - name: logic_table
+    columns:
+      - name: order_id
+        data_type: bigint
+      - name: price
+        data_type: decimal(10,2)
+"""
+
+
+class TestLogicDrift(ConfluentFixtures):
+    """SQL logic drift: on the skip path, a streaming_table whose compiled SQL differs from what
+    its running statement executes fails the run, while cosmetic edits (comments, layout, keyword
+    case) still skip. `on_schema_drift='ignore'` and `--empty` runs don't check, `--full-refresh`
+    recreates the statement with the new SQL, and a dead statement is re-submitted with the new
+    SQL, unchecked."""
+
+    NAME = "logicdrift"
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return _no_full_refresh_config(self.NAME, unique_schema)
+
+    @pytest.fixture(scope="class", autouse=True)
+    def models(self):
+        yield {
+            "my_streaming_source.sql": LOGIC_SOURCE,
+            "logic_table.sql": LOGIC_TABLE,
+            "models.yml": LOGIC_MODELS_YML,
+        }
+
+    def _statement(self, adapter, name):
+        with adapter.connection_named("inspect_logic_table"):
+            conn = adapter.connections.get_thread_connection()
+            return conn.handle.get_statement(name)
+
+    def test_logic_drift_lifecycle(self, project):
+        adapter = project.adapter
+        insert_name = adapter.get_statement_name(model_name="logic_table", project_name=self.NAME)
+        results = run_dbt(["run"])
+        assert all(r.status == "success" for r in results)
+        created_id = wait_for_running(adapter, insert_name).statement_id
+
+        # A cosmetic edit skips and leaves the statement untouched.
+        write_file(LOGIC_TABLE_COSMETIC, project.project_root, "models", "logic_table.sql")
+        results = run_dbt(["run", "--select", "logic_table"])
+        assert get_result_by_name(results, "logic_table").message == "SKIP"
+        assert self._statement(adapter, insert_name).statement_id == created_id
+
+        # A logic change fails, shows both SQL texts, and leaves the statement untouched.
+        results = run_dbt(
+            ["run", "--select", "logic_table", "--vars", "{min_id: 5}"], expect_pass=False
+        )
+        result = get_result_by_name(results, "logic_table")
+        assert result.status.name == "Error", result.message
+        assert "SQL logic drift detected" in result.message
+        assert "order_id > 0" in result.message
+        assert "order_id > 5" in result.message
+        assert self._statement(adapter, insert_name).statement_id == created_id
+
+        # on_schema_drift='ignore', and --empty runs (which rewrite each ref()), don't check.
+        for args in (
+            ["--vars", "{min_id: 5, drift: ignore}"],
+            ["--empty", "--vars", "{min_id: 5}"],
+        ):
+            results = run_dbt(["run", "--select", "logic_table", *args])
+            assert get_result_by_name(results, "logic_table").message == "SKIP", args
+            assert self._statement(adapter, insert_name).statement_id == created_id, args
+
+        # --full-refresh recreates the statement with the new SQL.
+        results = run_dbt(
+            ["run", "--full-refresh", "--select", "logic_table", "--vars", "{min_id: 5}"]
+        )
+        assert all(r.status == "success" for r in results)
+        refreshed = wait_for_running(adapter, insert_name)
+        assert refreshed.statement_id != created_id
+        assert "order_id > 5" in refreshed.spec.get("statement", "")
+
+        # A dead statement takes the restart path: re-submitted with the new SQL, unchecked.
+        with adapter.connection_named("delete_logic_insert"):
+            adapter.delete_statement(insert_name)
+        wait_for_absent(adapter, insert_name)
+        results, logs = run_dbt_and_capture(
+            ["run", "--select", "logic_table", "--vars", "{min_id: 7}"]
+        )
+        assert all(r.status == "success" for r in results)
+        assert "Re-submitting (no full refresh required)." in logs
+        restarted = wait_for_running(adapter, insert_name)
+        assert "order_id > 7" in restarted.spec.get("statement", "")
