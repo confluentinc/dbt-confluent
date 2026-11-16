@@ -237,7 +237,7 @@ class ConfluentAdapter(SQLAdapter):
                 "The `function` materialization needs credentials that can use the artifact "
                 "API. Set `auth: oauth`, or add `global_api_key`/`global_api_secret` or "
                 "`cloud_api_key`/`cloud_api_secret` to your profile -- see "
-                "README.md#configuration."
+                "README.md#fine-grained-credentials."
             )
 
     @available
@@ -249,7 +249,7 @@ class ConfluentAdapter(SQLAdapter):
                 "`auth: oauth`, or add `global_api_key`/`global_api_secret`, or add "
                 "`tableflow_api_key`/`tableflow_api_secret` together with "
                 "`database_kafka_cluster_id` (the `lkc-...` id of the `schema` cluster) to "
-                "your profile -- see README.md#configuration."
+                "your profile -- see README.md#fine-grained-credentials."
             )
 
     @classmethod

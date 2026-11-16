@@ -688,7 +688,7 @@ def reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
         "`global_api_key`/`global_api_secret` to your profile, or add "
         "`tableflow_api_key`/`tableflow_api_secret` together with "
         "`database_kafka_cluster_id` (the `lkc-...` id of the `schema` cluster) -- see "
-        "README.md#configuration."
+        "README.md#fine-grained-credentials."
     ) from e
 
 
