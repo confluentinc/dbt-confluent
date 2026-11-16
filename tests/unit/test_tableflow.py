@@ -34,9 +34,9 @@ class TestEnsureTableflowConfig:
     @pytest.fixture
     def handle(self):
         # Default: not enabled yet -- the common case, and the one where
-        # this method is actually expected to call enable_tableflow.
+        # this method is actually expected to call TableflowApi.enable.
         handle = MagicMock()
-        handle.get_tableflow.side_effect = TableflowTopicNotFoundError(
+        handle.get_tableflow_api().get.side_effect = TableflowTopicNotFoundError(
             "not enabled", table_name="my_table"
         )
         return handle
@@ -55,13 +55,13 @@ class TestEnsureTableflowConfig:
 
     def test_none_config_is_a_no_op(self, handle):
         tableflow.reconcile_tableflow_config(handle, make_relation("t"), None)
-        handle.get_tableflow.assert_not_called()
-        handle.enable_tableflow.assert_not_called()
+        handle.get_tableflow_api().get.assert_not_called()
+        handle.get_tableflow_api().enable.assert_not_called()
 
     def test_empty_config_is_a_no_op(self, handle):
         tableflow.reconcile_tableflow_config(handle, make_relation("t"), {})
-        handle.get_tableflow.assert_not_called()
-        handle.enable_tableflow.assert_not_called()
+        handle.get_tableflow_api().get.assert_not_called()
+        handle.get_tableflow_api().enable.assert_not_called()
 
     # --- not enabled -> enable ---
 
@@ -69,8 +69,8 @@ class TestEnsureTableflowConfig:
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
-        handle.enable_tableflow.assert_called_once()
-        call = handle.enable_tableflow.call_args
+        handle.get_tableflow_api().enable.assert_called_once()
+        call = handle.get_tableflow_api().enable.call_args
         assert call.args[0] == "my_table"
         assert call.kwargs["table_formats"] == [TableFormat.ICEBERG]
         assert call.kwargs["storage"] == ManagedStorage()
@@ -84,7 +84,7 @@ class TestEnsureTableflowConfig:
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}}
         )
-        call = handle.enable_tableflow.call_args
+        call = handle.get_tableflow_api().enable.call_args
         assert call.kwargs["table_formats"] == [TableFormat.ICEBERG, TableFormat.DELTA]
 
     def test_byob_aws_storage(self, handle, rel):
@@ -100,7 +100,7 @@ class TestEnsureTableflowConfig:
                 },
             },
         )
-        call = handle.enable_tableflow.call_args
+        call = handle.get_tableflow_api().enable.call_args
         assert call.kwargs["storage"] == ByobAwsStorage(
             bucket_name="my-bucket", provider_integration_id="cspi-123"
         )
@@ -119,7 +119,7 @@ class TestEnsureTableflowConfig:
                 },
             },
         )
-        call = handle.enable_tableflow.call_args
+        call = handle.get_tableflow_api().enable.call_args
         assert call.kwargs["storage"] == AzureAdlsStorage(
             storage_account_name="acct",
             container_name="container",
@@ -139,7 +139,7 @@ class TestEnsureTableflowConfig:
                 },
             },
         )
-        call = handle.enable_tableflow.call_args
+        call = handle.get_tableflow_api().enable.call_args
         assert call.kwargs["storage"] == GcsStorage(
             bucket_name="my-bucket", provider_integration_id="cspi-123"
         )
@@ -158,7 +158,7 @@ class TestEnsureTableflowConfig:
                 },
             },
         )
-        call = handle.enable_tableflow.call_args
+        call = handle.get_tableflow_api().enable.call_args
         topic_config = call.kwargs["config"]
         assert topic_config.retention_ms == 604800000
         assert topic_config.data_retention_ms == 0
@@ -169,18 +169,18 @@ class TestEnsureTableflowConfig:
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
-        assert handle.enable_tableflow.call_args.kwargs["config"] is None
+        assert handle.get_tableflow_api().enable.call_args.kwargs["config"] is None
 
     # --- already enabled -> diff, PATCH only if something changed ---
 
     def test_already_enabled_matching_config_is_a_noop(self, handle, rel, logger):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",))
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(table_formats=("ICEBERG",))
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
-        handle.enable_tableflow.assert_not_called()
-        handle.update_tableflow.assert_not_called()
+        handle.get_tableflow_api().enable.assert_not_called()
+        handle.get_tableflow_api().update.assert_not_called()
         logger.info.assert_not_called()
         logger.warning.assert_not_called()
 
@@ -190,8 +190,8 @@ class TestEnsureTableflowConfig:
         than let the run report success while Tableflow is actually dead, with no path to
         notice. A warning, not a failure: dbt has no way to fix this (un-suspending is a
         human's call), only to surface it."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(
             table_formats=("ICEBERG",),
             phase="FAILED",
             error_message="poison pill record at offset 42",
@@ -200,8 +200,8 @@ class TestEnsureTableflowConfig:
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
-        handle.enable_tableflow.assert_not_called()
-        handle.update_tableflow.assert_not_called()
+        handle.get_tableflow_api().enable.assert_not_called()
+        handle.get_tableflow_api().update.assert_not_called()
         logger.warning.assert_called_once()
         message = logger.warning.call_args.args[0]
         assert "my_table" in message
@@ -212,8 +212,10 @@ class TestEnsureTableflowConfig:
     def test_already_enabled_matching_config_but_pending_does_not_warn(self, handle, rel, logger):
         """PENDING is a normal state to be caught in -- e.g. an external, non-dbt enable that
         hasn't come up yet -- not a problem, so only FAILED triggers the warning."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",), phase="PENDING")
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(
+            table_formats=("ICEBERG",), phase="PENDING"
+        )
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
@@ -277,8 +279,8 @@ class TestEnsureTableflowConfig:
         every storage kind via the generic `desired.storage != existing.spec.storage`
         dataclass-equality check (no per-kind dispatch), so one parametrized test covers
         all of them rather than one hand-written test per kind."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(
             table_formats=("ICEBERG",), storage=existing_storage
         )
         tableflow.reconcile_tableflow_config(
@@ -286,10 +288,10 @@ class TestEnsureTableflowConfig:
             rel,
             {"table_formats": "ICEBERG", "storage": desired_storage_config},
         )
-        handle.disable_tableflow.assert_called_once_with("my_table")
-        handle.update_tableflow.assert_not_called()
-        handle.enable_tableflow.assert_called_once()
-        call = handle.enable_tableflow.call_args
+        handle.get_tableflow_api().disable.assert_called_once_with("my_table")
+        handle.get_tableflow_api().update.assert_not_called()
+        handle.get_tableflow_api().enable.assert_called_once()
+        call = handle.get_tableflow_api().enable.call_args
         assert call.args[0] == "my_table"
         assert call.kwargs["storage"] == expected_storage
         # table_formats/config are re-applied fresh from the current dbt config, same as
@@ -303,9 +305,9 @@ class TestEnsureTableflowConfig:
         """Narrow race: something else already disabled Tableflow between our GET and this
         DELETE. Must not raise -- proceed straight to enabling with the desired config,
         same as if it had never been enabled."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",))
-        handle.disable_tableflow.side_effect = TableflowTopicNotFoundError(
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(table_formats=("ICEBERG",))
+        handle.get_tableflow_api().disable.side_effect = TableflowTopicNotFoundError(
             "not enabled", table_name="my_table"
         )
         tableflow.reconcile_tableflow_config(
@@ -316,7 +318,7 @@ class TestEnsureTableflowConfig:
                 "storage": {"kind": "ByobAws", "bucket_name": "b", "provider_integration_id": "i"},
             },
         )
-        handle.enable_tableflow.assert_called_once()
+        handle.get_tableflow_api().enable.assert_called_once()
 
     # --- retention_ms / data_retention_ms: unchanged, changed, and unchanged-but-cross-typed ---
     #
@@ -325,8 +327,8 @@ class TestEnsureTableflowConfig:
 
     @pytest.mark.parametrize("field", ["retention_ms", "data_retention_ms"])
     def test_unchanged_retention_field_is_a_noop(self, handle, rel, field):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(config={field: 604800000})
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(config={field: 604800000})
         tableflow.reconcile_tableflow_config(
             handle,
             rel,
@@ -336,14 +338,14 @@ class TestEnsureTableflowConfig:
                 "config": {field: 604800000},
             },
         )
-        handle.update_tableflow.assert_not_called()
+        handle.get_tableflow_api().update.assert_not_called()
 
     @pytest.mark.parametrize("field", ["retention_ms", "data_retention_ms"])
     def test_unchanged_retention_field_ignores_int_vs_string_type(self, handle, rel, field):
         """The API round-trips these fields as strings even though dbt config supplies an int
         -- that alone must not look like drift."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(config={field: "604800000"})
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(config={field: "604800000"})
         tableflow.reconcile_tableflow_config(
             handle,
             rel,
@@ -353,12 +355,12 @@ class TestEnsureTableflowConfig:
                 "config": {field: 604800000},
             },
         )
-        handle.update_tableflow.assert_not_called()
+        handle.get_tableflow_api().update.assert_not_called()
 
     @pytest.mark.parametrize("field", ["retention_ms", "data_retention_ms"])
     def test_changed_retention_field_sends_update(self, handle, rel, field):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(config={field: "1209600000"})
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(config={field: "1209600000"})
         tableflow.reconcile_tableflow_config(
             handle,
             rel,
@@ -368,9 +370,9 @@ class TestEnsureTableflowConfig:
                 "config": {field: 604800000},
             },
         )
-        handle.enable_tableflow.assert_not_called()
-        handle.update_tableflow.assert_called_once()
-        call = handle.update_tableflow.call_args
+        handle.get_tableflow_api().enable.assert_not_called()
+        handle.get_tableflow_api().update.assert_called_once()
+        call = handle.get_tableflow_api().update.call_args
         assert call.args[0] == "my_table"
         assert call.kwargs["table_formats"] is None  # unchanged formats left alone
         # In wire form (a str), like everything else desired is built from -- not the
@@ -378,12 +380,12 @@ class TestEnsureTableflowConfig:
         assert call.kwargs["config"].to_spec() == {field: "604800000"}
 
     def test_already_enabled_changed_formats_sends_update(self, handle, rel):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",))
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(table_formats=("ICEBERG",))
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}}
         )
-        call = handle.update_tableflow.call_args
+        call = handle.get_tableflow_api().update.call_args
         assert call.kwargs["table_formats"] == [TableFormat.ICEBERG, TableFormat.DELTA]
         assert call.kwargs["config"] is None  # unchanged config left alone
 
@@ -392,21 +394,23 @@ class TestEnsureTableflowConfig:
         the server's response order isn't guaranteed to match -- comparing as lists instead of
         sets would see this as drift on every single run and PATCH pointlessly, exactly the
         failure `tableflow`'s diffing is meant to eliminate (#101)."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("DELTA", "ICEBERG"))
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(
+            table_formats=("DELTA", "ICEBERG")
+        )
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}}
         )
-        handle.enable_tableflow.assert_not_called()
-        handle.update_tableflow.assert_not_called()
+        handle.get_tableflow_api().enable.assert_not_called()
+        handle.get_tableflow_api().update.assert_not_called()
 
     def test_already_enabled_config_removed_leaves_existing_values(self, handle, rel):
         """`retention_ms`/`data_retention_ms`/`error_handling` are optional on the request
         but not on the resource -- the server rejects clearing them. So a `tableflow` block
         with no `config` sub-object leaves whatever's already set server-side alone, rather
         than attempting (and having rejected) an explicit delete."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(
             config={
                 "retention_ms": "604800000",
                 "data_retention_ms": "2592000000",
@@ -416,7 +420,7 @@ class TestEnsureTableflowConfig:
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
-        handle.update_tableflow.assert_not_called()
+        handle.get_tableflow_api().update.assert_not_called()
 
     def test_already_enabled_config_removed_is_a_noop(self, handle, rel):
         """The tableflow configurations are all required, though some have server-side defaults.
@@ -426,22 +430,22 @@ class TestEnsureTableflowConfig:
         are not explicitly declared. To revert to a server default, you would set that value in
         your config explicitly.
         """
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(
             config={"error_handling": {"mode": "SUSPEND"}}
         )
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
-        handle.update_tableflow.assert_not_called()
+        handle.get_tableflow_api().update.assert_not_called()
 
     def test_already_enabled_changed_error_handling_target_includes_mode(self, handle, rel):
         """The discriminated-union bug this diffing exists to avoid (#101): `error_handling`
         is a `mode` + mode-specific-fields union, and the server needs `mode` in the patch
         even when only `target` changed -- a naive per-field diff would omit it since `mode`
         itself didn't change."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(
             config={"error_handling": {"mode": "LOG", "target": "old_dlq"}}
         )
         tableflow.reconcile_tableflow_config(
@@ -453,12 +457,12 @@ class TestEnsureTableflowConfig:
                 "config": {"error_handling": {"mode": "LOG", "target": "new_dlq"}},
             },
         )
-        config = handle.update_tableflow.call_args.kwargs["config"]
+        config = handle.get_tableflow_api().update.call_args.kwargs["config"]
         assert config.to_spec() == {"error_handling": {"mode": "LOG", "target": "new_dlq"}}
 
     def test_already_enabled_changed_error_handling_mode_sends_whole_object(self, handle, rel):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(
             config={"error_handling": {"mode": "SUSPEND"}}
         )
         tableflow.reconcile_tableflow_config(
@@ -470,12 +474,12 @@ class TestEnsureTableflowConfig:
                 "config": {"error_handling": {"mode": "LOG", "target": "my_dlq"}},
             },
         )
-        config = handle.update_tableflow.call_args.kwargs["config"]
+        config = handle.get_tableflow_api().update.call_args.kwargs["config"]
         assert config.to_spec() == {"error_handling": {"mode": "LOG", "target": "my_dlq"}}
 
     def test_already_enabled_matching_error_handling_is_a_noop(self, handle, rel):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(
             config={"error_handling": {"mode": "LOG", "target": "my_dlq"}}
         )
         tableflow.reconcile_tableflow_config(
@@ -487,11 +491,11 @@ class TestEnsureTableflowConfig:
                 "config": {"error_handling": {"mode": "LOG", "target": "my_dlq"}},
             },
         )
-        handle.update_tableflow.assert_not_called()
+        handle.get_tableflow_api().update.assert_not_called()
 
     def test_already_enabled_update_blocks_by_default_logged_at_info(self, handle, rel, logger):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",))
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(table_formats=("ICEBERG",))
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": ["ICEBERG", "DELTA"], "storage": {"kind": "Managed"}}
         )
@@ -501,10 +505,10 @@ class TestEnsureTableflowConfig:
     def test_already_enabled_update_race_fails_as_concurrent_change(self, handle, rel):
         """Disabled concurrently between our GET and this PATCH. Must fail rather than
         report success for a config that was never applied."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",))
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(table_formats=("ICEBERG",))
         err = TableflowTopicNotFoundError("not enabled", table_name="my_table")
-        handle.update_tableflow.side_effect = err
+        handle.get_tableflow_api().update.side_effect = err
         with pytest.raises(DbtDatabaseError, match="concurrently") as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle,
@@ -514,17 +518,17 @@ class TestEnsureTableflowConfig:
         assert exc_info.value.__cause__ is err
 
     def test_already_enabled_does_not_call_update_when_config_unset(self, handle, rel, logger):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic()
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic()
         tableflow.reconcile_tableflow_config(handle, rel, None)
-        handle.get_tableflow.assert_not_called()
-        handle.update_tableflow.assert_not_called()
+        handle.get_tableflow_api().get.assert_not_called()
+        handle.get_tableflow_api().update.assert_not_called()
 
     def test_update_error_is_wrapped_as_dbt_database_error(self, handle, rel):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",))
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(table_formats=("ICEBERG",))
         err = OperationalError("internal server error", http_status_code=500)
-        handle.update_tableflow.side_effect = err
+        handle.get_tableflow_api().update.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle,
@@ -535,13 +539,14 @@ class TestEnsureTableflowConfig:
         assert "my_table" in str(exc_info.value)
 
     def test_update_auth_error_names_profile_field(self, handle, rel):
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = make_topic(table_formats=("ICEBERG",))
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = make_topic(table_formats=("ICEBERG",))
         err = ProgrammingError(
-            "Resolving the Kafka cluster id from the database name requires a global "
-            "API key; alternatively pass database_kafka_cluster_id to connect()."
+            "Kafka cluster lookups require a global API key "
+            "(global_api_key/global_api_secret) or auth='oauth'; neither was supplied to "
+            "connect()."
         )
-        handle.update_tableflow.side_effect = err
+        handle.get_tableflow_api().update.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle,
@@ -555,17 +560,17 @@ class TestEnsureTableflowConfig:
 
     def test_get_error_is_wrapped_as_dbt_database_error(self, handle, rel):
         err = OperationalError("gateway timeout", http_status_code=504)
-        handle.get_tableflow.side_effect = err
+        handle.get_tableflow_api().get.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
             )
         assert exc_info.value.__cause__ is err
-        handle.enable_tableflow.assert_not_called()
+        handle.get_tableflow_api().enable.assert_not_called()
 
     def test_enable_error_is_wrapped_as_dbt_database_error(self, handle, rel):
         err = OperationalError("topic did not reach RUNNING within 300 seconds")
-        handle.enable_tableflow.side_effect = err
+        handle.get_tableflow_api().enable.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
@@ -587,7 +592,7 @@ class TestEnsureTableflowConfig:
             "there is a 1 hour grace period before deletion begins",
             http_status_code=400,
         )
-        handle.enable_tableflow.side_effect = err
+        handle.get_tableflow_api().enable.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
@@ -605,7 +610,7 @@ class TestEnsureTableflowConfig:
             tableflow, "sleep_with_backoff", lambda timeout, started_at: iter(range(5))
         )
         enabled = make_topic()
-        handle.enable_tableflow.side_effect = [
+        handle.get_tableflow_api().enable.side_effect = [
             TableflowTopicAlreadyExistsError("already enabled", table_name="my_table"),
             TableflowTopicAlreadyExistsError("already enabled", table_name="my_table"),
             enabled,
@@ -613,7 +618,7 @@ class TestEnsureTableflowConfig:
         tableflow.reconcile_tableflow_config(
             handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
         )
-        assert handle.enable_tableflow.call_count == 3
+        assert handle.get_tableflow_api().enable.call_count == 3
 
     def test_already_exists_that_never_clears_fails_telling_user_to_retry(
         self, handle, rel, monkeypatch
@@ -622,13 +627,13 @@ class TestEnsureTableflowConfig:
             tableflow, "sleep_with_backoff", lambda timeout, started_at: iter(range(2))
         )
         err = TableflowTopicAlreadyExistsError("already enabled", table_name="my_table")
-        handle.enable_tableflow.side_effect = err
+        handle.get_tableflow_api().enable.side_effect = err
         with pytest.raises(DbtDatabaseError, match="Re-run this model") as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
             )
         assert exc_info.value.__cause__ is err
-        assert handle.enable_tableflow.call_count == 3  # first attempt + 2 retries
+        assert handle.get_tableflow_api().enable.call_count == 3  # first attempt + 2 retries
 
     # --- Tableflow control-plane auth errors -> actionable guidance ---
 
@@ -638,10 +643,11 @@ class TestEnsureTableflowConfig:
         `database_kafka_cluster_id`, a parameter this adapter doesn't expose
         -- the wrapped error must instead name the actual profile field."""
         err = ProgrammingError(
-            "Resolving the Kafka cluster id from the database name requires a global "
-            "API key; alternatively pass database_kafka_cluster_id to connect()."
+            "Kafka cluster lookups require a global API key "
+            "(global_api_key/global_api_secret) or auth='oauth'; neither was supplied to "
+            "connect()."
         )
-        handle.get_tableflow.side_effect = err
+        handle.get_tableflow_api().get.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
@@ -649,14 +655,15 @@ class TestEnsureTableflowConfig:
         assert exc_info.value.__cause__ is err
         assert "global_api_key" in str(exc_info.value)
         assert "database_kafka_cluster_id" in str(exc_info.value)
-        handle.enable_tableflow.assert_not_called()
+        handle.get_tableflow_api().enable.assert_not_called()
 
     def test_enable_auth_error_names_profile_field(self, handle, rel):
         err = ProgrammingError(
-            "Resolving the Kafka cluster id from the database name requires a global "
-            "API key; alternatively pass database_kafka_cluster_id to connect()."
+            "Kafka cluster lookups require a global API key "
+            "(global_api_key/global_api_secret) or auth='oauth'; neither was supplied to "
+            "connect()."
         )
-        handle.enable_tableflow.side_effect = err
+        handle.get_tableflow_api().enable.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
@@ -668,17 +675,17 @@ class TestEnsureTableflowConfig:
         """Not every ProgrammingError is the cluster-id auth case -- an
         unrecognized one must not be mislabeled with auth guidance."""
         err = ProgrammingError("SQL statement cannot be empty")
-        handle.get_tableflow.side_effect = err
+        handle.get_tableflow_api().get.side_effect = err
         with pytest.raises(ProgrammingError) as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
             )
         assert exc_info.value is err
-        handle.enable_tableflow.assert_not_called()
+        handle.get_tableflow_api().enable.assert_not_called()
 
     def test_enable_unrelated_programming_error_bubbles_up_unchanged(self, handle, rel):
         err = ProgrammingError("SQL statement cannot be empty")
-        handle.enable_tableflow.side_effect = err
+        handle.get_tableflow_api().enable.side_effect = err
         with pytest.raises(ProgrammingError) as exc_info:
             tableflow.reconcile_tableflow_config(
                 handle, rel, {"table_formats": "ICEBERG", "storage": {"kind": "Managed"}}
@@ -699,7 +706,7 @@ class TestEnsureTableflowConfigMalformedConfig:
         # Not enabled yet -- reach the translation/enable path, not the
         # already-enabled warn path.
         handle = MagicMock()
-        handle.get_tableflow.side_effect = TableflowTopicNotFoundError(
+        handle.get_tableflow_api().get.side_effect = TableflowTopicNotFoundError(
             "not enabled", table_name="my_table"
         )
         return handle
@@ -908,26 +915,50 @@ class TestEnsureTableflowConfigMalformedConfig:
         assert expected_substring in str(excinfo.value), (
             f"Expected error containing {expected_substring!r}, got: {excinfo.value}"
         )
-        # Validated before any driver call, including the get_tableflow check --
+        # Validated before any driver call, including the TableflowApi.get check --
         # an unrelated connection/auth error there must never mask a config error.
-        handle.get_tableflow.assert_not_called()
-        handle.enable_tableflow.assert_not_called()
+        handle.get_tableflow_api().get.assert_not_called()
+        handle.get_tableflow_api().enable.assert_not_called()
 
     def test_malformed_config_raises_even_when_already_enabled(self, handle, rel):
         """A malformed config must surface its own error rather than being
         swallowed by the already-enabled warn-and-return path."""
-        handle.get_tableflow.side_effect = None
-        handle.get_tableflow.return_value = MagicMock()
+        handle.get_tableflow_api().get.side_effect = None
+        handle.get_tableflow_api().get.return_value = MagicMock()
         with pytest.raises(CompilationError):
             tableflow.reconcile_tableflow_config(handle, rel, {"table_formats": "PARQUET"})
-        handle.get_tableflow.assert_not_called()
+        handle.get_tableflow_api().get.assert_not_called()
 
     def test_malformed_config_raises_even_when_get_tableflow_would_error(self, handle, rel):
         """A malformed config must surface its own error rather than being
-        masked by an unrelated connection/auth error from get_tableflow."""
-        handle.get_tableflow.side_effect = OperationalError(
+        masked by an unrelated connection/auth error from TableflowApi.get."""
+        handle.get_tableflow_api().get.side_effect = OperationalError(
             "gateway timeout", http_status_code=504
         )
         with pytest.raises(CompilationError):
             tableflow.reconcile_tableflow_config(handle, rel, {"table_formats": "PARQUET"})
-        handle.get_tableflow.assert_not_called()
+        handle.get_tableflow_api().get.assert_not_called()
+
+
+class TestReraiseTableflowAuthError:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Kafka cluster lookups require a global API key "
+            "(global_api_key/global_api_secret) or auth='oauth'; neither was supplied to "
+            "connect().",
+            "Tableflow requires a global API key or a tableflow_api_key/tableflow_api_secret "
+            "pair; neither was supplied to connect().",
+        ],
+    )
+    def test_driver_missing_global_key_messages_are_rewritten(self, message):
+        err = ProgrammingError(message)
+        with pytest.raises(DbtDatabaseError, match="database_kafka_cluster_id") as exc_info:
+            tableflow.reraise_tableflow_auth_error(err)
+        assert exc_info.value.__cause__ is err
+
+    def test_unrelated_programming_error_is_reraised_unchanged(self):
+        err = ProgrammingError("Tableflow is not reachable with a BYOIDC bearer token")
+        with pytest.raises(ProgrammingError) as exc_info:
+            tableflow.reraise_tableflow_auth_error(err)
+        assert exc_info.value is err
