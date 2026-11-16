@@ -14,6 +14,7 @@ being dropped.
 """
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import NoReturn
@@ -54,7 +55,7 @@ logger = AdapterLogger("Confluent")
 # How long `create_tableflow_topic` keeps retrying a create that the server rejects as "already
 # enabled". Every create follows a check (or a confirmed removal) that Tableflow is absent, so
 # that rejection means a stale record is still being torn down server-side (its removal can
-# lag the 404 `disable_tableflow` waits for) or something else is changing this topic.
+# lag the 404 `TableflowApi.disable` waits for) or something else is changing this topic.
 CREATE_ALREADY_EXISTS_TIMEOUT_SECS = 300
 
 # Each `tableflow.storage.kind`/`error_handling.mode` value, verbatim as the
@@ -283,7 +284,7 @@ def probe_tableflow_state(handle: Connection, relation: BaseRelation) -> Tablefl
     """
     assert relation.identifier is not None
     try:
-        return handle.get_tableflow(relation.identifier)
+        return handle.get_tableflow_api().get(relation.identifier)
     except TableflowTopicNotFoundError:
         return None
     except ProgrammingError as e:
@@ -301,7 +302,7 @@ def disable_tableflow_topic(handle: Connection, relation: BaseRelation) -> None:
     """
     assert relation.identifier is not None
     try:
-        handle.disable_tableflow(relation.identifier)
+        handle.get_tableflow_api().disable(relation.identifier)
     except TableflowTopicNotFoundError:
         return  # Narrow race: already gone.
     except ProgrammingError as e:
@@ -427,7 +428,7 @@ def create_tableflow_topic(
 def _enable_retrying_while_exists(
     handle: Connection, relation: BaseRelation, desired: TableflowDesiredState
 ) -> TableflowTopic:
-    """`enable_tableflow`, retried for up to `CREATE_ALREADY_EXISTS_TIMEOUT_SECS` while the
+    """`TableflowApi.enable`, retried for up to `CREATE_ALREADY_EXISTS_TIMEOUT_SECS` while the
     server answers "already enabled"; raises that error if it never clears.
 
     Safe to retry: that answer means nothing was created. Deliberately not treated as success:
@@ -438,7 +439,7 @@ def _enable_retrying_while_exists(
     started_at = time.monotonic()
 
     def enable() -> TableflowTopic:
-        return handle.enable_tableflow(
+        return handle.get_tableflow_api().enable(
             relation.identifier,
             table_formats=desired.table_formats,
             storage=desired.storage,
@@ -449,7 +450,9 @@ def _enable_retrying_while_exists(
         # Diagnostic only: show what the server says exists, so a stale record can be told
         # apart from a live one. Never lets a failing GET mask the conflict being handled.
         try:
-            state = json.dumps(_describe_topic(handle.get_tableflow(relation.identifier)))
+            state = json.dumps(
+                _describe_topic(handle.get_tableflow_api().get(relation.identifier))
+            )
         except TableflowTopicNotFoundError:
             state = "GET found no Tableflow topic (404)"
         except ConfluentSqlError as e:
@@ -494,7 +497,7 @@ def patch_tableflow_topic(
         f"config -- this can take a few minutes."
     )
     try:
-        return handle.update_tableflow(
+        return handle.get_tableflow_api().update(
             relation.identifier, table_formats=patch.table_formats, config=patch.config
         )
     except TableflowTopicNotFoundError as e:
@@ -674,9 +677,10 @@ def reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
     unchanged if it's not that specific error.
 
     `ProgrammingError` covers more than this one case, so only the
-    known "no global key" message (raised by `_resolve_kafka_cluster_id`
-    when `database` can't be resolved to a Kafka cluster id) is
-    rewritten. Anything else re-raises as-is rather than risk
+    known "no global key" messages are rewritten: the driver's Kafka cluster
+    lookup ("Kafka cluster lookups require a global API key ...", raised when
+    `database` can't be resolved to a Kafka cluster id) and its Tableflow
+    surface ("Tableflow requires a global API key or a ... pair ..."). Anything else re-raises as-is rather than risk
     mislabeling an unrelated `ProgrammingError`.
 
     Only `global_api_key`/`global_api_secret` is offered as a fix: CMK
@@ -684,7 +688,7 @@ def reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
     Tableflow-scoped key pair can't satisfy it -- this adapter doesn't
     expose `database_kafka_cluster_id` to skip the lookup instead (#105).
     """
-    if "requires a global API key" not in str(e):
+    if not re.search(r"\brequires? a global API key\b", str(e)):
         raise e
     raise DbtDatabaseError(
         "Tableflow needs to resolve your Kafka cluster id, which requires a Global "

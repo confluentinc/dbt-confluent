@@ -47,3 +47,28 @@ class TestOpenAuthMode:
         assert kwargs["auth"] == "api_key"
         assert kwargs["flink_api_key"] == flink_api_key
         assert kwargs["flink_api_secret"] == flink_api_secret
+
+
+class TestOpenTimeouts:
+    def test_timeouts_are_passed_to_driver_without_warning(self, connect):
+        import warnings
+
+        from confluent_sql import Timeouts
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            open_connection({"flink_api_key": "k", "flink_api_secret": "s"})
+
+        kwargs = connect.call_args.kwargs
+        assert "http_timeout_secs" not in kwargs
+        timeouts = kwargs["timeouts"]
+        assert timeouts.httpx_request_timeout_secs == 60
+        # A results window no longer than a single request leaves no room for a retry.
+        assert timeouts.statement_results_response_wallclock_secs > 60
+        # Constructing Timeouts re-validates and would warn on a bad window.
+        Timeouts(
+            httpx_request_timeout_secs=timeouts.httpx_request_timeout_secs,
+            statement_results_response_wallclock_secs=(
+                timeouts.statement_results_response_wallclock_secs
+            ),
+        )

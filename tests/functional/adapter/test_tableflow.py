@@ -24,7 +24,7 @@ MATERIALIZATIONS.md#tableflow). Skipped entirely when
 CONFLUENT_GLOBAL_API_KEY/CONFLUENT_GLOBAL_API_SECRET aren't both set.
 
 Notes:
-- Both enable_tableflow and disable_tableflow block (by default) until the
+- Both TableflowApi.enable and TableflowApi.disable block (by default) until the
   topic reaches a terminal state -- RUNNING, or confirmed gone -- so these
   tests wait on real Confluent Cloud control-plane calls, not just Flink SQL.
   Expect them to take noticeably longer than the rest of the functional suite.
@@ -37,7 +37,7 @@ import os
 from unittest.mock import patch
 
 import pytest
-from confluent_sql import Connection
+from confluent_sql import TableflowApi
 from confluent_sql.exceptions import TableflowTopicNotFoundError
 
 from dbt.tests.util import run_dbt, set_model_file
@@ -63,7 +63,7 @@ def _get_tableflow(project, name):
     with project.adapter.connection_named("tableflow_check"):
         conn = project.adapter.connections.get_thread_connection()
         try:
-            return conn.handle.get_tableflow(physical_name(name))
+            return conn.handle.get_tableflow_api().get(physical_name(name))
         except TableflowTopicNotFoundError:
             return None
 
@@ -72,7 +72,7 @@ def _disable_tableflow_best_effort(project, name):
     with project.adapter.connection_named("tableflow_teardown"):
         conn = project.adapter.connections.get_thread_connection()
         try:
-            conn.handle.disable_tableflow(physical_name(name))
+            conn.handle.get_tableflow_api().disable(physical_name(name))
         except TableflowTopicNotFoundError:
             pass
 
@@ -147,7 +147,7 @@ select 1 as id, 'a' as name
 class TestNoSpuriousPatchOnDefaultErrorHandling(_TableflowFixtures):
     """A second identical run must not PATCH when `config.error_handling` is left at its server
     default (`SUSPEND`) -- see the module docstring for the failure mode this guards against.
-    `Connection.update_tableflow` is replaced with a plain function that records each call and
+    `TableflowApi.update` is replaced with a plain function that records each call and
     delegates to the real implementation, so a spurious PATCH is caught directly (a Mock can't
     just be swapped in for a class-level method: unlike a function, it doesn't implement the
     descriptor protocol, so `self` wouldn't be bound automatically when called via an instance)."""
@@ -172,13 +172,13 @@ class TestNoSpuriousPatchOnDefaultErrorHandling(_TableflowFixtures):
         assert topic.spec.config.error_handling.mode == "SUSPEND"
 
         calls = []
-        original_update_tableflow = Connection.update_tableflow
+        original_update = TableflowApi.update
 
-        def spy_update_tableflow(self, *args, **kwargs):
+        def spy_update(self, *args, **kwargs):
             calls.append((args, kwargs))
-            return original_update_tableflow(self, *args, **kwargs)
+            return original_update(self, *args, **kwargs)
 
-        with patch.object(Connection, "update_tableflow", spy_update_tableflow):
+        with patch.object(TableflowApi, "update", spy_update):
             results = run_dbt(["run"])
             assert all(r.status.name == "Success" for r in results)
         assert calls == [], f"Expected no PATCH on an unchanged config, but got: {calls}"

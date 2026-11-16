@@ -52,44 +52,44 @@ class TestDisableTableflowIfEnabled:
         return mock
 
     def test_disables_when_enabled(self, wire_connection, handle, rel, logger):
-        handle.get_tableflow.return_value = make_topic()
+        handle.get_tableflow_api().get.return_value = make_topic()
         wire_connection.disable_tableflow_if_enabled(rel)
-        handle.disable_tableflow.assert_called_once_with("my_table")
+        handle.get_tableflow_api().disable.assert_called_once_with("my_table")
         logger.info.assert_called_once()
         assert "my_table" in logger.info.call_args.args[0]
 
     def test_no_op_when_not_enabled(self, wire_connection, handle, rel, logger):
-        handle.get_tableflow.side_effect = TableflowTopicNotFoundError(
+        handle.get_tableflow_api().get.side_effect = TableflowTopicNotFoundError(
             "not enabled", table_name="my_table"
         )
         wire_connection.disable_tableflow_if_enabled(rel)
-        handle.disable_tableflow.assert_not_called()
+        handle.get_tableflow_api().disable.assert_not_called()
         logger.info.assert_not_called()
 
     def test_checks_before_disabling(self, wire_connection, handle, rel):
         """A GET-then-DELETE order, not a blind DELETE -- a blind DELETE would
         404 (raise TableflowTopicNotFoundError) for the common case where
         Tableflow was never enabled."""
-        handle.get_tableflow.return_value = make_topic()
+        handle.get_tableflow_api().get.return_value = make_topic()
         wire_connection.disable_tableflow_if_enabled(rel)
-        assert handle.method_calls[0][0] == "get_tableflow"
-        assert handle.method_calls[1][0] == "disable_tableflow"
+        api_calls = handle.get_tableflow_api().method_calls
+        assert [c[0] for c in api_calls] == ["get", "disable"]
 
     def test_get_error_is_wrapped_as_dbt_database_error(self, wire_connection, handle, rel):
         """Bypasses ConfluentConnectionManager.exception_handler (no SQL
         statement/cursor involved), so it must wrap confluent_sql errors
         itself instead of leaking a raw driver exception."""
         err = OperationalError("gateway timeout", http_status_code=504)
-        handle.get_tableflow.side_effect = err
+        handle.get_tableflow_api().get.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             wire_connection.disable_tableflow_if_enabled(rel)
         assert exc_info.value.__cause__ is err
-        handle.disable_tableflow.assert_not_called()
+        handle.get_tableflow_api().disable.assert_not_called()
 
     def test_disable_error_is_wrapped_as_dbt_database_error(self, wire_connection, handle, rel):
-        handle.get_tableflow.return_value = make_topic()
+        handle.get_tableflow_api().get.return_value = make_topic()
         err = OperationalError("internal server error", http_status_code=500)
-        handle.disable_tableflow.side_effect = err
+        handle.get_tableflow_api().disable.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             wire_connection.disable_tableflow_if_enabled(rel)
         assert exc_info.value.__cause__ is err
@@ -99,8 +99,8 @@ class TestDisableTableflowIfEnabled:
         disabled concurrently (another run, manual intervention) in between,
         the DELETE 404s too. That's the desired end state arriving a
         different way, not an error, so it must not raise."""
-        handle.get_tableflow.return_value = make_topic()
-        handle.disable_tableflow.side_effect = TableflowTopicNotFoundError(
+        handle.get_tableflow_api().get.return_value = make_topic()
+        handle.get_tableflow_api().disable.side_effect = TableflowTopicNotFoundError(
             "not enabled", table_name="my_table"
         )
         wire_connection.disable_tableflow_if_enabled(rel)
@@ -112,20 +112,20 @@ class TestDisableTableflowIfEnabled:
             "Resolving the Kafka cluster id from the database name requires a global "
             "API key; alternatively pass database_kafka_cluster_id to connect()."
         )
-        handle.get_tableflow.side_effect = err
+        handle.get_tableflow_api().get.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             wire_connection.disable_tableflow_if_enabled(rel)
         assert exc_info.value.__cause__ is err
         assert "global_api_key" in str(exc_info.value)
-        handle.disable_tableflow.assert_not_called()
+        handle.get_tableflow_api().disable.assert_not_called()
 
     def test_disable_auth_error_names_profile_field(self, wire_connection, handle, rel):
-        handle.get_tableflow.return_value = make_topic()
+        handle.get_tableflow_api().get.return_value = make_topic()
         err = ProgrammingError(
             "Resolving the Kafka cluster id from the database name requires a global "
             "API key; alternatively pass database_kafka_cluster_id to connect()."
         )
-        handle.disable_tableflow.side_effect = err
+        handle.get_tableflow_api().disable.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
             wire_connection.disable_tableflow_if_enabled(rel)
         assert exc_info.value.__cause__ is err
@@ -137,18 +137,18 @@ class TestDisableTableflowIfEnabled:
         """Not every ProgrammingError is the cluster-id auth case -- an
         unrecognized one must not be mislabeled with auth guidance."""
         err = ProgrammingError("SQL statement cannot be empty")
-        handle.get_tableflow.side_effect = err
+        handle.get_tableflow_api().get.side_effect = err
         with pytest.raises(ProgrammingError) as exc_info:
             wire_connection.disable_tableflow_if_enabled(rel)
         assert exc_info.value is err
-        handle.disable_tableflow.assert_not_called()
+        handle.get_tableflow_api().disable.assert_not_called()
 
     def test_disable_unrelated_programming_error_bubbles_up_unchanged(
         self, wire_connection, handle, rel
     ):
-        handle.get_tableflow.return_value = make_topic()
+        handle.get_tableflow_api().get.return_value = make_topic()
         err = ProgrammingError("SQL statement cannot be empty")
-        handle.disable_tableflow.side_effect = err
+        handle.get_tableflow_api().disable.side_effect = err
         with pytest.raises(ProgrammingError) as exc_info:
             wire_connection.disable_tableflow_if_enabled(rel)
         assert exc_info.value is err

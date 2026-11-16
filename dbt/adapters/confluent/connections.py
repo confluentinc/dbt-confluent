@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import time
 import uuid
@@ -7,7 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import confluent_sql
-from confluent_sql import HIDDEN_LABEL, Cursor
+from confluent_sql import DEFAULT_TIMEOUTS, HIDDEN_LABEL, Cursor
 from confluent_sql.exceptions import (
     ComputePoolExhaustedError,
     OperationalError,
@@ -46,6 +47,13 @@ if TYPE_CHECKING:
     import agate
 
 logger = logging.getLogger(__name__)
+
+_HTTP_REQUEST_TIMEOUT_SECS = 60.0
+_TIMEOUTS = dataclasses.replace(
+    DEFAULT_TIMEOUTS,
+    httpx_request_timeout_secs=_HTTP_REQUEST_TIMEOUT_SECS,
+    statement_results_response_wallclock_secs=2 * _HTTP_REQUEST_TIMEOUT_SECS,
+)
 
 
 @dataclass
@@ -582,8 +590,10 @@ class ConfluentConnectionManager(SQLConnectionManager):
                 http_user_agent=user_agent,
                 # INFORMATION_SCHEMA queries (especially the drift check's UNION ALL
                 # queries) routinely take longer than the default 5s timeout on cold
-                # metadata lookups, surfacing as a "read operation timed out".
-                http_timeout_secs=60,
+                # metadata lookups, surfacing as a "read operation timed out". The results
+                # wallclock window must exceed the per-request timeout, or the driver warns
+                # that it leaves no room to retry a timed-out results fetch.
+                timeouts=_TIMEOUTS,
             )
             connection.state = "open"
             connection.handle = handle
