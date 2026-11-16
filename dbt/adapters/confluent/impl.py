@@ -231,16 +231,42 @@ class ConfluentAdapter(SQLAdapter):
 
     @available
     def require_artifact_credentials(self) -> None:
-        """Raise before any artifact API call if the profile can't make one.
-
-        The artifact API takes a Global API key or OAuth sign-in, not a Flink-region key.
-        """
-        credentials = self.config.credentials
-        if credentials.auth != "oauth" and not credentials.global_api_key:
+        """Raise before any artifact API call if the profile can't make one."""
+        if not self.config.credentials.can_use_artifact_api:
             raise CompilationError(
                 "The `function` materialization needs credentials that can use the artifact "
-                "API. Set `auth: oauth`, or add `global_api_key`/`global_api_secret` to your "
-                "profile -- see README.md#configuration."
+                "API. Set `auth: oauth`, or add `global_api_key`/`global_api_secret` or "
+                "`cloud_api_key`/`cloud_api_secret` to your profile -- see "
+                "README.md#fine-grained-credentials."
+            )
+
+    @available
+    def require_tableflow_credentials(self) -> None:
+        """Raise before any Tableflow call if the profile can't make one."""
+        if not self.config.credentials.can_use_tableflow:
+            raise CompilationError(
+                "`tableflow` needs credentials that can use the Tableflow API. Set "
+                "`auth: oauth`, or add `global_api_key`/`global_api_secret`, or add "
+                "`tableflow_api_key`/`tableflow_api_secret` together with "
+                "`database_kafka_cluster_id` (the `lkc-...` id of the `schema` cluster) to "
+                "your profile -- see README.md#fine-grained-credentials."
+            )
+
+    @available
+    def require_tableflow_schema(self, schema: str) -> None:
+        """Raise before any Tableflow call if the model isn't in the profile's `schema`.
+
+        The driver aims every Tableflow call at the Kafka cluster behind the profile's
+        `schema`, so a model with a `+schema` override would enable Tableflow on the wrong
+        cluster.
+        """
+        profile_schema = self.config.credentials.schema
+        if schema != profile_schema:
+            raise CompilationError(
+                f"`tableflow` is only supported on models in the profile's `schema` "
+                f"('{profile_schema}'), but this model's schema is '{schema}'. Tableflow calls "
+                f"always target the Kafka cluster behind the profile's `schema` -- see "
+                f"README.md#fine-grained-credentials."
             )
 
     @classmethod

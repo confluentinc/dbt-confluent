@@ -654,6 +654,7 @@ class TestEnsureTableflowConfig:
             )
         assert exc_info.value.__cause__ is err
         assert "global_api_key" in str(exc_info.value)
+        assert "database_kafka_cluster_id" in str(exc_info.value)
         handle.get_tableflow_api().enable.assert_not_called()
 
     def test_enable_auth_error_names_profile_field(self, handle, rel):
@@ -952,7 +953,7 @@ class TestReraiseTableflowAuthError:
     )
     def test_driver_missing_global_key_messages_are_rewritten(self, message):
         err = ProgrammingError(message)
-        with pytest.raises(DbtDatabaseError, match="Global API key") as exc_info:
+        with pytest.raises(DbtDatabaseError, match="database_kafka_cluster_id") as exc_info:
             tableflow.reraise_tableflow_auth_error(err)
         assert exc_info.value.__cause__ is err
 

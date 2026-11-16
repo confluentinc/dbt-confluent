@@ -680,20 +680,20 @@ def reraise_tableflow_auth_error(e: ProgrammingError) -> NoReturn:
     known "no global key" messages are rewritten: the driver's Kafka cluster
     lookup ("Kafka cluster lookups require a global API key ...", raised when
     `database` can't be resolved to a Kafka cluster id) and its Tableflow
-    surface ("Tableflow requires a global API key or a ... pair ..."). Anything else re-raises as-is rather than risk
-    mislabeling an unrelated `ProgrammingError`.
+    surface ("Tableflow requires a global API key or a ... pair ..."). Anything
+    else re-raises as-is rather than risk mislabeling an unrelated
+    `ProgrammingError`.
 
-    Only `global_api_key`/`global_api_secret` is offered as a fix: CMK
-    cluster-id resolution requires the global key specifically, so a
-    Tableflow-scoped key pair can't satisfy it -- this adapter doesn't
-    expose `database_kafka_cluster_id` to skip the lookup instead (#105).
+    The message offers the two ways the driver can satisfy Tableflow (#105).
     """
     if not re.search(r"\brequires? a global API key\b", str(e)):
         raise e
     raise DbtDatabaseError(
-        "Tableflow needs to resolve your Kafka cluster id, which requires a Global "
-        "API key. Add `global_api_key`/`global_api_secret` to your profile -- see "
-        "README.md#configuration."
+        "Tableflow needs a credential it can use and a Kafka cluster id. Add "
+        "`global_api_key`/`global_api_secret` to your profile, or add "
+        "`tableflow_api_key`/`tableflow_api_secret` together with "
+        "`database_kafka_cluster_id` (the `lkc-...` id of the `schema` cluster) -- see "
+        "README.md#fine-grained-credentials."
     ) from e
 
 

@@ -109,8 +109,9 @@ class TestDisableTableflowIfEnabled:
 
     def test_get_auth_error_names_profile_field(self, wire_connection, handle, rel):
         err = ProgrammingError(
-            "Resolving the Kafka cluster id from the database name requires a global "
-            "API key; alternatively pass database_kafka_cluster_id to connect()."
+            "Kafka cluster lookups require a global API key "
+            "(global_api_key/global_api_secret) or auth='oauth'; neither was supplied to "
+            "connect()."
         )
         handle.get_tableflow_api().get.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
@@ -122,8 +123,9 @@ class TestDisableTableflowIfEnabled:
     def test_disable_auth_error_names_profile_field(self, wire_connection, handle, rel):
         handle.get_tableflow_api().get.return_value = make_topic()
         err = ProgrammingError(
-            "Resolving the Kafka cluster id from the database name requires a global "
-            "API key; alternatively pass database_kafka_cluster_id to connect()."
+            "Kafka cluster lookups require a global API key "
+            "(global_api_key/global_api_secret) or auth='oauth'; neither was supplied to "
+            "connect()."
         )
         handle.get_tableflow_api().disable.side_effect = err
         with pytest.raises(DbtDatabaseError) as exc_info:
