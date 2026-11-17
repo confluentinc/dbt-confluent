@@ -30,7 +30,6 @@ from tests.functional.adapter._helpers import (
 from tests.functional.adapter.fixtures import ConfluentFixtures
 from tests.functional.adapter.isolation import physical_name
 
-FLAG = "enable_experimental_function_materialization"
 FUNCTION_NAME = "udf"
 FUNCTION_FILE = f"{FUNCTION_NAME}.sql"
 
@@ -120,36 +119,17 @@ def our_artifacts(project) -> list:
 
 
 class FunctionFixtures(ConfluentFixtures):
-    """Flag on by default (override `flags_enabled`).
-
-    Artifacts belong to the dbt project (named in their description), so each class's project name
+    """Artifacts belong to the dbt project (named in their description), so each class's project name
     carries its isolation namespace: the artifacts it uploads can't collide with another class's or
     another session's, and the class sweep (see `sweep_test_resources`) deletes them along with its
     functions. Look them up by that owner (`our_artifacts`), not by name: a long project name is cut
     short in the artifact's name.
     """
 
-    flags_enabled = True
-
     @pytest.fixture(scope="class")
     def project_config_update(self, project_config_update, relation_namespace):
         name = f"{relation_namespace}{self.NAME}"
-        project_config_update = {**project_config_update, "name": name}
-        if self.flags_enabled:
-            return {**project_config_update, "flags": {FLAG: True}}
-        return project_config_update
-
-
-class TestFunctionRequiresBehaviorFlag(FunctionFixtures):
-    NAME = "functionflagoff"
-    flags_enabled = False
-
-    @pytest.fixture(scope="class")
-    def functions(self):
-        return {f"{FUNCTION_NAME}.sql": function_sql(NONEXISTENT_ARTIFACT_ID)}
-
-    def test_disabled_by_default(self, project):
-        assert FLAG in run_failing()[FUNCTION_NAME]
+        return {**project_config_update, "name": name}
 
 
 class TestFunctionValidatesMaterializationConfig(FunctionFixtures):
