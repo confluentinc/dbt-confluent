@@ -1,0 +1,18 @@
+version: 2
+
+models:
+  - name: tshirt_sizing_example
+    columns:
+      - name: s_smaller_than_m
+        data_type: boolean
+      - name: xl_smaller_than_m
+        data_type: boolean
+      - name: unknown_size
+        data_type: boolean
+
+  - name: shout_example
+    columns:
+      - name: shouted
+        data_type: string
+      - name: shouted_null
+        data_type: string

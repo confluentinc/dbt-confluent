@@ -1,0 +1,9 @@
+name: 'udf_sample'
+version: '1.0.0'
+config-version: 2
+
+profile: 'udf_sample'
+
+model-paths: ["models"]
+
+models:

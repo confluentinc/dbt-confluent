@@ -1,0 +1,9 @@
+# dbt output
+target/
+logs/
+dbt_packages/
+.user.yml
+
+# UDF packages built by `make` in udfs/
+udfs/build/
+udfs/shout/target/

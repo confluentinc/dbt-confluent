@@ -1,0 +1,12 @@
+# Minimal project used by examples/artifact_upload_example.py: `uv build --sdist` of this
+# directory produces the tarball the example zips and uploads as a Python UDF artifact.
+[project]
+name = "tshirt-sizing"
+version = "0.1.0"
+description = "Example Python UDF packaged for Confluent Cloud Flink"
+requires-python = "~=3.11.0"
+dependencies = ["apache-flink==2.0.0", "setuptools<81"]
+
+[build-system]
+requires = ["uv_build>=0.11.30,<0.12.0"]
+build-backend = "uv_build"
