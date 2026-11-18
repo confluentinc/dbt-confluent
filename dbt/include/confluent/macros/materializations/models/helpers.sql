@@ -36,6 +36,21 @@
   {%- endif -%}
 {% endmacro %}
 
+{% macro render_columns_and_constraints() %}
+  {# dbt's get_table_columns_and_constraints(), plus the `watermark` config's
+     `WATERMARK FOR ...` entry as the last item of the column block, if set.
+     The materialization is responsible for calling
+     `adapter.validate_watermark_config` once before render. #}
+  {%- set columns_ddl = get_table_columns_and_constraints() -%}
+  {%- set watermark = config.get('watermark') -%}
+  {%- if watermark is not none -%}
+    {{ adapter.append_watermark(columns_ddl, watermark) }}
+  {%- else -%}
+    {{ columns_ddl }}
+  {%- endif -%}
+{% endmacro %}
+
+
 {% macro render_contract_columns_and_reproject_sql(sql) %}
   {# When the model has an enforced contract, returns
        {'ddl': <column-definition + constraints block DDL text>,
@@ -55,11 +70,16 @@
      #84 review). #}
   {%- set contract_config = config.get('contract') -%}
   {%- if not contract_config.enforced -%}
-    {{ return({'ddl': '', 'sql': sql}) }}
+    {#- Without a contract there are no declared columns; a `watermark` (validated to be
+       allowed only where the other columns can be inferred from the query) is then the
+       whole column block. -#}
+    {%- set watermark = config.get('watermark') -%}
+    {%- set ddl = adapter.append_watermark('', watermark) if watermark is not none else '' -%}
+    {{ return({'ddl': ddl, 'sql': sql}) }}
   {%- endif -%}
   {%- set ddl -%}
     {{ get_assert_columns_equivalent(sql) }}
-    {{ get_table_columns_and_constraints() }}
+    {{ render_columns_and_constraints() }}
   {%- endset -%}
   {{ return({'ddl': ddl, 'sql': get_select_subquery(sql)}) }}
 {% endmacro %}

@@ -15,6 +15,7 @@
 
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
   {%- do adapter.validate_materialized_table_config(config) -%}
+  {%- do adapter.validate_watermark_config(config.get('watermark'), config) -%}
 
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type=this.Table) %}

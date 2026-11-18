@@ -78,10 +78,10 @@ MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
     | {"connector", "with", "on_schema_drift"},
     "streaming_table": _UNIVERSAL_CONFIG_KEYS
     | _KAFKA_BACKED_CONFIG_KEYS
-    | {"with", "on_schema_drift", "statement_properties"},
+    | {"with", "on_schema_drift", "statement_properties", "watermark"},
     "materialized_table": _UNIVERSAL_CONFIG_KEYS
     | _KAFKA_BACKED_CONFIG_KEYS
-    | {"with", "start_mode", "statement_properties"},
+    | {"with", "start_mode", "statement_properties", "watermark"},
 }
 
 _ALL_CONFIG_KEYS: frozenset[str] = frozenset().union(*MATERIALIZATION_CONFIG_KEYS.values())
@@ -989,6 +989,66 @@ class ConfluentAdapter(SQLAdapter):
             raise CompilationError(
                 f"'distributed_by' has unknown key '{key}'. Allowed keys: 'columns', 'buckets'"
             )
+
+    @available
+    def validate_watermark_config(self, watermark: object, model_config: Any) -> None:
+        """Raise CompilationError if the `watermark` config is malformed or can't be rendered.
+
+        Allowed shape: a dict with a non-empty string `column` (no backticks) and a non-empty
+        string `expression`, and no other keys. The watermark is rendered into the table's
+        column block, so a `streaming_table` (whose CREATE TABLE has no AS SELECT to infer the
+        other columns from) must have an enforced contract. A `materialized_table` needn't: its
+        other columns are inferred from the query. `model_config` is the Jinja config object
+        (anything with `.get`).
+        """
+        if watermark is None:
+            return
+        shape_error = (
+            "'watermark' config must be a mapping with non-empty string 'column' and "
+            "'expression' keys"
+        )
+        if not isinstance(watermark, dict):
+            raise CompilationError(shape_error)
+        for key in ("column", "expression"):
+            value = watermark.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise CompilationError(shape_error)
+        if "`" in watermark["column"]:
+            raise CompilationError(
+                f"'watermark.column' must not contain backtick characters; got: "
+                f"{watermark['column']}"
+            )
+        unknown = set(watermark) - {"column", "expression"}
+        if unknown:
+            raise CompilationError(
+                f"'watermark' has unknown key '{sorted(unknown)[0]}'. "
+                "Allowed keys: 'column', 'expression'"
+            )
+        contract = model_config.get("contract")
+        if model_config.get("materialized") != "materialized_table" and not (
+            contract and contract.enforced
+        ):
+            raise CompilationError(
+                "'watermark' requires an enforced contract (config(contract={'enforced': true})) "
+                "on this materialization, because the watermark is declared inside the table's "
+                "column definitions, which the contract provides."
+            )
+
+    @available
+    def append_watermark(self, columns_ddl: str, watermark: dict[str, str]) -> str:
+        """Add `WATERMARK FOR <column> AS <expression>` as the last entry of a parenthesized
+        column/constraint block, such as dbt's `get_table_columns_and_constraints()`. An empty
+        `columns_ddl` (no contract) yields a block holding only the watermark."""
+        entry = f"WATERMARK FOR {self.quote(watermark['column'])} AS {watermark['expression']}"
+        body = columns_ddl.rstrip()
+        if not body:
+            return f"(\n  {entry}\n)"
+        if not body.endswith(")"):
+            raise CompilationError(
+                "Cannot add a watermark: the contract's column definitions are not a "
+                f"parenthesized block: {columns_ddl!r}"
+            )
+        return f"{body[:-1].rstrip()},\n  {entry}\n)"
 
     @available
     def validate_materialized_table_config(self, model_config: Any) -> None:
