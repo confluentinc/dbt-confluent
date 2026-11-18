@@ -24,7 +24,7 @@ from dbt.adapters.confluent.function_artifacts import (
 )
 from dbt.adapters.confluent.function_artifacts_repo import FunctionArtifactsRepo
 from dbt.adapters.confluent.functions import FunctionState, QualifiedName
-from dbt.adapters.confluent.impl import FUNCTION_MATERIALIZATION_FLAG, ConfluentAdapter
+from dbt.adapters.confluent.impl import ConfluentAdapter
 from dbt.adapters.contracts.connection import AdapterResponse
 
 CATALOG = "env-1"
@@ -388,31 +388,6 @@ class TestPlanFunctionAction:
     def test_unknown_mode_raises(self):
         with pytest.raises(CompilationError, match="on_configuration_change"):
             functions.plan_function_action(FUNCTION, CHANGES, "sometimes")
-
-
-class TestFunctionMaterializationFlag:
-    """The `function` materialization is refused unless its behavior flag is enabled."""
-
-    def adapter_with_flag(self, enabled: bool) -> ConfluentAdapter:
-        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
-        adapter._behavior = SimpleNamespace(  # type: ignore[has-type]
-            **{FUNCTION_MATERIALIZATION_FLAG: SimpleNamespace(no_warn=enabled)}
-        )
-        return adapter
-
-    def test_flag_is_declared_and_off_by_default(self):
-        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
-        (flag,) = [
-            f for f in adapter._behavior_flags if f["name"] == FUNCTION_MATERIALIZATION_FLAG
-        ]
-        assert flag["default"] is False
-
-    def test_disabled_raises_naming_the_flag(self):
-        with pytest.raises(CompilationError, match=FUNCTION_MATERIALIZATION_FLAG):
-            self.adapter_with_flag(enabled=False).require_function_materialization_enabled()
-
-    def test_enabled_passes(self):
-        self.adapter_with_flag(enabled=True).require_function_materialization_enabled()
 
 
 class TestValidateArtifactPath:

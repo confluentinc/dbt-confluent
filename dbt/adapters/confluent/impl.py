@@ -15,7 +15,6 @@ from confluent_sql.exceptions import (
     StatementNotFoundError,
 )
 from confluent_sql.types import ColumnTypeDefinition
-from dbt_common.behavior_flags import BehaviorFlag
 from dbt_common.contracts.constraints import ConstraintType, ModelLevelConstraint
 from dbt_common.events.contextvars import get_node_info
 from dbt_common.exceptions import CompilationError, DbtDatabaseError, DbtRuntimeError
@@ -154,7 +153,6 @@ class _CleanupRegistry(threading.local):
         self.relations: list = []
 
 
-FUNCTION_MATERIALIZATION_FLAG = "enable_experimental_function_materialization"
 
 
 class DryRunColumns(NamedTuple):
@@ -200,34 +198,6 @@ class ConfluentAdapter(SQLAdapter):
         # Unlike the registry above, shared by every thread on purpose: it is how threads
         # building functions from one package hash, list and upload it once between them.
         self._artifacts_repo = FunctionArtifactsRepo()
-
-    @property
-    def _behavior_flags(self) -> list[BehaviorFlag]:
-        return [
-            {
-                "name": FUNCTION_MATERIALIZATION_FLAG,
-                "default": False,
-                "source": "dbt-confluent",
-                "description": (
-                    "The `function` materialization (Flink UDFs) is experimental. Changing a "
-                    "function's config drops and re-creates it, and if the re-create fails the "
-                    "previous function is restored on a best-effort basis. It is "
-                    "disabled unless this flag is enabled."
-                ),
-                "docs_url": "https://github.com/confluentinc/dbt-confluent/blob/main/MATERIALIZATIONS.md#function",
-            }
-        ]
-
-    @available
-    def require_function_materialization_enabled(self) -> None:
-        """Raise unless the experimental `function` materialization flag is enabled."""
-        # .no_warn: dbt would otherwise add a "this will change" warning on top of our error.
-        if not getattr(self.behavior, FUNCTION_MATERIALIZATION_FLAG).no_warn:
-            raise CompilationError(
-                "The `function` materialization is experimental and disabled by default. "
-                f"To use it, set `{FUNCTION_MATERIALIZATION_FLAG}: true` under `flags:` in "
-                "dbt_project.yml."
-            )
 
     @available
     def require_artifact_credentials(self) -> None:
