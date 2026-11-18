@@ -8,6 +8,7 @@
      validates it for real when it actually applies the config. #}
   {% do validate_materialization_config() %}
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
+  {%- do adapter.validate_watermark_config(config.get('watermark'), config) -%}
 
   -- Check if the relation exists already, and precreate the target_relation
   {%- set existing_relation = load_cached_relation(this) -%}
@@ -53,7 +54,7 @@
     {% call statement('ddl', execution_mode="streaming_ddl",
                       statement_name=get_statement_name('-ddl')) -%}
       create table {{ target_relation }}
-      {{ get_table_columns_and_constraints() }}
+      {{ render_columns_and_constraints() }}
       {{ get_distributed_by_clause() }}
       {{ render_with_options(with_options) }}
     {%- endcall -%}
