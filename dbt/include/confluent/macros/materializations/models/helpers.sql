@@ -128,7 +128,7 @@ WITH (
 {% endmacro %}
 
 
-{% macro decide_action(existing_relation, has_select_query=true, recoverable=false) %}
+{% macro decide_action(existing_relation, has_select_query=true, recoverable=false, current_sql=none) %}
   {# Decide what to do for an existing-relation materialization, perform the
      side effects that decision implies, and return the action so the caller
      can skip its own DDL/INSERT blocks. Returns one of:
@@ -147,7 +147,7 @@ WITH (
      can't be safely restarted without dropping the table (`streaming_source`).
      `recoverable` also opts into the SQL logic check: the statement is looked up
      once, here, and `_enforce_schema_drift` compares a healthy statement's SQL
-     with the model's.
+     with current_sql, the SQL the caller would submit for it on this run.
 
      has_select_query: true if the model SQL is a SELECT (table,
      streaming_table), false if it's column definitions (streaming_source). #}
@@ -161,7 +161,7 @@ WITH (
   {% elif action == 'restart' %}
     {{ _prepare_restart(existing_relation, has_select_query) }}
   {% else %}
-    {{ _prepare_skip(existing_relation, has_select_query, inspected) }}
+    {{ _prepare_skip(existing_relation, has_select_query, inspected, current_sql) }}
   {% endif %}
   {{ return(action) }}
 {% endmacro %}
@@ -218,7 +218,8 @@ WITH (
      missing, is re-submitted with the model's current SQL. Fixing a FAILED statement's SQL, or
      stopping a statement to change it, must still recover without --full-refresh, and deleting
      the statement would get around a check here anyway. The re-submitted INSERT has no starting
-     offset (existing behavior), so it likely re-reads its sources from the beginning. #}
+     offset (existing behavior), so it re-reads its sources from the earliest offset, unless a
+     source sets scan.startup.mode. #}
   {{ _enforce_schema_drift(existing_relation, has_select_query, restart=true) }}
   {{ log("Statement for " ~ existing_relation ~ " is missing or in a terminal phase. Re-submitting (no full refresh required).", info=True) }}
   {# expect_exists=false: decide_action already inspected this statement (and
@@ -229,21 +230,21 @@ WITH (
 {% endmacro %}
 
 
-{% macro _prepare_skip(existing_relation, has_select_query, inspected=none) %}
+{% macro _prepare_skip(existing_relation, has_select_query, inspected=none, current_sql=none) %}
   {# Side effects for the 'skip' action: enforce schema drift (and, given the
-     inspected statement, SQL logic drift), then log. #}
-  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=false, inspected=inspected) }}
+     inspected statement and the current SQL, SQL logic drift), then log. #}
+  {{ _enforce_schema_drift(existing_relation, has_select_query, restart=false, inspected=inspected, current_sql=current_sql) }}
   {{ log("Relation " ~ existing_relation ~ " already exists. Skipping. Use --full-refresh to recreate.", info=True) }}
 {% endmacro %}
 
 
-{% macro _enforce_schema_drift(existing_relation, has_select_query, restart, inspected=none) %}
+{% macro _enforce_schema_drift(existing_relation, has_select_query, restart, inspected=none, current_sql=none) %}
   {# Run the drift check appropriate to the on_schema_drift config:
        'fail'   — full check (columns + options + distribution); raises on any drift. Then,
-                  given the inspected statement (the skip path of a recoverable
-                  materialization), the SQL logic check: raises if the statement isn't running
-                  the model's current SQL. Schema first, so a column change (which changes the SQL
-                  too) keeps its more specific error. Not in --empty or --sample runs: they
+                  given the inspected statement and the current SQL (the skip path of a
+                  recoverable materialization), the SQL logic check: raises if the statement
+                  isn't running current_sql. Schema first, so a column change (which changes the
+                  SQL too) keeps its more specific error. Not in --empty or --sample runs: they
                   rewrite each ref()/source() in the compiled SQL, so it can't be compared.
        'ignore' — no check, except the restart path still needs a columns-only check (benign
                   options/distribution drift is fine, but a column mismatch would make the
@@ -253,8 +254,8 @@ WITH (
   {% set on_schema_drift = config.get('on_schema_drift', 'fail') %}
   {% if on_schema_drift == 'fail' %}
     {{ check_for_schema_drift(existing_relation, has_select_query) }}
-    {% if inspected and not flags.EMPTY and not invocation_args_dict.get('sample') %}
-      {% do adapter.check_logic_drift(existing_relation, get_statement_name(), inspected.sql, sql) %}
+    {% if inspected and current_sql is not none and not flags.EMPTY and not invocation_args_dict.get('sample') %}
+      {% do adapter.check_logic_drift(existing_relation, get_statement_name(), inspected.sql, current_sql) %}
     {% endif %}
   {% elif on_schema_drift == 'ignore' %}
     {% if restart %}

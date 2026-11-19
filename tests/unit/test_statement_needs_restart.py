@@ -14,7 +14,7 @@ import pytest
 from confluent_sql.exceptions import OperationalError, StatementNotFoundError
 from confluent_sql.statement import Phase
 
-from dbt.adapters.confluent.impl import ConfluentAdapter
+from dbt.adapters.confluent.impl import ConfluentAdapter, StatementInspection
 
 
 def _adapter() -> ConfluentAdapter:
@@ -95,23 +95,23 @@ class TestInspectStatement:
         adapter = _adapter_with_phase(Phase.RUNNING)
         _handle(adapter).get_statement.return_value.spec = {"statement": "INSERT INTO t SELECT 1"}
 
-        assert adapter.inspect_statement("any-name") == {
-            "needs_restart": False,
-            "sql": "INSERT INTO t SELECT 1",
-        }
+        assert adapter.inspect_statement("any-name") == StatementInspection(
+            needs_restart=False, sql="INSERT INTO t SELECT 1"
+        )
         _handle(adapter).get_statement.assert_called_once_with("any-name")
 
     def test_healthy_statement_without_text_has_no_sql(self):
         adapter = _adapter_with_phase(Phase.RUNNING)
         _handle(adapter).get_statement.return_value.spec = {}
 
-        assert adapter.inspect_statement("any-name") == {"needs_restart": False, "sql": None}
+        assert adapter.inspect_statement("any-name") == StatementInspection(
+            needs_restart=False, sql=None
+        )
 
     def test_missing_statement_has_no_sql(self):
-        assert _adapter_with_phase(None).inspect_statement("any-name") == {
-            "needs_restart": True,
-            "sql": None,
-        }
+        assert _adapter_with_phase(None).inspect_statement("any-name") == StatementInspection(
+            needs_restart=True, sql=None
+        )
 
     def test_403_has_no_sql(self):
         adapter = _adapter()
@@ -119,4 +119,6 @@ class TestInspectStatement:
             "error sending request '403'", http_status_code=403
         )
         with patch("dbt.adapters.confluent.impl.logger"):
-            assert adapter.inspect_statement("any-name") == {"needs_restart": True, "sql": None}
+            assert adapter.inspect_statement("any-name") == StatementInspection(
+                needs_restart=True, sql=None
+            )

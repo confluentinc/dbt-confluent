@@ -37,7 +37,7 @@ from .dry_run_types import display_type, fitted_type
 from .function_artifacts_repo import FunctionArtifactsRepo
 from .naming import sanitize_statement_name
 from .option_values import option_values_match
-from .statement_sql import runs_model_sql
+from .statement_sql import same_sql
 from .utils import fetch_from_cursor
 
 logger = AdapterLogger("Confluent")
@@ -164,6 +164,13 @@ class DryRunColumns(NamedTuple):
 
     existing: dict[str, ColumnTypeDefinition]  # from a dry-run of SELECT * FROM the table
     expected: dict[str, ColumnTypeDefinition]  # from a dry-run of the model's SELECT
+
+
+class StatementInspection(NamedTuple):
+    """What `inspect_statement` reads from one `get_statement` call."""
+
+    needs_restart: bool  # missing (404, or 403 under pool-scoped roles) or in a terminal phase
+    sql: str | None  # the SQL Confluent stores for the statement; None when there's none to read
 
 
 class DriftMetadata(NamedTuple):
@@ -490,10 +497,10 @@ class ConfluentAdapter(SQLAdapter):
         Kept for macros that call it; `decide_action` uses inspect_statement, which returns the
         same answer and the statement's SQL from one lookup.
         """
-        return self.inspect_statement(statement_name)["needs_restart"]
+        return self.inspect_statement(statement_name).needs_restart
 
     @available
-    def inspect_statement(self, statement_name: str) -> dict[str, Any]:
+    def inspect_statement(self, statement_name: str) -> StatementInspection:
         """Look up the long-running statement once, for `decide_action` (Jinja).
 
         Returns `needs_restart`: True when the statement is missing (404, or 403 under
@@ -510,15 +517,14 @@ class ConfluentAdapter(SQLAdapter):
         try:
             statement = handle.get_statement(statement_name)
         except StatementNotFoundError:
-            return {"needs_restart": True, "sql": None}
+            return StatementInspection(needs_restart=True, sql=None)
         except OperationalError as e:
             if not self._handle_pool_scoped_403(e, statement_name, action="inspection"):
                 raise
-            return {"needs_restart": True, "sql": None}
-        return {
-            "needs_restart": statement.phase.is_terminal,
-            "sql": statement.spec.get("statement"),
-        }
+            return StatementInspection(needs_restart=True, sql=None)
+        return StatementInspection(
+            needs_restart=statement.phase.is_terminal, sql=statement.spec.get("statement")
+        )
 
     @available
     def delete_statement(self, statement_name: str, expect_exists: bool = True) -> None:
@@ -1363,15 +1369,15 @@ class ConfluentAdapter(SQLAdapter):
         relation: ConfluentRelation,
         statement_name: str,
         statement_sql: str | None,
-        model_sql: str,
+        current_sql: str,
     ) -> None:
         """Raise CompilationError if the statement doesn't run the model's current SQL.
 
         `statement_sql` is the SQL Confluent stores for the statement (see inspect_statement), or
-        None when there was none to read, and `model_sql` the model's compiled SQL. See
-        statement_sql.runs_model_sql for what counts as a match.
+        None when there was none to read, and `current_sql` the SQL the materialization would
+        submit for it now. See statement_sql.same_sql for what counts as a match.
         """
-        if statement_sql is None or runs_model_sql(statement_sql, model_sql):
+        if statement_sql is None or same_sql(statement_sql, current_sql):
             return
 
         def shown(sql: str) -> str:
@@ -1383,19 +1389,14 @@ class ConfluentAdapter(SQLAdapter):
 
         raise CompilationError(
             f"SQL logic drift detected for {relation}: statement '{statement_name}' isn't "
-            "running the model's current SQL. Comments, whitespace and the case of reserved "
-            "keywords are ignored when comparing.\n\n"
+            "running the model's current SQL. Only comments and whitespace are ignored when "
+            "comparing.\n\n"
             f"The running statement's SQL:\n{shown(statement_sql)}\n\n"
-            f"The model's current SQL:\n{shown(model_sql)}\n\n"
-            "A running statement can't be changed in place. To apply the model's SQL, either:\n"
-            "  - Run with --full-refresh. This recreates the table and its statement, and "
-            "permanently deletes the table's Kafka topic and its data, so models that read from "
-            "this table should be rebuilt too.\n"
-            f"  - Or stop or delete statement '{statement_name}', wait until it's stopped or "
-            "gone, and re-run. This re-submits the statement with the model's SQL and keeps the "
-            "table and its data, but the statement likely re-reads its sources from the "
-            "beginning, so the table can end up with rows from both the old and the new SQL "
-            "(duplicates, for an append table)."
+            f"The model's current SQL, as dbt would submit it:\n{shown(current_sql)}\n\n"
+            "A running statement can't be changed in place. To apply the model's SQL, run with "
+            "--full-refresh. This recreates the table and its statement, and permanently deletes "
+            "the table's Kafka topic and its data, so models that read from this table should be "
+            "rebuilt too."
         )
 
     @available

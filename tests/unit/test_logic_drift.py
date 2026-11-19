@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 import jinja2
 import pytest
 
-from dbt.adapters.confluent.impl import ConfluentAdapter, ConfluentRelation
+from dbt.adapters.confluent.impl import ConfluentAdapter, ConfluentRelation, StatementInspection
 from dbt.exceptions import CompilationError
 from tests.unit._helpers import relation
 
@@ -22,45 +22,59 @@ MACRO_FILE = (
     / "dbt/include/confluent/macros/materializations/models/helpers.sql"
 )
 MODEL_SQL = "select id, price from orders where region = 'US'"
-STORED_SQL = (
+# The INSERT the streaming_table materialization renders on this run (decide_action's current_sql).
+CURRENT_SQL = (
     "INSERT INTO `env-1`.`cluster-a`.`my_model` (id, price)\n    select id, price\n    from (\n"
     f"        {MODEL_SQL}\n    ) as model_subq"
 )
+# What Confluent stores for the running statement: dbt's query comment, then the INSERT.
+STORED_SQL = '/* {"app": "dbt", "node_id": "model.p.my_model"} */\n' + CURRENT_SQL
 STATEMENT_NAME = "dbt-p-my_model"
 
 
 class TestCheckLogicDrift:
-    def _check(self, statement_sql, model_sql=MODEL_SQL):
+    def _check(self, statement_sql, current_sql=CURRENT_SQL):
         adapter = ConfluentAdapter.__new__(ConfluentAdapter)
-        adapter.check_logic_drift(relation("my_model"), STATEMENT_NAME, statement_sql, model_sql)
+        adapter.check_logic_drift(relation("my_model"), STATEMENT_NAME, statement_sql, current_sql)
 
-    def test_match_does_not_raise(self):
-        self._check(STORED_SQL, "SELECT id,\n  price FROM orders -- note\nWHERE region = 'US'")
+    def test_comments_and_whitespace_do_not_raise(self):
+        self._check(STORED_SQL, " ".join(CURRENT_SQL.split()).replace("where", "-- note\nwhere"))
 
     def test_no_stored_sql_does_not_raise(self):
         self._check(None)
 
-    def test_mismatch_raises_with_both_sql_texts_and_ways_out(self):
-        changed = MODEL_SQL.replace("'US'", "'EU'")
+    @pytest.mark.parametrize(
+        "change",
+        [
+            pytest.param(("'US'", "'EU'"), id="changed-literal"),
+            pytest.param(("where", "WHERE"), id="keyword-case"),
+        ],
+    )
+    def test_mismatch_raises_with_both_sql_texts_and_full_refresh(self, change):
+        current = CURRENT_SQL.replace(*change)
         with pytest.raises(CompilationError) as error:
-            self._check(STORED_SQL, changed)
+            self._check(STORED_SQL, current)
         message = str(error.value)
         assert "SQL logic drift detected for `env-1`.`cluster-a`.`my_model`" in message
         assert f"statement '{STATEMENT_NAME}'" in message
-        assert "region = 'US'" in message
-        assert "region = 'EU'" in message
+        assert "Only comments and whitespace are ignored" in message
+        # Both full INSERTs, the running one and the one dbt would submit.
+        assert message.count("model_subq") == 2
+        assert STORED_SQL.strip().splitlines()[-1].strip() in message
+        assert current.splitlines()[-2].strip() in message
         assert "--full-refresh" in message
-        assert f"stop or delete statement '{STATEMENT_NAME}'" in message
-        # Deliberately not offered as a way out: it would switch off every drift check.
+        # Deliberately not offered: stopping and re-running (not supported as a way out), and
+        # on_schema_drift='ignore' (it would switch off every drift check).
+        assert "stop or delete" not in message
         assert "on_schema_drift" not in message
 
     def test_long_sql_is_cut(self):
-        long_model = "select " + ", ".join(f"c{i}" for i in range(5_000)) + " from t"
+        long_sql = "select " + ", ".join(f"c{i}" for i in range(5_000)) + " from t"
         with pytest.raises(CompilationError) as error:
-            self._check(STORED_SQL, long_model)
+            self._check(STORED_SQL, long_sql)
         message = str(error.value)
-        assert f"... ({len(long_model) - 10_000} more characters)" in message
-        assert long_model not in message
+        assert f"... ({len(long_sql) - 10_000} more characters)" in message
+        assert long_sql not in message
 
 
 class _MacroReturn(Exception):
@@ -105,6 +119,7 @@ def _render_decide_action(
     config,
     existing,
     inspected,
+    current_sql=CURRENT_SQL,
     recoverable=True,
     full_refresh=False,
     empty=False,
@@ -140,13 +155,15 @@ def _render_decide_action(
         "{% macro drop_relation_if_exists(relation) %}{% endmacro %}\n"
     )
     module = env.from_string(stubs + MACRO_FILE.read_text()).make_module(vars=env.globals)
-    action = module.decide_action(existing, has_select_query=True, recoverable=recoverable)
+    action = module.decide_action(
+        existing, has_select_query=True, recoverable=recoverable, current_sql=current_sql
+    )
     return action, adapter
 
 
-HEALTHY = {"needs_restart": False, "sql": STORED_SQL}
-TERMINAL = {"needs_restart": True, "sql": STORED_SQL}
-MISSING = {"needs_restart": True, "sql": None}
+HEALTHY = StatementInspection(needs_restart=False, sql=STORED_SQL)
+TERMINAL = StatementInspection(needs_restart=True, sql=STORED_SQL)
+MISSING = StatementInspection(needs_restart=True, sql=None)
 
 
 @pytest.mark.parametrize(
@@ -165,6 +182,7 @@ MISSING = {"needs_restart": True, "sql": None}
         pytest.param({"existing": None}, "create", False, False, id="no-relation"),
         pytest.param({"full_refresh": True}, "create", False, False, id="full-refresh"),
         pytest.param({"recoverable": False}, "skip", False, False, id="not-recoverable"),
+        pytest.param({"current_sql": None}, "skip", True, False, id="no-current-sql"),
     ],
 )
 def test_decide_action_wiring(kwargs, expected_action, looked_up, logic_checked):
@@ -185,7 +203,7 @@ def test_decide_action_wiring(kwargs, expected_action, looked_up, logic_checked)
         adapter.inspect_statement.assert_called_once_with(STATEMENT_NAME)
     if logic_checked:
         adapter.check_logic_drift.assert_called_once_with(
-            arguments["existing"], STATEMENT_NAME, STORED_SQL, MODEL_SQL
+            arguments["existing"], STATEMENT_NAME, STORED_SQL, CURRENT_SQL
         )
         # Schema first, so a column change keeps its more specific error.
         assert calls.index("check_schema_drift") < calls.index("check_logic_drift")

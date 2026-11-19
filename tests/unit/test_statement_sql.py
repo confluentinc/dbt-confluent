@@ -1,20 +1,17 @@
-"""Unit tests for statement_sql: Flink-faithful SQL normalization and the INSERT shape match.
+"""Unit tests for statement_sql: Flink-faithful tokenizing, and comparing a running statement's SQL
+with the SQL the materialization would submit now.
 
 The cases come from the lexical table in the design: every kind of token Flink's lexer reads, and
 every boundary that decides where a comment, string or name starts and ends. `test_tokens` pins
-exact token lists; `test_same` and `test_different` cover what needs a comparison (dropped
-comments, folded keywords, and changes that must stay visible).
+exact token lists; `test_same` and `test_different` cover what needs a comparison: comments and
+whitespace are ignored, and every other change, the case of keywords included, is kept.
 """
 
 import time
 
 import pytest
 
-from dbt.adapters.confluent.statement_sql import (
-    RESERVED_KEYWORDS,
-    normalize_sql,
-    runs_model_sql,
-)
+from dbt.adapters.confluent.statement_sql import TOKEN, normalize_sql, same_sql
 
 # Rows marked "order" fail if TOKEN_KINDS is reordered so a prefixed kind follows `word`.
 TOKENS = [
@@ -64,7 +61,7 @@ TOKENS = [
     pytest.param("'abc", ["'", "abc"], id="T20-unterminated-string"),
     pytest.param("`ab", ["`", "ab"], id="T21-unterminated-quoted-name"),
     pytest.param("", [], id="T22-empty"),
-    pytest.param(";", [], id="T22-only-semicolon"),
+    pytest.param(";", [";"], id="T22-semicolon-is-a-token"),
     pytest.param("'😀 café' é😀", ["'😀 café'", "é😀"], id="T23-non-ascii-and-non-bmp"),
     pytest.param(f"_{'x' * 16}'c'", [f"_{'x' * 16}'c'"], id="T24-charset-name-up-to-16-chars"),
     pytest.param(f"_{'x' * 17}'c'", [f"_{'x' * 17}", "'c'"], id="T24-longer-name-is-a-word"),
@@ -86,27 +83,19 @@ SAME = [
     pytest.param(
         "select 'a'\n'b' from t", "select 'a'\n\n   'b' from t", id="S9-continued-string"
     ),
-    pytest.param(
-        "select a from t where b is not null group by a",
-        "SELECT a FROM t WHERE b IS NOT NULL GROUP BY a",
-        id="S10-keyword-case",
-    ),
-    pytest.param("select count(*) from t", "select COUNT(*) from t", id="S11-reserved-function"),
-    pytest.param("select a from t group by a", "select a from t GROUP\n  BY a", id="S12-group-by"),
+    pytest.param("select a from t group by a", "select a from t group\n  by a", id="S10-group-by"),
     pytest.param(
         "select a from t union all select a from u",
-        "select a from t UNION   ALL select a from u",
-        id="S13-union-all",
+        "select a from t union   all select a from u",
+        id="S11-union-all",
     ),
     pytest.param(
         "select a from t where b not like 'x'",
-        "select a from t where b NOT\tLIKE 'x'",
-        id="S14-not-like",
+        "select a from t where b not\tlike 'x'",
+        id="S12-not-like",
     ),
-    pytest.param("select a from t;", "select a from t", id="S15-trailing-semicolon"),
-    pytest.param("select null from t", "select NULL from t", id="S16-null"),
     pytest.param(
-        "select a, -- x\r\n  b\r\nfrom t\r\n", "select a, b from t", id="S17-crlf-with-comments"
+        "select a, -- x\r\n  b\r\nfrom t\r\n", "select a, b from t", id="S13-crlf-with-comments"
     ),
 ]
 
@@ -162,18 +151,15 @@ DIFFERENT = [
         'select U&"a--b", x from t', 'select U&"a--b", y from t', id="D16-unicode-quoted-name"
     ),
     pytest.param("select Amount from t", "select amount from t", id="D17-identifier-case"),
-    pytest.param("select type from t", "select TYPE from t", id="D18-non-reserved-keyword"),
     pytest.param(
-        "select round(a, 2) from t",
-        "select ROUND(a, 2) from t",
-        id="D19-non-reserved-function",
+        "select a from t where b is not null",
+        "SELECT a FROM t WHERE b IS NOT NULL",
+        id="D18-keyword-case",
     ),
-    pytest.param("select t.value from t", "select t.VALUE from t", id="D20-after-dot"),
-    pytest.param("select t . value from t", "select t . VALUE from t", id="D21-spaced-dot"),
-    pytest.param("select select$x from t", "select SELECT$x from t", id="D22-dollar-word"),
-    pytest.param("select éselect from t", "select éSELECT from t", id="D23-non-ascii-word"),
-    pytest.param("select 1.5e3 from t", "select 1.5 e3 from t", id="D24-number-vs-alias"),
-    pytest.param("select 1e5 from t", "select 1E5 from t", id="D25-number-case"),
+    pytest.param("select count(*) from t", "select COUNT(*) from t", id="D19-function-case"),
+    pytest.param("select a from t;", "select a from t", id="D20-trailing-semicolon"),
+    pytest.param("select 1.5e3 from t", "select 1.5 e3 from t", id="D21-number-vs-alias"),
+    pytest.param("select 1e5 from t", "select 1E5 from t", id="D22-number-case"),
 ]
 
 
@@ -203,120 +189,63 @@ def test_different(a, b):
     assert normalize_sql(a) != normalize_sql(b)
 
 
-# T20 and T21 are left out: two unterminated quotes would re-lex as one string, and invalid input
-# never reaches the check.
-VALID_INPUTS = [
-    *(p.values[0] for p in TOKENS if not p.id.startswith(("T20", "T21"))),
-    *(sql for p in SAME + DIFFERENT for sql in p.values),
-]
-
-
-@pytest.mark.parametrize("sql", VALID_INPUTS)
-def test_normalize_is_idempotent(sql):
-    """runs_model_sql matches the space-joined tokens, so joining them must not change how they
-    lex."""
-    tokens = normalize_sql(sql)
-    assert normalize_sql(" ".join(tokens)) == tokens
+def test_punctuation_and_invalid_kinds():
+    """Flink's one-character tokens lex as punctuation. A character Flink has no token for lexes as
+    invalid, one character at a time, so finditer never skips it."""
+    for char in "()[]{};.,=<>?:+-*/%|^&'\"":
+        assert TOKEN.fullmatch(char).lastgroup == "punctuation", char
+    for char in "#@\\~!`":
+        assert TOKEN.fullmatch(char).lastgroup == "invalid", char
 
 
 MODEL = "select id, price from `env`.`lkc`.`src` where region = 'US'"
 QUERY_COMMENT = '/* {"app": "dbt", "node_id": "model.p.m"} */\n'
-# The 0.5.0+ INSERT, as streaming_table.sql renders it.
+# The INSERT the streaming_table materialization renders, before dbt adds its query comment.
 CURRENT = (
-    f"{QUERY_COMMENT}INSERT INTO `env`.`lkc`.`tbl` (id, price)\n"
+    "INSERT INTO `env`.`lkc`.`tbl` (id, price)\n"
     f"    select id, price\n    from (\n        {MODEL}\n    ) as model_subq"
 )
-# The INSERT before 0.5.0.
-LEGACY = f"{QUERY_COMMENT}INSERT INTO `env`.`lkc`.`tbl` {MODEL}"
-# Characters that mean something in a regex, and a backslash, must match only themselves.
-REGEX_MODEL = "select a from t where p like 'a.b*' or q = 'C:\\' or r in (1, 2)"
 
 
 @pytest.mark.parametrize(
-    "statement,model,expected",
+    "statement,expected",
     [
-        pytest.param(CURRENT, MODEL, True, id="current-shape"),
+        pytest.param(QUERY_COMMENT + CURRENT, True, id="query-comment-ignored"),
+        pytest.param(CURRENT + "\n" + QUERY_COMMENT, True, id="appended-query-comment-ignored"),
+        pytest.param(
+            QUERY_COMMENT + " ".join(CURRENT.split()).replace("where", "-- note\nwhere"),
+            True,
+            id="layout-and-comments-ignored",
+        ),
+        pytest.param(CURRENT.replace("'US'", "'EU'"), False, id="changed-literal"),
+        pytest.param(CURRENT.replace("where", "WHERE"), False, id="keyword-case"),
         pytest.param(
             CURRENT.replace("(id, price)", "(price, id)").replace(
                 "select id, price\n", "select price, id\n"
             ),
-            MODEL,
-            True,
-            id="columns-reordered",
-        ),
-        pytest.param(
-            CURRENT.replace("(id, price)", "(`id`, `price`)").replace(
-                "select id, price\n", "select `id`, `price`\n"
-            ),
-            MODEL,
-            True,
-            id="quoted-columns",
-        ),
-        pytest.param(
-            CURRENT,
-            "SELECT id,price FROM `env`.`lkc`.`src` -- c\n WHERE region='US'",
-            True,
-            id="cosmetic-model-edit",
-        ),
-        pytest.param(LEGACY, MODEL, True, id="legacy-shape"),
-        pytest.param(f"{LEGACY};", MODEL, True, id="legacy-trailing-semicolon"),
-        pytest.param(
-            f"INSERT INTO `env`.`lkc`.`tbl` {MODEL}\n{QUERY_COMMENT}",
-            MODEL,
-            True,
-            id="query-comment-appended",
-        ),
-        pytest.param(CURRENT, MODEL.replace("'US'", "'EU'"), False, id="changed-literal"),
-        pytest.param(
-            CURRENT.replace("select id, price\n", "select price, id\n"),
-            MODEL,
             False,
-            id="column-lists-differ",
+            id="yml-column-reorder",
         ),
-        pytest.param(
-            f"INSERT INTO `env`.`lkc`.`tbl` SELECT * FROM ({MODEL})",
-            MODEL,
-            False,
-            id="other-wrapper",
-        ),
-        pytest.param(
-            f"INSERT INTO `env`.`lkc`.`tbl` SELECT id, price FROM x UNION ALL {MODEL}",
-            MODEL,
-            False,
-            id="model-is-only-a-suffix",
-        ),
-        pytest.param(
-            CURRENT.replace("select id, price\n", "select id + 1, price\n"),
-            MODEL,
-            False,
-            id="expression-in-select-list",
-        ),
-        pytest.param(CURRENT.replace("as model_subq", "as other"), MODEL, False, id="other-alias"),
-        pytest.param(f"INSERT INTO tbl {MODEL}", MODEL, True, id="unqualified-relation"),
-        pytest.param(
-            f"INSERT INTO `env`.`lkc`.`tbl` {REGEX_MODEL}",
-            REGEX_MODEL,
-            True,
-            id="regex-characters-match-literally",
-        ),
-        pytest.param(
-            f"INSERT INTO `env`.`lkc`.`tbl` {REGEX_MODEL}",
-            REGEX_MODEL.replace("a.b*", "aXbb"),
-            False,
-            id="regex-characters-are-not-patterns",
-        ),
-        pytest.param("", MODEL, False, id="empty-statement"),
-        pytest.param(MODEL, MODEL, False, id="no-insert"),
+        pytest.param(f"INSERT INTO `env`.`lkc`.`tbl` {MODEL}", False, id="pre-0.5.0-insert"),
+        pytest.param("", False, id="empty-statement"),
     ],
 )
-def test_runs_model_sql(statement, model, expected):
-    assert runs_model_sql(statement, model) is expected
+def test_same_sql(statement, expected):
+    assert same_sql(statement, CURRENT) is expected
 
 
-def test_reserved_keywords_list():
-    """302 words Confluent rejects as unquoted identifiers, plus NULL. Words Confluent accepts as
-    names must never be folded."""
-    assert len(RESERVED_KEYWORDS) == 303
-    assert "NULL" in RESERVED_KEYWORDS
-    for name in ("TYPE", "NAME", "MORE", "USER", "CURRENT_USER", "ROUND"):
-        assert name not in RESERVED_KEYWORDS
+# Every valid-SQL input above: the token rows except T19 (characters Flink rejects) and T21 (an
+# unterminated back-quoted name), every same/different pair, and the statements compared above.
+VALID_SQL = [
+    *(p.values[0] for p in TOKENS if not p.id.startswith(("T19", "T21"))),
+    *(sql for p in SAME + DIFFERENT for sql in p.values),
+    QUERY_COMMENT + CURRENT,
+    CURRENT,
+]
+
+
+@pytest.mark.parametrize("sql", VALID_SQL)
+def test_valid_sql_has_no_invalid_tokens(sql):
+    """`invalid` only matches characters Flink has no token for, so valid SQL never produces one.
+    If a pattern change lets a valid construct fall through to it, this fails."""
+    assert [m.group() for m in TOKEN.finditer(sql) if m.lastgroup == "invalid"] == []

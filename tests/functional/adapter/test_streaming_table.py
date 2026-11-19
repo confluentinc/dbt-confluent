@@ -761,18 +761,18 @@ select order_id, price from {{ ref('my_streaming_source') }}
 where order_id > {{ var('min_id', 0) }}
 """
 
-# The same logic as LOGIC_TABLE; only keyword case, comments and layout differ.
+# The same SQL as LOGIC_TABLE; only comments and layout differ.
 LOGIC_TABLE_COSMETIC = """
 {{ config(
     materialized='streaming_table',
     with={'changelog.mode': 'append'},
     on_schema_drift=var('drift', 'fail'),
 ) }}
--- Same logic, different layout.
-SELECT order_id,
+-- Same SQL, different layout.
+select order_id,
        price  /* the price */
-FROM {{ ref('my_streaming_source') }}
-WHERE order_id > {{ var('min_id', 0) }}
+from {{ ref('my_streaming_source') }}
+where order_id > {{ var('min_id', 0) }}
 """
 
 LOGIC_MODELS_YML = """
@@ -787,11 +787,10 @@ models:
 
 
 class TestLogicDrift(ConfluentFixtures):
-    """SQL logic drift: on the skip path, a streaming_table whose compiled SQL differs from what
-    its running statement executes fails the run, while cosmetic edits (comments, layout, keyword
-    case) still skip. `on_schema_drift='ignore'` and `--empty` runs don't check, `--full-refresh`
-    recreates the statement with the new SQL, and a dead statement is re-submitted with the new
-    SQL, unchecked."""
+    """SQL logic drift: on the skip path, a streaming_table whose INSERT differs from what its
+    running statement executes fails the run, while edits to comments and layout still skip.
+    `on_schema_drift='ignore'` and `--empty` runs don't check, `--full-refresh` recreates the
+    statement with the new SQL, and a dead statement is re-submitted with the new SQL, unchecked."""
 
     NAME = "logicdrift"
 
@@ -834,6 +833,8 @@ class TestLogicDrift(ConfluentFixtures):
         assert "SQL logic drift detected" in result.message
         assert "order_id > 0" in result.message
         assert "order_id > 5" in result.message
+        # Both full INSERTs: the running one and the one dbt would submit.
+        assert result.message.count("model_subq") == 2
         assert self._statement(adapter, insert_name).statement_id == created_id
 
         # on_schema_drift='ignore', and --empty runs (which rewrite each ref()), don't check.
