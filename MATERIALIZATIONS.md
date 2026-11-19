@@ -73,7 +73,7 @@ The table below summarizes all materializations supported by the dbt-confluent a
 | [`table`](#table) | One-shot `CREATE TABLE ... AS SELECT` (CTAS). | Snapshot |
 | [`view`](#view) | A named query inlined into consumers, not a persisted result. | Inherited |
 | [`ephemeral`](#ephemeral) | Standard dbt CTE fragment. | Inherited |
-| [`function`](#function) | A scalar Java/Python UDF registered from an already-uploaded artifact. | n/a |
+| [`function`](#function) | A Java/Python user-defined function. | n/a |
 
 _Note: [`view`](#view) & [`ephemeral`](#ephemeral) inherit their execution mode from any job that queries them, since they run inline in those jobs and not as independent Flink statements._
 
@@ -549,7 +549,22 @@ applies: setting `with`, `distributed_by`, `connector`, or any other dbt-conflue
 the same `ephemeral` model over a Kafka-backed source, each one inlines and re-plans that source
 independently. Flink scans the source once per consumer, not once shared across them.
 
+---
+
 ### Function
+
+```sql
+-- functions/is_smaller.sql
+{{ config(
+    language='java',
+    artifact_path='udfs/tshirt-sizing.jar',
+    path='com.example.my.TShirtSizingIsSmaller',
+) }}
+
+-- models/orders_scored.sql
+select {{ function('is_smaller') }}(requested_size, in_stock_size) as needs_upsize
+from {{ ref('orders') }}
+```
 
 A `function` registers a user-defined function (UDF) in Flink from an artifact (a Java JAR or
 Python ZIP) in Confluent Cloud, by issuing
@@ -558,53 +573,35 @@ you uploaded yourself (`artifact_id`) or a local package that dbt uploads for yo
 (`artifact_path`). dbt orders the function ahead of any model that calls it via
 `{{ function('name') }}`.
 
-Declare the function with a `config()` call in a file under `functions/` (dbt requires
-a function to have a body file, so the config call is all it contains):
+A function is declared in a file under `functions/`. dbt requires a function to have a body file, but
+the `CREATE FUNCTION` statement SQL is auto-generated and the function implementation itself is
+encapsulated in an artifact, so the `config()` call is all it contains.
 
-```sql
--- functions/is_smaller.sql
-{{ config(
-    language='java',
-    artifact_id='cfa-xxxxxx',
-    path='com.example.my.TShirtSizingIsSmaller',
-) }}
-```
+_**Note:** Flink takes the function's signature from the class itself, so dbt's standard `arguments` and `returns` for
+[defining UDFs in dbt](https://docs.getdbt.com/docs/build/udfs?version=2#defining-udfs-in-dbt) properties are not required._
 
-- `language`: `java` or `python`.
-- `artifact_id`: an artifact already uploaded to this environment. Exactly one of `artifact_id`
-  and `artifact_path` is required.
-- `artifact_path`: a local package for dbt to upload, relative to the dbt project root: a `.jar`
-  for `java` or a `.zip` for `python`. See [Uploading the artifact](#uploading-the-artifact).
-- `path`: the function's Java class name, or its Python module path.
-- `connections`: optional list of connection names the function may use.
+#### Function: Config Options
 
-```sql
--- models/orders_scored.sql
-select {{ function('is_smaller') }}(requested_size, in_stock_size) as needs_upsize
-from {{ ref('orders') }}
-```
+| Config | Description |
+|---|---|
+| `language` | Required. `java` or `python`. |
+| `artifact_id` | An artifact already uploaded to this environment. Exactly one of `artifact_id` and `artifact_path` is required. |
+| `artifact_path` | A local package for dbt to upload, relative to the dbt project root: a `.jar` for `java` or a `.zip` for `python`. See [Uploading the artifact](#function-uploading-the-artifact). |
+| `path` | Required. The function's Java class name, or its Python module path. |
+| `connections` | Optional list of connection names the function may use. |
+| `on_configuration_change` | dbt's standard setting for what to do when the live function differs from the config. See [Changing an existing function](#function-changing-an-existing-function). |
+| `statement_name` | See [Deterministic Statement Names](#deterministic-statement-names). |
+| `compute_pool_id` | See [Compute Pool](#compute-pool). |
+| `ignore_unsupported_config` | See [Validation](#validation). |
 
-Only scalar functions are supported. Flink takes the function's signature from the class itself, so `arguments` and `returns` properties are not used.
-
-#### Experimental: behavior flag required
-
-The `function` materialization is experimental and fails with an error unless the
-`enable_experimental_function_materialization` behavior flag is enabled:
-
-```yaml
-# dbt_project.yml
-flags:
-  enable_experimental_function_materialization: true
-```
-
-#### Credentials
+#### Function: Credentials
 
 Every `function` needs credentials that can use the artifact API, whether it names an `artifact_id`
 or an `artifact_path`: `auth: oauth`, a Global API key, or a Cloud API key (a Flink-region key alone
 is not enough).  dbt fails with a compile error before running anything if the profile can't. See
 [Fine-grained credentials](README.md#fine-grained-credentials).
 
-#### Uploading the artifact
+#### Function: Uploading the artifact
 
 With `artifact_path`, dbt uploads the package as the function's artifact, which needs credentials
 that can use the artifact API (`auth: oauth`, or a [Global API key](#tableflow) as for
@@ -612,22 +609,18 @@ Tableflow). The artifact is named after the project, the package file's name and
 content (`<project>-<file name>-<hash>`, e.g. `shop-udfs-3f2a9c1b`), so it is recognizable in
 Confluent Cloud. The file name is without its extension, and characters other than letters, digits,
 `_` and `-` become `_`. The hash is the start of a SHA-256 of the project, the full file name and the
-package's content, so two files whose names look alike once cleaned up (`udfs-1.0.zip` and
-`udfs-1_0.zip`) still get different artifacts. The same package file always maps to the same
-artifact, whichever function uses it. Artifact names are limited to 60 characters, so a long project
-and file name are cut short from the end to leave room for the hash, which is never cut:
+package's content.
 
 - Functions that point at the same package file share one artifact: dbt hashes, looks up and uploads
   it once per run, however many functions use it or how many threads build them.
 - An unchanged package reuses its artifact, and the function is left alone.
 - A changed package is uploaded as a new artifact, and the function is replaced to use it.
-- Uploading happens when the function is created or replaced, not at parse or compile time.
 
 dbt assumes the package file doesn't change while a run is in progress. It hashes the file once, and
 uploads it later, when the first function that needs it is created or replaced. A package rewritten
 in between (for example by a build step running alongside `dbt run`) would be uploaded under the
 digest of its earlier contents. The digest is there to avoid repeating work, not to prove what was
-uploaded, so dbt doesn't check for this. Finish building packages before starting the run.
+uploaded, so dbt doesn't check for this. Finish building packages before starting the `dbt build`.
 
 The artifact's description is a JSON object recording that dbt manages it, the dbt
 project that uploaded it, the package's file name (extension included) and its full SHA-256. dbt
@@ -638,7 +631,7 @@ artifact that isn't this package. Delete that artifact if it is no longer needed
 package file to get a different artifact name. The name carries only a shortened hash of these and
 may be truncated, so the description is the complete record.
 
-#### Changing an existing function
+#### Function: Changing an existing function
 
 Flink UDFs are immutable (no `ALTER` or `CREATE OR REPLACE`), so changing one means dropping and
 re-creating it. On each run the materialization compares the live function (via
@@ -662,7 +655,7 @@ an existing function.
 
 If the re-create fails after the drop, dbt tries to create the previous function again from what
 it described before dropping. That is best-effort and held in memory only, so a run that is killed
-between the drop and the create leaves no function behind.
+between the drop and the create leaves no function behind. Re-run the build to roll forward.
 
 `--full-refresh` always drops and re-creates an existing function, even if it matches the config,
 and `on_configuration_change` doesn't apply to it (that setting governs changes to an existing
@@ -684,7 +677,25 @@ A `connections` entry that isn't fully qualified (`name`, `database.name` or
 `catalog.database.name`) is resolved against the function's own catalog and database, both
 when comparing and in the emitted `CREATE FUNCTION`. Runs that replace the same function concurrently can interfere with each other.
 
-#### Updating a function's artifact
+#### Function: Statements Emitted
+
+`function` submits a single `CREATE FUNCTION` statement when it creates or replaces a function:
+
+```sql
+CREATE FUNCTION <relation> AS '<class or module path>' [LANGUAGE PYTHON]
+  USING ARTIFACT 'confluent-artifact://<artifact_id>'
+  [USING CONNECTIONS (<connection>, ...)]
+```
+
+When replacing an existing function (see [Changing an existing function](#function-changing-an-existing-function)),
+the `CREATE FUNCTION` is preceded by a `DROP FUNCTION <relation>`. Every run first runs
+`DESCRIBE FUNCTION <relation>` to see whether the function exists and compare it to the config.
+Nothing else is submitted, so an unchanged function results in no create or drop.
+
+These are short-lived, completing statements, not long-running jobs.
+See the [`CREATE FUNCTION` reference](https://docs.confluent.io/cloud/current/flink/reference/statements/create-function.html).
+
+#### Function: Updating a function's artifact
 
 When using the `artifact_path` field to build a function from a package on disk,
 the artifact is automatically updated during a `dbt build` when the referenced package has changed.
