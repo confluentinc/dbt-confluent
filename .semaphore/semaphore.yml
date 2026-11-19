@@ -54,9 +54,41 @@ blocks:
     dependencies: []
     task:
       jobs:
-        - name: "Run Tests"
+        # UV_PYTHON is what uv reads, so the matrix variable is that itself; the global prologue's
+        # `uv sync` honors it. poe is bypassed here because its uv executor pins the interpreter.
+        - name: "Unit Tests (locked)"
+          matrix:
+            - env_var: UV_PYTHON
+              values: ["3.10", "3.11", "3.12"]
           commands:
-            - uv run --frozen poe unit
+            - uv run --frozen pytest -m unit --junitxml=test-results.xml
+        # Coverage doesn't vary by interpreter, so the repo's coverage gate (`fail_under` in
+        # pyproject.toml, what `poe unit` enforced) runs once, on the newest supported Python.
+        - name: "Unit Tests with Coverage (locked, 3.13)"
+          matrix:
+            - env_var: UV_PYTHON
+              values: ["3.13"]
+          commands:
+            - uv run --frozen pytest -m unit --junitxml=test-results.xml --cov
+        # These two jobs re-resolve instead of using uv.lock's direct file URLs, and the CI package
+        # mirror returns no versions for confluent-sql, so they resolve against PyPI itself.
+        # The lowest versions our declared bounds allow for every direct dependency (#128).
+        - name: "Unit Tests (lowest dependencies)"
+          matrix:
+            - env_var: UV_PYTHON
+              values: ["3.10", "3.13"]
+          commands:
+            - UV_NO_CONFIG=1 uv sync --dev --resolution lowest-direct --default-index https://pypi.org/simple
+            - uv run --no-sync pytest -m unit --junitxml=test-results.xml
+        # The newest versions our declared bounds allow, ignoring uv.lock, so a release inside the
+        # bounds that breaks us fails CI instead of a user's fresh install.
+        - name: "Unit Tests (highest dependencies)"
+          matrix:
+            - env_var: UV_PYTHON
+              values: ["3.10", "3.13"]
+          commands:
+            - UV_NO_CONFIG=1 uv sync --dev --upgrade --default-index https://pypi.org/simple
+            - uv run --no-sync pytest -m unit --junitxml=test-results.xml
       epilogue:
         always:
           commands:
