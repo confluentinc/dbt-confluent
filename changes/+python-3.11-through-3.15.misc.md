@@ -1,0 +1,1 @@
+Supported Python versions are now 3.11 through 3.15 (was 3.10 through 3.13). Python 3.10 is no longer supported, matching the `confluent-sql` driver's new 3.11 floor. CI now runs the unit tests on 3.14 and 3.15 as well.
