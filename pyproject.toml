@@ -29,7 +29,7 @@ classifiers = [
 ]
 dependencies = [
   "dbt-core~=1.12.0",
-  "dbt-common~=1.12.0",
+  "dbt-common>=1.37.5,<1.40",
   "dbt-adapters~=1.24.5",
   "agate~=1.0",
   "httpx>=0.24.0,<0.29.0",

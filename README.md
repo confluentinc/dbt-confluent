@@ -39,7 +39,7 @@ Supported dependency versions (CI runs the unit tests against both the lowest an
 | Package | Supported range |
 | --- | --- |
 | `dbt-core` | `>=1.12.0, <1.13` |
-| `dbt-common` | `>=1.12.0, <1.13` |
+| `dbt-common` | `>=1.37.5, <1.40` |
 | `dbt-adapters` | `>=1.24.5, <1.25` |
 | `agate` | `>=1.0, <2` |
 | `httpx` | `>=0.24.0, <0.29` |

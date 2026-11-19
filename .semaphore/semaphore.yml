@@ -62,13 +62,15 @@ blocks:
               values: ["3.10", "3.11", "3.12", "3.13"]
           commands:
             - uv run --frozen pytest -m unit --junitxml=test-results.xml
+        # These two jobs re-resolve instead of using uv.lock's direct file URLs, and the CI package
+        # mirror returns no versions for confluent-sql, so they resolve against PyPI itself.
         # The lowest versions our declared bounds allow for every direct dependency (#128).
         - name: "Unit Tests (lowest dependencies)"
           matrix:
             - env_var: UV_PYTHON
               values: ["3.10", "3.13"]
           commands:
-            - uv sync --dev --resolution lowest-direct
+            - UV_NO_CONFIG=1 uv sync --dev --resolution lowest-direct --default-index https://pypi.org/simple
             - uv run --no-sync pytest -m unit --junitxml=test-results.xml
         # The newest versions our declared bounds allow, ignoring uv.lock, so a release inside the
         # bounds that breaks us fails CI instead of a user's fresh install.
@@ -77,7 +79,7 @@ blocks:
             - env_var: UV_PYTHON
               values: ["3.10", "3.13"]
           commands:
-            - uv sync --dev --upgrade
+            - UV_NO_CONFIG=1 uv sync --dev --upgrade --default-index https://pypi.org/simple
             - uv run --no-sync pytest -m unit --junitxml=test-results.xml
       epilogue:
         always:
