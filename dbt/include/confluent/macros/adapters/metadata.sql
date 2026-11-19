@@ -9,7 +9,7 @@
     {% set rows = [] %}
     {# With no relations there is nothing to select (the query would have no final SELECT). #}
     {% if relations %}
-    {% call statement('get_catalog_relations', fetch_result=True, hidden=True) %}
+    {% call dbt.statement('get_catalog_relations', fetch_result=True, hidden=True) %}
     with tbl as (
         select
             TABLE_CATALOG_ID as table_database,
@@ -72,7 +72,7 @@
 {% endmacro %}
 
 {% macro confluent__list_relations_without_caching(schema_relation) -%}
-  {% call statement('list_relations_without_caching', fetch_result=True, hidden=True) -%}
+  {% call dbt.statement('list_relations_without_caching', fetch_result=True, hidden=True) -%}
     SELECT
       TABLE_CATALOG_ID as database,
       TABLE_NAME as name,
@@ -102,7 +102,7 @@
 {% endmacro %}
 
 {% macro confluent__list_schemas(database) -%}
-  {% call statement('list_schemas', fetch_result=True, hidden=True) -%}
+  {% call dbt.statement('list_schemas', fetch_result=True, hidden=True) -%}
     SELECT
       SCHEMA_NAME as schema
     FROM

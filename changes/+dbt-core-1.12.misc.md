@@ -1,0 +1,1 @@
+Upgraded to dbt Core 1.12 (`dbt-core~=1.12.0`, `dbt-adapters~=1.24.5`); dbt Core 1.11 is no longer supported. The adapter's metadata macros now call `dbt.statement` explicitly: dbt 1.12 runs dispatched adapter macros in the built-in `dbt` package's context, where a bare `statement` resolved to dbt's own macro instead of this adapter's override.

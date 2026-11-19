@@ -22,7 +22,8 @@ def submitted_statements(relations):
 
     environment = jinja2.Environment(extensions=["jinja2.ext.do"])
     environment.globals.update(
-        statement=statement,
+        # dbt exposes adapter and built-in macros under the `dbt` namespace.
+        dbt=SimpleNamespace(statement=statement),
         adapter=ConfluentAdapter.__new__(ConfluentAdapter),
         load_result=lambda name: SimpleNamespace(table=[]),
         **{"return": lambda value: ""},
