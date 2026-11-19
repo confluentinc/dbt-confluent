@@ -36,13 +36,14 @@
   {%- endif -%}
 {% endmacro %}
 
-{% macro render_columns_and_constraints() %}
-  {# dbt's get_table_columns_and_constraints(), plus the `watermark` config's
-     `WATERMARK FOR ...` entry as the last item of the column block, if set.
-     The materialization is responsible for calling
-     `adapter.validate_watermark_config` once before render. #}
+{% macro render_columns_and_constraints(watermark=none) %}
+  {# dbt's get_table_columns_and_constraints(), plus a `WATERMARK FOR ...` entry
+     as the last item of the column block if `watermark` is given. Callers pass
+     their `watermark` config explicitly rather than this macro reading it, so
+     a materialization that doesn't own the key (`table`) never consumes a
+     user's own custom `watermark` config. The materialization is responsible
+     for calling `adapter.validate_watermark_config` once before render. #}
   {%- set columns_ddl = get_table_columns_and_constraints() -%}
-  {%- set watermark = config.get('watermark') -%}
   {%- if watermark is not none -%}
     {{ adapter.append_watermark(columns_ddl, watermark) }}
   {%- else -%}
@@ -51,7 +52,7 @@
 {% endmacro %}
 
 
-{% macro render_contract_columns_and_reproject_sql(sql) %}
+{% macro render_contract_columns_and_reproject_sql(sql, watermark=none) %}
   {# When the model has an enforced contract, returns
        {'ddl': <column-definition + constraints block DDL text>,
         'sql': sql, re-projected to select columns in schema.yml's declared
@@ -73,13 +74,12 @@
     {#- Without a contract there are no declared columns; a `watermark` (validated to be
        allowed only where the other columns can be inferred from the query) is then the
        whole column block. -#}
-    {%- set watermark = config.get('watermark') -%}
     {%- set ddl = adapter.append_watermark('', watermark) if watermark is not none else '' -%}
     {{ return({'ddl': ddl, 'sql': sql}) }}
   {%- endif -%}
   {%- set ddl -%}
     {{ get_assert_columns_equivalent(sql) }}
-    {{ render_columns_and_constraints() }}
+    {{ render_columns_and_constraints(watermark) }}
   {%- endset -%}
   {{ return({'ddl': ddl, 'sql': get_select_subquery(sql)}) }}
 {% endmacro %}

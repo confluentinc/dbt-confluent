@@ -54,7 +54,7 @@
     {% call statement('ddl', execution_mode="streaming_ddl",
                       statement_name=get_statement_name('-ddl')) -%}
       create table {{ target_relation }}
-      {{ render_columns_and_constraints() }}
+      {{ render_columns_and_constraints(config.get('watermark')) }}
       {{ get_distributed_by_clause() }}
       {{ render_with_options(with_options) }}
     {%- endcall -%}
