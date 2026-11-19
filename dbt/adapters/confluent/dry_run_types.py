@@ -2,7 +2,8 @@
 
 The schema drift check dry-runs both the model's SELECT and `SELECT * FROM` the existing table,
 and compares the two result schemas as confluent-sql `ColumnTypeDefinition`s. A stored table's
-dry-run schema matches the SELECT it was created from, except for two differences:
+dry-run schema matches the SELECT it was created from, except for two differences, plus a third
+for a table built from yml columns:
 
 - Top-level nullability, which `fitted_type` takes from the table; its docstring says why.
   Nullability inside an ARRAY, MULTISET, MAP or ROW is kept.
@@ -11,8 +12,11 @@ dry-run schema matches the SELECT it was created from, except for two difference
   length/nullability in the query. A Protobuf table keeps the declared type. So `fitted_type` takes
   the table's key or element wherever the model's fits in it, whatever the table's format. Any
   other key or element must match exactly, nullability included.
+- On a table built from yml columns, a top-level CHAR(n) or BINARY(n), the type Flink gives a
+  string or binary literal, where the yml declared STRING or BYTES. The table stores the yml's
+  type.
 
-`fitted_type` is what the drift check calls for each column; it allows for both differences.
+`fitted_type` is what the drift check calls for each column; it allows for all three.
 
 `display_type` spells a type for drift messages the way FULL_DATA_TYPE does, so messages read
 the same on the dry-run and temp-table paths.
@@ -24,6 +28,12 @@ from confluent_sql.types import ColumnTypeDefinition, RowColumn
 
 # MAP key and MULTISET element types a table may store wider than the query declares them.
 _STRING_KEY_TYPES = frozenset({"CHAR", "VARCHAR"})
+
+# A SELECT's fixed-length type -> the type of a yml column that accepts it, at MAX_LENGTH: STRING
+# is VARCHAR(2147483647) and BYTES is VARBINARY(2147483647). Used by `fitted_type` and by the
+# contract check (`ConfluentAdapter.fit_contract_columns`).
+FIXED_LENGTH_FITS = {"CHAR": "VARCHAR", "BINARY": "VARBINARY"}
+MAX_LENGTH = 2147483647
 
 # Dry-run type name -> (FULL_DATA_TYPE name, suffix after the parameters). Any other name is
 # spelled the same way in both.
@@ -37,7 +47,9 @@ _DISPLAY_NAMES: dict[str, tuple[str, str]] = {
 
 
 def fitted_type(
-    existing_type: ColumnTypeDefinition, expected_type: ColumnTypeDefinition
+    existing_type: ColumnTypeDefinition,
+    expected_type: ColumnTypeDefinition,
+    built_from_yml: bool = False,
 ) -> ColumnTypeDefinition:
     """Return expected_type, the model's column type from its SELECT dry-run, with the parts the
     drift check lets differ taken from existing_type, the existing table's type for the same
@@ -60,7 +72,20 @@ def fitted_type(
     declared type, a longer VARCHAR, a different CHAR length or a VARCHAR into a CHAR is kept as
     the model declares it, so it drifts. A shorter VARCHAR fits: the table still holds every value
     the model can produce, and `--full-refresh` rebuilds it with the new type.
+
+    built_from_yml says the table was built from yml columns (a `streaming_table`, or a `table`
+    with an enforced contract), so it stores the yml's types, not the SELECT's. A top-level
+    CHAR(n) or BINARY(n), like a string or binary literal, then fits the table's STRING or BYTES,
+    as dbt's contract check accepts it (`ConfluentAdapter.fit_contract_columns`). A table built
+    from its SELECT stores the CHAR(n) or BINARY(n) itself, so a STRING or BYTES there means the
+    SELECT changed.
     """
+    if (
+        built_from_yml
+        and FIXED_LENGTH_FITS.get(expected_type.type) == existing_type.type
+        and existing_type.length == MAX_LENGTH
+    ):
+        return existing_type
     return replace(_fit(existing_type, expected_type), nullable=existing_type.nullable)
 
 

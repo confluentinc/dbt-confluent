@@ -1014,3 +1014,36 @@ class TestCheckSchemaDriftOrchestrator:
         assert (
             "column type: 'm' existing='MAP<VARCHAR(5), INT>', expected='MAP<VARCHAR(5), BIGINT>'"
         ) in str(excinfo.value)
+
+    def test_built_from_yml_char_fits_string(self):
+        """U5: check_schema_drift with dry_run_columns CHAR(3) vs STRING: built_from_yml=True
+        returns silently."""
+        char3 = _type({"type": "CHAR", "nullable": False, "length": 3})
+        string = _type({"type": "VARCHAR", "nullable": True, "length": 2147483647})
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            None,
+            self._metadata(),
+            expected_with={},
+            dry_run_columns=DryRunColumns(existing={"c": string}, expected={"c": char3}),
+            built_from_yml=True,
+        )
+
+    def test_char_vs_string_drifts_by_default(self):
+        """U5: check_schema_drift with dry_run_columns CHAR(3) vs STRING: default raises with
+        exact message."""
+        char3 = _type({"type": "CHAR", "nullable": False, "length": 3})
+        string = _type({"type": "VARCHAR", "nullable": True, "length": 2147483647})
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                None,
+                self._metadata(),
+                expected_with={},
+                dry_run_columns=DryRunColumns(existing={"c": string}, expected={"c": char3}),
+            )
+        assert ("column type: 'c' existing='VARCHAR(2147483647)', expected='CHAR(3)'") in str(
+            excinfo.value
+        )

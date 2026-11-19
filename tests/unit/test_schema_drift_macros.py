@@ -58,7 +58,7 @@ class _Harness:
         env = jinja2.Environment(extensions=["jinja2.ext.do"])
         env.globals.update(
             adapter=self.adapter,
-            config=_Config(config),
+            config=_Config({"contract": {"enforced": False}, **config}),
             this=self.existing,
             sql=MODEL_SQL,
             statement=self._statement,
@@ -133,7 +133,11 @@ def test_dry_run_path_creates_nothing(materialized, mode):
     assert args[0] == harness.existing
     assert args[1] is None
     assert args[2] is partitioned
-    assert kwargs == {"dry_run_columns": DRY_RUN, "drift_columns": None}
+    assert kwargs == {
+        "dry_run_columns": DRY_RUN,
+        "drift_columns": None,
+        "built_from_yml": materialized == "streaming_table",
+    }
     harness.adapter.defer_drop.assert_not_called()
 
 
@@ -240,6 +244,7 @@ def test_fallback_path_reads_columns_after_the_temp_table():
     assert kwargs == {
         "dry_run_columns": None,
         "drift_columns": harness.table("get_drift_columns"),
+        "built_from_yml": False,
     }
 
 
@@ -271,6 +276,7 @@ def test_streaming_source_skips_dry_run():
     assert kwargs == {
         "dry_run_columns": None,
         "drift_columns": harness.table("get_drift_columns"),
+        "built_from_yml": False,
     }
 
 
@@ -317,3 +323,32 @@ def test_enforce_columns_skips_distribution_columns():
     harness.run(enforce="columns")
 
     assert COLUMNS_FROM not in harness.sql("get_drift_metadata")
+
+
+@pytest.mark.parametrize(
+    "materialized,contract,expected_built_from_yml",
+    [
+        ("streaming_table", None, True),
+        ("table", {"enforced": True}, True),
+        ("table", {"enforced": False}, False),
+    ],
+    ids=[
+        "U6-streaming_table",
+        "U6-table-enforced-contract",
+        "U6-table-unenforced-contract",
+    ],
+)
+def test_built_from_yml_passed_to_check_schema_drift(
+    materialized, contract, expected_built_from_yml
+):
+    """U6: check_for_schema_drift passes built_from_yml: True for streaming_table, True for table
+    with an enforced contract, False for table without."""
+    config = {"materialized": materialized}
+    if contract is not None:
+        config["contract"] = contract
+    harness = _Harness(config, dry_run_result=DRY_RUN)
+
+    harness.run()
+
+    args, kwargs = harness.drift_call
+    assert kwargs["built_from_yml"] == expected_built_from_yml
