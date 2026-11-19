@@ -41,7 +41,7 @@ Supported dependency versions (CI runs the unit tests against both the lowest an
 | `dbt-core` | `>=1.12.0, <1.13` |
 | `dbt-common` | `>=1.37.5, <1.40` |
 | `dbt-adapters` | `>=1.24.5, <1.25` |
-| `agate` | `>=1.0, <2` |
+| `agate` | `>=1.7.0, <1.10` |
 | `httpx` | `>=0.24.0, <0.29` |
 | `confluent-sql` | `>=0.9.0, <0.10` |
 
