@@ -54,9 +54,31 @@ blocks:
     dependencies: []
     task:
       jobs:
-        - name: "Run Tests"
+        # UV_PYTHON is what uv reads, so the matrix variable is that itself; the global prologue's
+        # `uv sync` honors it. poe is bypassed here because its uv executor pins the interpreter.
+        - name: "Unit Tests (locked)"
+          matrix:
+            - env_var: UV_PYTHON
+              values: ["3.10", "3.11", "3.12", "3.13"]
           commands:
-            - uv run --frozen poe unit
+            - uv run --frozen pytest -m unit --junitxml=test-results.xml
+        # The lowest versions our declared bounds allow for every direct dependency (#128).
+        - name: "Unit Tests (lowest dependencies)"
+          matrix:
+            - env_var: UV_PYTHON
+              values: ["3.10", "3.13"]
+          commands:
+            - uv sync --dev --resolution lowest-direct
+            - uv run --no-sync pytest -m unit --junitxml=test-results.xml
+        # The newest versions our declared bounds allow, ignoring uv.lock, so a release inside the
+        # bounds that breaks us fails CI instead of a user's fresh install.
+        - name: "Unit Tests (highest dependencies)"
+          matrix:
+            - env_var: UV_PYTHON
+              values: ["3.10", "3.13"]
+          commands:
+            - uv sync --dev --upgrade
+            - uv run --no-sync pytest -m unit --junitxml=test-results.xml
       epilogue:
         always:
           commands:
