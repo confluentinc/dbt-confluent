@@ -3,7 +3,7 @@
 One project holding a Tableflow model and a function (uploaded from a local package, so its
 run calls the artifact API). Each test runs it under a different credential set -- one dbt
 target per set, picked with `--target` -- and asserts whether the model works or is refused
-up front, per MATERIALIZATIONS.md#tableflow and #uploading-the-artifact:
+up front, per MATERIALIZATIONS.md#tableflow and #function-credentials:
 
 | credentials                                      | Tableflow | function |
 | ------------------------------------------------ | --------- | -------- |
