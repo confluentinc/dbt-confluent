@@ -4,9 +4,9 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal, NamedTuple, TypeVar
+from typing import Any, Literal, NamedTuple, TypeVar, cast
 
 import agate
 from confluent_sql import ArtifactNotFoundError, Connection
@@ -32,7 +32,7 @@ from dbt.adapters.sql import SQLAdapter
 
 from . import function_artifacts, functions, tableflow
 from .catalog import query_catalog_rows
-from .dry_run_types import display_type, fitted_type
+from .dry_run_types import FIXED_LENGTH_FITS, MAX_LENGTH, display_type, fitted_type
 from .function_artifacts_repo import FunctionArtifactsRepo
 from .naming import sanitize_statement_name
 from .option_values import option_values_match
@@ -328,6 +328,57 @@ class ConfluentAdapter(SQLAdapter):
             expression = f" {constraint.expression}" if constraint.expression else ""
             return f"{prefix}primary key ({column_list}){expression}"
         return super().render_model_constraint(constraint)
+
+    @available.parse(lambda *a, **k: [])
+    def get_column_schema_from_query(self, sql: str) -> list[ConfluentColumn]:
+        """Get the result columns of the given sql, with names and data types as dbt-adapters gets
+        them, plus each column's length in `char_size` (None for a type without one).
+
+        dbt-adapters reads cursor.description, which carries no lengths. The contract check needs a
+        yml column's length to tell STRING or BYTES from a shorter VARCHAR or VARBINARY
+        (`fit_contract_columns`), and the statement's result schema has it.
+        """
+        _, cursor = self.connections.add_select_query(sql)
+        return [
+            cast(
+                ConfluentColumn,
+                replace(
+                    self.Column.create(
+                        column.name, self.connections.data_type_code_to_name(column.type.type)
+                    ),
+                    char_size=column.type.length,
+                ),
+            )
+            for column in cursor.statement.schema.columns
+        ]
+
+    @available
+    def fit_contract_columns(
+        self, sql_columns: list[ConfluentColumn], yml_columns: list[ConfluentColumn]
+    ) -> list[ConfluentColumn]:
+        """Return sql_columns, the model SELECT's columns for dbt's contract check, with each
+        CHAR(n) or BINARY(n) column given the type of the yml column of the same name when that's
+        STRING or BYTES.
+
+        The contract check compares base type names, so it rejects a string literal, which Flink
+        types as CHAR(n), for a STRING column, and a binary literal, BINARY(n), for a BYTES column,
+        though Flink writes either. Only into STRING or BYTES: lengths aren't compared, and Flink
+        silently truncates a value longer than a VARCHAR(m) or VARBINARY(m) column. A CHAR(m) or
+        BINARY(m) yml column fed by a VARCHAR or VARBINARY is rejected by Flink. Every other column
+        is returned as it is.
+        """
+        yml_by_name = {column.name: column for column in yml_columns}
+        fitted = []
+        for column in sql_columns:
+            yml_column = yml_by_name.get(column.name)
+            if (
+                yml_column is not None
+                and FIXED_LENGTH_FITS.get(column.dtype) == yml_column.dtype
+                and yml_column.char_size == MAX_LENGTH
+            ):
+                column = replace(column, dtype=yml_column.dtype, char_size=yml_column.char_size)
+            fitted.append(column)
+        return fitted
 
     @available.parse(_parse_callback_empty_table)
     def execute(
@@ -1278,6 +1329,7 @@ class ConfluentAdapter(SQLAdapter):
         expected_connector: str | None = None,
         dry_run_columns: DryRunColumns | None = None,
         drift_columns: "agate.Table | None" = None,
+        built_from_yml: bool = False,
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
@@ -1316,6 +1368,10 @@ class ConfluentAdapter(SQLAdapter):
         but it lives outside the `with` config — so it's merged into the
         expected options here to participate in options drift like any
         other option. None for materializations without a connector.
+
+        `built_from_yml` says the table was built from yml columns (a `streaming_table`, or a
+        `table` with an enforced contract). On the dry-run path, `fitted_type` then lets a
+        CHAR(n) or BINARY(n) column match the table's STRING or BYTES.
         """
         assert existing_relation.identifier is not None
         if (temp_relation is None) == (dry_run_columns is None):
@@ -1343,14 +1399,15 @@ class ConfluentAdapter(SQLAdapter):
         violations: list[str] = []
         if dry_run_columns is not None:
             # Two dry-runs: compare Flink's own types, with fitted_type taking the table's
-            # top-level nullability, and its string MAP keys and MULTISET elements where the
-            # model's fit (dry_run_types).
+            # top-level nullability, its string MAP keys and MULTISET elements where the model's
+            # fit, and, on a table built from yml columns, its STRING or BYTES for a CHAR(n) or
+            # BINARY(n) (dry_run_types).
             violations.extend(
                 self._check_column_drift(
                     dry_run_columns.existing,
                     dry_run_columns.expected,
                     display=display_type,
-                    fit=fitted_type,
+                    fit=lambda existing, expected: fitted_type(existing, expected, built_from_yml),
                 )
             )
         else:

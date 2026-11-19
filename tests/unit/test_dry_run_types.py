@@ -224,6 +224,112 @@ class TestFittedType:
         fitted_type(existing, expected)
         assert (existing, expected) == before
 
+    @pytest.mark.parametrize(
+        "existing,expected,built_from_yml,drifts",
+        [
+            (
+                {"type": "VARCHAR", "nullable": True, "length": 2147483647},
+                {"type": "CHAR", "nullable": False, "length": 3},
+                True,
+                False,
+            ),
+            (
+                {"type": "VARBINARY", "nullable": True, "length": 2147483647},
+                {"type": "BINARY", "nullable": False, "length": 2},
+                True,
+                False,
+            ),
+            (
+                {"type": "VARCHAR", "nullable": True, "length": 10},
+                {"type": "CHAR", "nullable": False, "length": 3},
+                True,
+                True,
+            ),
+            (
+                {"type": "CHAR", "nullable": True, "length": 3},
+                {"type": "CHAR", "nullable": False, "length": 3},
+                True,
+                False,
+            ),
+            (
+                {"type": "CHAR", "nullable": True, "length": 5},
+                {"type": "CHAR", "nullable": False, "length": 3},
+                True,
+                True,
+            ),
+            (
+                {
+                    "type": "ARRAY",
+                    "nullable": True,
+                    "element_type": {"type": "VARCHAR", "nullable": False, "length": 2147483647},
+                },
+                {
+                    "type": "ARRAY",
+                    "nullable": True,
+                    "element_type": {"type": "CHAR", "nullable": False, "length": 3},
+                },
+                True,
+                True,
+            ),
+            (
+                {"type": "VARCHAR", "nullable": True, "length": 2147483647},
+                {"type": "CHAR", "nullable": False, "length": 3},
+                False,
+                True,
+            ),
+            (
+                {"type": "VARBINARY", "nullable": True, "length": 2147483647},
+                {"type": "BINARY", "nullable": False, "length": 2},
+                False,
+                True,
+            ),
+            (
+                {"type": "VARCHAR", "nullable": False, "length": 2147483647},
+                {"type": "CHAR", "nullable": True, "length": 3},
+                True,
+                False,
+            ),
+            (
+                {"type": "VARBINARY", "nullable": True, "length": 2147483647},
+                {"type": "CHAR", "nullable": False, "length": 3},
+                True,
+                True,
+            ),
+            (
+                {"type": "VARCHAR", "nullable": True, "length": 2147483647},
+                {"type": "BINARY", "nullable": False, "length": 2},
+                True,
+                True,
+            ),
+        ],
+        ids=[
+            "D1-char-string",
+            "D2-binary-bytes",
+            "D3-char-short-varchar",
+            "D4-char-same-char",
+            "D5-char-other-char",
+            "D7-nested-char",
+            "D8-not-built-from-yml",
+            "D8-binary-not-built-from-yml",
+            "D9-not-null-table",
+            "D10-char-bytes",
+            "D10-binary-string",
+        ],
+    )
+    def test_built_from_yml_char_binary_to_string_bytes(
+        self, existing, expected, built_from_yml, drifts
+    ):
+        """U1: fitted_type with built_from_yml parameter for D1-D5, D7-D10 cases."""
+        existing_type = _type(existing)
+        result = fitted_type(existing_type, _type(expected), built_from_yml)
+        assert (result != existing_type) is drifts
+
+    def test_built_from_yml_default_drifts(self):
+        """The default (built_from_yml omitted) still drifts."""
+        existing = _type({"type": "VARCHAR", "nullable": True, "length": 2147483647})
+        expected = _type({"type": "CHAR", "nullable": False, "length": 3})
+        assert fitted_type(existing, expected) != existing
+
 
 class TestDisplayType:
     @pytest.mark.parametrize(
