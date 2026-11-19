@@ -338,6 +338,11 @@ WITH (
     {% endif %}
   {% endif %}
 
+  {# A streaming_table, or a table with an enforced contract, is built from the yml columns, so it
+     stores their types rather than the SELECT's (see fitted_type). #}
+  {% set built_from_yml = config.get('materialized') == 'streaming_table'
+                          or config.get('contract').enforced %}
+
   {# `connector` (streaming_source) is rendered into the DDL's WITH clause
      but configured outside `with` — pass it along so a connector change is
      caught as options drift. None for the other materializations. #}
@@ -350,7 +355,8 @@ WITH (
     enforce,
     config.get('connector'),
     dry_run_columns=dry_run_columns,
-    drift_columns=drift_columns
+    drift_columns=drift_columns,
+    built_from_yml=built_from_yml
   ) %}
 {% endmacro %}
 
