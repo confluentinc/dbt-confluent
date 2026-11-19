@@ -60,7 +60,7 @@ blocks:
         - name: "Unit Tests (locked)"
           matrix:
             - env_var: UV_PYTHON
-              values: ["3.10", "3.11", "3.12", "3.13"]
+              values: ["3.11", "3.12", "3.13", "3.14"]
           commands:
             - uv run --frozen poe -e simple unit
         # These two jobs re-resolve instead of using uv.lock's direct file URLs, and the CI package
@@ -69,7 +69,7 @@ blocks:
         - name: "Unit Tests (lowest dependencies)"
           matrix:
             - env_var: UV_PYTHON
-              values: ["3.10", "3.13"]
+              values: ["3.11", "3.14"]
           commands:
             - UV_NO_CONFIG=1 uv sync --dev --resolution lowest-direct --default-index https://pypi.org/simple
             - uv run --no-sync poe -e simple unit
@@ -78,7 +78,7 @@ blocks:
         - name: "Unit Tests (highest dependencies)"
           matrix:
             - env_var: UV_PYTHON
-              values: ["3.10", "3.13"]
+              values: ["3.11", "3.14"]
           commands:
             - UV_NO_CONFIG=1 uv sync --dev --upgrade --default-index https://pypi.org/simple
             - uv run --no-sync poe -e simple unit
