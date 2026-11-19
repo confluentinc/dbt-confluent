@@ -25,8 +25,18 @@
   -- any assumption from the framework
   {{ run_hooks(pre_hooks, inside_transaction=False) }}
 
+  {# The long-running INSERT, rendered once: decide_action compares it with the running
+     statement's SQL on the skip path (the SQL logic check), and the 'main' statement below
+     submits it. It names the yml columns and selects them from the model's SQL by name (dbt's
+     get_select_subquery), so each value lands in the table column of the same name whatever
+     order the SELECT returns its columns in, or, on 'restart', the existing table holds them in. #}
+  {%- set insert_sql -%}
+    INSERT INTO {{ target_relation }} ({{ adapter.dispatch('get_column_names', 'dbt')() }})
+    {{ get_select_subquery(sql) }}
+  {%- endset -%}
+
   -- TODO: Support altering table options without full refresh (ALTER TABLE ... SET).
-  {% set action = decide_action(existing_relation, recoverable=true) %}
+  {% set action = decide_action(existing_relation, recoverable=true, current_sql=insert_sql) %}
   {% if action == 'skip' %}
     {# dbt requires a 'main' statement result even when skipping #}
     {% call noop_statement('main', 'SKIP') %}{% endcall %}
@@ -59,18 +69,14 @@
     {%- endcall -%}
   {% endif %}
 
-  -- Long-running INSERT — registered as 'main' so its compiled SQL is the
-  -- artifact written to disk for `dbt show` / debugging, and so the restart
-  -- path satisfies dbt's "main result" contract without renaming.
-  -- It names the yml columns and selects them from the model's SQL by name
-  -- (dbt's get_select_subquery), so each value lands in the table column of
-  -- the same name whatever order the SELECT returns its columns in, or, on
-  -- 'restart', the existing table holds them in.
+  -- Long-running INSERT (insert_sql, above) — registered as 'main' so its
+  -- compiled SQL is the artifact written to disk for `dbt show` / debugging,
+  -- and so the restart path satisfies dbt's "main result" contract without
+  -- renaming.
   {%- call statement('main', execution_mode="streaming_query",
                      statement_name=get_statement_name(),
                      statement_properties=config.get('statement_properties')) -%}
-    INSERT INTO {{ target_relation }} ({{ adapter.dispatch('get_column_names', 'dbt')() }})
-    {{ get_select_subquery(sql) }}
+    {{ insert_sql }}
   {%- endcall -%}
 
   {# The table exists by this point either way -- freshly created just now

@@ -239,12 +239,14 @@ concept page for the underlying execution model.
 #### Streaming Table: Schema Drift / Reconciliation Behavior
 
 If the table already exists and `--full-refresh` is not specified, `streaming_table` runs [schema
-drift detection](#schema-drift-detection).
+drift detection](#schema-drift-detection). It also checks that a healthy INSERT statement runs the
+model's current SQL, and fails the run if it doesn't (see [Query Logic
+Changes](#query-logic-changes)).
 
 Separately, on every re-run, the adapter checks the long-running INSERT statement itself.
 If it's missing (e.g. the process crashed between DDL and DML, or the statement was deleted
 externally) or in a terminal phase (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), `dbt run` resubmits
-**only the INSERT** statement under the same deterministic name. The table and its topic state are preserved,
+**only the INSERT** statement under the same deterministic name, with the model's current SQL. The table and its topic state are preserved,
 and no `--full-refresh` is required.
 
 A `RUNNING` statement, an in-flight transition (`PENDING`, `STOPPING`, `DELETING`), or `DEGRADED` is
@@ -300,7 +302,7 @@ models:
 
 On the next `dbt run` (no `--full-refresh`), the adapter looks up both by name and takes over their lifecycle:
 
-- If the statement is **healthy** (`RUNNING`, an in-flight transition such as `PENDING`, `STOPPING`, or `DELETING`, or `DEGRADED`, i.e. any non-terminal phase), it is adopted as-is: the run skips creation and leaves the statement untouched.
+- If the statement is **healthy** (`RUNNING`, an in-flight transition such as `PENDING`, `STOPPING`, or `DELETING`, or `DEGRADED`, i.e. any non-terminal phase), it is adopted as-is, provided it runs the model's SQL: the run skips creation and leaves the statement untouched.
 - If the statement is **missing or terminal** (`COMPLETED`, `STOPPED`, `FAILED`, `DELETED`), it is re-submitted under the same name.
 - The existing **table is never dropped** (only `--full-refresh` drops and recreates).
 
@@ -309,8 +311,9 @@ Adoption is purely name-based: the adapter does not track which tool created a r
 **Preconditions**:
 
 - **Schema should match.** Under the default `on_schema_drift='fail'`, the adapter runs [schema drift detection](#schema-drift-detection) comparing the existing table to the model's SELECT before adopting; any mismatch fails the run. With `config(on_schema_drift='ignore')`, enforcement depends on the adoption path:
-    - **Healthy statement → skip:** the running statement is left untouched and nothing is re-submitted, so **no drift is enforced at all, including columns.** A mismatch is silently tolerated; you must align the model to the existing schema yourself.
+    - **Healthy statement → skip:** the running statement is left untouched and nothing is re-submitted, so **no drift is enforced at all, including columns and SQL logic.** A mismatch is silently tolerated; you must align the model to the existing schema yourself.
     - **Dead/terminal statement → restart:** the INSERT is re-submitted, so a columns-only check still runs, and so does dbt's contract check of the SELECT against the yml `columns` (the INSERT names only the yml columns, so Flink would fill any other table column with NULL); benign options/distribution drift is relaxed.
+- **The statement should run the SQL dbt would submit.** Under the default `on_schema_drift='fail'`, a healthy statement must execute the INSERT dbt would submit for the model, apart from comments and whitespace (see [Query Logic Changes](#query-logic-changes)); a statement written by hand rarely does, so adopting it fails the run. For example, dbt's INSERT names the yml columns and selects them from the model's SQL in a subquery, and `ref()` renders a fully qualified, back-quoted name such as `` `env`.`cluster`.`orders` ``. Set `on_schema_drift='ignore'` to adopt it as it is.
 - **The yml lists every column, with its type.** Before re-submitting a missing or terminal statement, dbt runs its contract check, whatever `on_schema_drift` is set to: the model's yml `columns` must list every column the SELECT returns, with its `data_type`. If any is missing, the restart fails with dbt's contract error, and nothing writes to the table until the yml is fixed. A healthy statement is skipped without the check.
 - **Same `name_prefix`.** The prefix is prepended to `alias` and `statement_name` too, so adoption only finds resources created with the same prefix (or none). A target with a different prefix creates its own copies instead.
 - **Names are sanitized.** The `statement_name` you configure is normalized to Flink's constraints (see [Flink Naming Constraints](#flink-naming-constraints)) before lookup, so it must match the existing statement's actual name. Statements already named within those constraints (lowercase alphanumeric + hyphens) match verbatim.
@@ -1050,7 +1053,7 @@ Control drift detection behavior with the `on_schema_drift` config:
 
 **Options**:
 - `fail` (default) - Raise an error if schema drift is detected
-- `ignore` - Skip drift detection entirely; always skip if the table exists
+- `ignore` - Skip drift detection entirely, including the `streaming_table` SQL logic check; always skip if the table exists
 
 **Example**:
 ```sql
@@ -1100,9 +1103,10 @@ If you need to change or remove WITH options, use `--full-refresh` to drop and r
 
 #### Query Logic Changes
 
-Schema drift detection only inspects **column names, data types, WITH options, and `distributed_by`**; it does not detect changes to the query logic itself. If you modify how a column is computed without changing its name or type, the adapter will see no drift and skip the model.
+For a `streaming_table`, the adapter compares the INSERT its running statement executes (Confluent
+stores it exactly as submitted) with the INSERT dbt would submit for the model now, so a change to
+the query logic is caught even when the columns stay the same:
 
-**Example of undetected change**:
 ```sql
 -- Initial model
 select order_id, round(price, 2) as price from {{ ref('source') }}
@@ -1110,13 +1114,40 @@ select order_id, round(price, 2) as price from {{ ref('source') }}
 -- Changed to (different rounding)
 select order_id, round(price, 4) as price from {{ ref('source') }}
 
--- Result: Column name and type are unchanged, so dbt will skip (no error)
+-- Result: SQL logic drift; the run fails under on_schema_drift='fail' (the default)
 ```
 
-This is an inherent limitation: `INFORMATION_SCHEMA` only stores schema metadata, not the query that produced the table. If you change query logic, use `--full-refresh` to recreate the table.
+**What's ignored.** Comments (`--`, `//`, `/* */`, dbt's query comment included) and whitespace,
+indentation and line breaks. A SQL hint (`/*+ ... */`) isn't a comment: Flink applies it, so it's
+compared, apart from comments and whitespace inside it.
+
+**What's still reported.** Any other change to the SQL dbt would submit for the model, even one
+that doesn't change the result: for example, the case of keywords or names, reordering the SELECT's
+columns or the yml's, or a change that comes from a macro, a package or a dbt upgrade rather than
+from editing the model. A model whose SQL differs on every run (for example, it uses
+`run_started_at`) is reported every time; set `on_schema_drift='ignore'` on it.
+
+**What isn't checked.** `on_schema_drift='ignore'` models; `--empty` and `--sample` runs (they
+rewrite the model's `ref()`s and `source()`s); and a missing or terminal statement, which is
+re-submitted with the model's current SQL. Changes the SQL text doesn't show, such as
+`statement_properties` or `compute_pool_id`, aren't compared either.
+
+**When drift is reported**, the error shows both statements as written: the running one as
+Confluent stores it, and the one dbt would submit now. A running statement can't be changed in
+place. To apply the model's SQL, run with `--full-refresh`; this deletes the table's topic and its
+data. To keep the running statement instead, set `on_schema_drift='ignore'` on the model; this also
+turns off its column and options drift checks.
+
+**Upgrading.** Earlier versions didn't compare SQL, so a `streaming_table` whose running statement
+doesn't match what dbt would submit now fails its first run after the upgrade: for example, one
+edited without `--full-refresh`, one deployed before 0.5.0 (its INSERT had a different form), or
+one adopted with different SQL.
+
+`table` models don't detect query logic changes: their statement is gone once the snapshot
+finishes, so there's nothing to compare. Use `--full-refresh` after changing a `table`'s logic.
 
 #### When Drift is Detected
-If drift is detected, the run will fail with a compilation error. Use `--full-refresh` to drop and recreate the table with the new schema or options.
+If drift is detected, the run will fail with a compilation error. Use `--full-refresh` to drop and recreate the table with the new schema or options. For SQL logic drift on a `streaming_table`, see [Query Logic Changes](#query-logic-changes).
 
 ### Deterministic Statement Names
 
