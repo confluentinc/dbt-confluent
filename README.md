@@ -34,6 +34,17 @@ uv add dbt-confluent
 
 Requires Python 3.10–3.13.
 
+Supported dependency versions (CI runs the unit tests against both the lowest and the highest versions each range allows):
+
+| Package | Supported range |
+| --- | --- |
+| `dbt-core` | `>=1.12.0, <1.13` |
+| `dbt-common` | `>=1.12.0, <1.13` |
+| `dbt-adapters` | `>=1.24.5, <1.25` |
+| `agate` | `>=1.0, <2` |
+| `httpx` | `>=0.24.0, <0.29` |
+| `confluent-sql` | `>=0.9.0, <0.10` |
+
 ## Configuration
 
 After installing, scaffold a new project with:
