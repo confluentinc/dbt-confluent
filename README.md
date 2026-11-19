@@ -32,7 +32,7 @@ or with [uv](https://docs.astral.sh/uv/):
 uv add dbt-confluent
 ```
 
-Requires Python 3.10–3.13.
+Requires Python 3.11–3.15.
 
 Supported dependency versions (CI runs the unit tests against both the lowest and the highest versions each range allows):
 
@@ -42,7 +42,6 @@ Supported dependency versions (CI runs the unit tests against both the lowest an
 | `dbt-common` | `>=1.37.5, <1.40` |
 | `dbt-adapters` | `>=1.24.5, <1.25` |
 | `agate` | `>=1.7.0, <1.10` |
-| `httpx` | `>=0.24.0, <0.29` |
 | `confluent-sql` | `>=0.9.0, <0.10` |
 
 ## Configuration
