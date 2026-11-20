@@ -4,6 +4,26 @@ All notable changes to this dbt adapter will be documented in this file.
 
 <!-- towncrier release notes start -->
 
+## dbt-confluent 0.6.0 (2026-11-20)
+
+### Features
+
+- Add `cloud_api_key`/`cloud_api_secret`, `tableflow_api_key`/`tableflow_api_secret` and `database_kafka_cluster_id` profile configs, passed through to `confluent_sql.connect()`. ([#105](https://github.com/confluentinc/dbt-confluent/issues/105))
+- Add an optional `name_prefix` profile setting that isolates tables and statements in a shared environment. It is prepended to statement names, in front of `statement_name_prefix`, and to table names with hyphens as underscores. ([#127](https://github.com/confluentinc/dbt-confluent/issues/127))
+- Add a `function` materialization for building Java or Python UDFs. See MATERIALIZATIONS.md#function for details.
+- `organization_id`, `cloud_provider` and `cloud_region` may now be omitted from the profile with `auth: oauth` or a Global API key: the driver infers the organization (when your credentials reach exactly one) and the cloud settings (from the Kafka cluster named by `dbname`), and checks any you do set. Connecting fails with guidance naming the profile field to set when several organizations (`organization_id`) or several same-named clusters (`database_kafka_cluster_id`) match, or when `cloud_provider`/`cloud_region` disagree with the cluster. A Flink-region key still requires them, now reported when the profile loads. `dbt init` offers to infer them, and `dbt debug` leaves out the ones omitted. See the README's "Organization, cloud provider and region" section. ([#237](https://github.com/confluentinc/dbt-confluent/issues/237))
+
+### Bugfixes
+
+- `view` now updates an existing view in place with `ALTER VIEW ... AS` instead of dropping it and creating it again. Before, the view was dropped first, so when the new SQL failed (a server-rejected query, or an enforced contract that no longer matched) the run left no view at all, and anything reading it broke until the model was fixed. Now the run fails and the previous view keeps serving. A first run, or a model switching from another materialization to `view`, still creates the view as before, and `--full-refresh` still drops the view and creates it again, as it does for the other materializations. Flink doesn't check an altered view's new columns against the old ones, so a downstream view that uses a column the new SQL removes or retypes is not caught at run time, and fails when queried until it is rebuilt. See MATERIALIZATIONS.md#view-statements-emitted. ([#74](https://github.com/confluentinc/dbt-confluent/issues/74))
+- Schema drift detection no longer reports false drift on a `WITH` option when Flink reports its value in a different form than the model wrote it. Durations and sizes are compared by value, so `'kafka.retention.time': '7 days'` matches the `7 d` Flink reports, and `'kafka.retention.size': '1024 mb'` matches `1 gb`; case is ignored, so `'COMPACT'` matches `compact`. Before this change, these models reported drift on every run until rebuilt with `--full-refresh`. A change that only alters the case of a value is not detected, nor is a change to a text value that reads as the same duration or size (`'1 h'` to `'60 min'`). See MATERIALIZATIONS.md#with-options-drift. ([#121](https://github.com/confluentinc/dbt-confluent/issues/121))
+- dbt's contract check no longer rejects a `CHAR(n)` or `BINARY(n)` column (e.g. a string literal like `'abc'` or a binary literal like `x'0102'`) for a column declared `string`/`varchar` or `bytes`/`varbinary`. Flink types a literal as `CHAR(n)` or `BINARY(n)`, so the model needed `CAST('abc' AS STRING)`. The schema drift check for a `streaming_table` or a `table` with an enforced contract accepts the same columns, so these models also re-run without reporting drift. A literal for a `varchar(n)` or `varbinary(n)` column below the maximum length is still rejected, as before: the check doesn't compare lengths, and Flink silently truncates a value longer than `n`. See MATERIALIZATIONS.md#schema-drift-detection. ([#182](https://github.com/confluentinc/dbt-confluent/issues/182))
+
+### Misc
+
+- Upgraded the underlying `confluent-sql` driver from 0.8 to 0.9 (`confluent-sql~=0.9.0`). The driver now retries a slow statement-results page and tolerates a single slow status poll, instead of failing the model, and retries more of its idempotent control-plane GETs (such as Tableflow state lookups) on transient errors. The adapter was updated for the driver's reorganized Tableflow API and timeout settings, and Tableflow's "needs a Global API key" guidance now recognizes the 0.9.0 driver's reworded missing-credential errors. Profiles and project configuration are unchanged.
+- Upgraded to dbt Core 1.12 (`dbt-core~=1.12.0`, `dbt-adapters~=1.24.5`); dbt Core 1.11 is no longer supported.
+
 ## dbt-confluent 0.5.0 (2026-11-06)
 
 ### Breaking Changes
