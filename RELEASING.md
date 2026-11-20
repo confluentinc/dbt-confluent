@@ -97,8 +97,7 @@ The stamp PR and any last-minute fixes exist only on the release branch, so brin
 
 1. Branch from an up-to-date `main` and merge or cherry-pick the release branch's new commits. At a minimum this must include the stamp commit, whose **changelog update and deleted fragments** `main` needs. Any fixes that were made on the release branch only must also come across.
 2. Set `dbt/adapters/confluent/__version__.py` on `main` to the **next version's `-dev` version**, e.g. `0.6.0-dev` after releasing `0.5.0`. Do **not** carry over the stamped `X.Y.Z` version.
-3. `main` still requires a changelog fragment on PRs, so add one for this change (e.g. `changes/+begin-X.Y+1.0-dev.trivial.md`).
-4. Open a PR into `main` and merge it.
+3. Open a PR into `main` and merge it.
 
 Do this promptly so that `main` doesn't keep accumulating changes whose changelog entries were already published, and so that fragments for the released changes don't appear again in the next release's notes.
 
