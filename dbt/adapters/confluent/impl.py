@@ -61,8 +61,12 @@ _UNIVERSAL_CONFIG_KEYS = frozenset(
 # applies but not the other.
 _KAFKA_BACKED_CONFIG_KEYS = frozenset({"distributed_by", "tableflow"})
 
+# Materializations whose CREATE statement is `... AS SELECT`, so Flink can infer the table's
+# columns from the query: a column block holding only a watermark is enough for them.
+_QUERY_COLUMN_MATERIALIZATIONS = frozenset({"table", "materialized_table"})
+
 MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
-    "table": _UNIVERSAL_CONFIG_KEYS | _KAFKA_BACKED_CONFIG_KEYS | {"on_schema_drift"},
+    "table": _UNIVERSAL_CONFIG_KEYS | _KAFKA_BACKED_CONFIG_KEYS | {"on_schema_drift", "watermark"},
     "view": _UNIVERSAL_CONFIG_KEYS,
     # A function is pure metadata (like a view) with no Kafka topic or long-running statement.
     "function": _UNIVERSAL_CONFIG_KEYS
@@ -997,8 +1001,8 @@ class ConfluentAdapter(SQLAdapter):
         Allowed shape: a dict with a non-empty string `column` (no backticks) and a non-empty
         string `expression`, and no other keys. The watermark is rendered into the table's
         column block, so a `streaming_table` (whose CREATE TABLE has no AS SELECT to infer the
-        other columns from) must have an enforced contract. A `materialized_table` needn't: its
-        other columns are inferred from the query. `model_config` is the Jinja config object
+        other columns from) must have an enforced contract. A `table` or `materialized_table`
+        needn't: their other columns are inferred from the query. `model_config` is the Jinja config object
         (anything with `.get`).
         """
         if watermark is None:
@@ -1025,7 +1029,7 @@ class ConfluentAdapter(SQLAdapter):
                 "Allowed keys: 'column', 'expression'"
             )
         contract = model_config.get("contract")
-        if model_config.get("materialized") != "materialized_table" and not (
+        if model_config.get("materialized") not in _QUERY_COLUMN_MATERIALIZATIONS and not (
             contract and contract.enforced
         ):
             raise CompilationError(

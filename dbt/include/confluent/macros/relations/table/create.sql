@@ -7,7 +7,7 @@
      and create a regular table with a temporary name instead #}
   create table
     {{ relation }}
-  {%- set contract = render_contract_columns_and_reproject_sql(sql) -%}
+  {%- set contract = render_contract_columns_and_reproject_sql(sql, config.get('watermark')) -%}
   {{ contract.ddl }}
   {%- set sql = contract.sql %}
   {{ get_distributed_by_clause() }}

@@ -65,8 +65,9 @@ class TestValidateWatermarkConfig:
         with pytest.raises(CompilationError, match="enforced contract"):
             adapter.validate_watermark_config(WATERMARK, _Config(enforced=False))
 
-    def test_materialized_table_needs_no_contract(self, adapter):
-        config = _Config(enforced=False, materialized="materialized_table")
+    @pytest.mark.parametrize("materialized", ["table", "materialized_table"])
+    def test_query_backed_materializations_need_no_contract(self, adapter, materialized):
+        config = _Config(enforced=False, materialized=materialized)
         adapter.validate_watermark_config(WATERMARK, config)
 
 

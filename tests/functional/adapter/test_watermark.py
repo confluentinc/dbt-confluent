@@ -46,13 +46,16 @@ order_id BIGINT,
 # The "narrowing" stage: contract-enforced so the columns (and watermark) are explicit.
 MT = """
 {{ config(
-    materialized='materialized_table',
+    materialized='__MT_MATERIALIZATION__',
     __MT_CONTRACT__
-    start_mode="RESUME_OR_FROM_NOW(INTERVAL '7' DAY)",
+    __MT_EXTRA__
     __WATERMARK__
 ) }}
 select order_id, __EVENT_TIME__ from {{ ref('__SOURCE__') }}
 """
+
+# Config only some of the upstream materializations accept.
+MT_EXTRA_CONFIG = {"materialized_table": "start_mode=\"RESUME_OR_FROM_NOW(INTERVAL '7' DAY)\","}
 
 MT_CONTRACT_CONFIG = "contract={'enforced': true},"
 
@@ -87,10 +90,14 @@ group by window_start, window_end
 """
 
 
-def _models(src, mt, windowed, watermark_config, mt_contract=True):
+def _models(
+    src, mt, windowed, watermark_config, mt_contract=True, mt_materialization="materialized_table"
+):
     def fill(text):
         return (
             text.replace("__MT_CONTRACT__", MT_CONTRACT_CONFIG if mt_contract else "")
+            .replace("__MT_MATERIALIZATION__", mt_materialization)
+            .replace("__MT_EXTRA__", MT_EXTRA_CONFIG.get(mt_materialization, ""))
             .replace("__MT_YML__", MT_CONTRACT_YML if mt_contract else "")
             .replace("__WATERMARK__", watermark_config)
             .replace("__EVENT_TIME__", EVENT_TIME_COLUMN)
@@ -114,8 +121,17 @@ class _WatermarkFixtures(ConfluentFixtures):
     WINDOWED: str
 
     def _run_upstream_until_populated(self, project):
-        """Build the source and MT, and wait until the MT has all of the source's rows."""
-        run_dbt(["run", "--select", f"{self.SRC} {self.MT}"])
+        """Build the source, wait for it to hold all its rows, then build the upstream model
+        (a `table` is a one-off snapshot, so it needs the source complete first) and wait for
+        it to have them too."""
+        run_dbt(["run", "--select", self.SRC])
+        wait_for_snapshot_rows(
+            project,
+            f"select order_id from {physical_name(self.SRC)}",
+            min_rows=ROW_COUNT,
+            timeout=120,
+        )
+        run_dbt(["run", "--select", self.MT])
         rows = wait_for_snapshot_rows(
             project,
             f"select order_id from {physical_name(self.MT)}",
@@ -129,11 +145,17 @@ class _WatermarkedWindowTests(_WatermarkFixtures):
     """The shared positive scenario; subclasses choose whether the MT has a contract."""
 
     MT_CONTRACT = True
+    MT_MATERIALIZATION = "materialized_table"
 
     @pytest.fixture(scope="class", autouse=True)
     def models(self):
         yield _models(
-            self.SRC, self.MT, self.WINDOWED, WATERMARK_CONFIG, mt_contract=self.MT_CONTRACT
+            self.SRC,
+            self.MT,
+            self.WINDOWED,
+            WATERMARK_CONFIG,
+            mt_contract=self.MT_CONTRACT,
+            mt_materialization=self.MT_MATERIALIZATION,
         )
 
     def test_tumbling_window_over_watermarked_mt(self, project):
@@ -155,10 +177,9 @@ class _WatermarkedWindowTests(_WatermarkFixtures):
             assert 1 <= order_count <= ROW_COUNT
         assert sum(row[2] for row in windows) <= ROW_COUNT
 
-        # The watermark is on the MT itself (not only inferred): the server reports it.
-        ddl = project.run_sql(
-            f"SHOW CREATE MATERIALIZED TABLE {physical_name(self.MT)}", fetch="all"
-        )[0][0]
+        # The watermark is on the upstream table itself (not only inferred): the server reports it.
+        kind = "MATERIALIZED TABLE" if self.MT_MATERIALIZATION == "materialized_table" else "TABLE"
+        ddl = project.run_sql(f"SHOW CREATE {kind} {physical_name(self.MT)}", fetch="all")[0][0]
         assert f"WATERMARK FOR `{EVENT_TIME_COLUMN}`" in ddl
 
 
@@ -177,6 +198,17 @@ class TestWatermarkWithoutContractOnMaterializedTable(_WatermarkedWindowTests):
     MT = "mt_wmnocontract"
     WINDOWED = "win_wmnocontract"
     MT_CONTRACT = False
+
+
+class TestWatermarkOnTable(_WatermarkedWindowTests):
+    """A `table` (no contract) takes a watermark too."""
+
+    NAME = "wmtable"
+    SRC = "src_wmtable"
+    MT = "tbl_wmtable"
+    WINDOWED = "win_wmtable"
+    MT_CONTRACT = False
+    MT_MATERIALIZATION = "table"
 
 
 class TestWithoutWatermarkWindowsAreRejected(_WatermarkFixtures):

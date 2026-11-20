@@ -417,6 +417,7 @@ concept page for the underlying execution model.
 |---|---|
 | `distributed_by` | See [Distributed By](#distributed-by). |
 | `on_schema_drift` | See [Schema Drift Detection](#schema-drift-detection). |
+| `watermark` | `{'column': ..., 'expression': ...}`; see [Watermark](#watermark). |
 | `statement_name` | See [Deterministic Statement Names](#deterministic-statement-names). |
 | `compute_pool_id` | See [Compute Pool](#compute-pool). |
 | `tableflow` | See [Tableflow](#tableflow). |
@@ -901,7 +902,7 @@ A mapping with various tableflow topic-level configuration settings:
 
 A watermark declares which column carries a row's event time, and how far behind that time rows may arrive late. Downstream event-time operations (`OVER` aggregations, `MATCH_RECOGNIZE`, `TUMBLE`/`HOP`/`CUMULATE` windows, interval joins) need one on the table they read from. Without it, the only time attribute a dbt-created table has is the default `$rowtime` (the Kafka record timestamp).
 
-The `watermark` config on [`streaming_table`](#streaming-table) and [`materialized_table`](#materialized-table) models renders a `WATERMARK FOR` entry into the table's column definitions:
+The `watermark` config on [`table`](#table), [`streaming_table`](#streaming-table) and [`materialized_table`](#materialized-table) models renders a `WATERMARK FOR` entry into the table's column definitions:
 
 ```sql
 {{ config(
@@ -920,9 +921,9 @@ CREATE OR ALTER MATERIALIZED TABLE ... (
 ```
 
 - `column` is quoted for you; `expression` is passed through to Flink as written.
-- The watermark lives in the column definitions. A `streaming_table` must have an [enforced contract](https://docs.getdbt.com/docs/mesh/govern/model-contracts), since its `CREATE TABLE` needs every column declared. A `materialized_table` doesn't: without a contract, its column block holds only the `WATERMARK FOR` entry and Flink infers the columns from the query. A missing contract or malformed config fails with a compile error before any DDL.
+- The watermark lives in the column definitions. A `streaming_table` must have an [enforced contract](https://docs.getdbt.com/docs/mesh/govern/model-contracts), since its `CREATE TABLE` needs every column declared. A `table` or `materialized_table` doesn't: without a contract, its column block holds only the `WATERMARK FOR` entry and Flink infers the columns from the query. A missing contract or malformed config fails with a compile error before any DDL.
 - On `materialized_table`, a changed watermark is part of the definition `CREATE OR ALTER` reconciles on the next run, and an unchanged one keeps re-runs a no-op.
-- On `streaming_table`, the watermark is part of the `CREATE TABLE`, and [schema drift detection](#schema-drift-detection) doesn't compare it. To change it, run with `--full-refresh`.
+- On `table` and `streaming_table`, the watermark is part of the `CREATE TABLE`, and [schema drift detection](#schema-drift-detection) doesn't compare it. To change it, run with `--full-refresh`.
 
 ## Distributed By
 
