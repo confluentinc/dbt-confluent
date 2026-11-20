@@ -23,13 +23,14 @@ MACRO_FILE = (
 
 
 class _Config:
-    """Stand-in for dbt's `config`; only `contract` is read by the macro."""
+    """Stand-in for dbt's `config`; only `contract` is read by the macro. `extra` holds other
+    model config keys, which the macro must leave alone."""
 
-    def __init__(self, contract):
-        self._contract = contract
+    def __init__(self, contract, extra=None):
+        self._values = {"contract": contract, **(extra or {})}
 
     def get(self, key, default=None):
-        return self._contract if key == "contract" else default
+        return self._values.get(key, default)
 
 
 class _MacroReturn(Exception):
@@ -42,7 +43,7 @@ class _MacroReturn(Exception):
         self.value = value
 
 
-def _render(sql, contract):
+def _render(sql, contract, extra_config=None):
     """Render the real macro against fake dbt-core contract macros, tracking
     which of them were invoked and with what `sql`."""
     calls = []
@@ -63,7 +64,7 @@ def _render(sql, contract):
         raise _MacroReturn(value)
 
     env = jinja2.Environment(extensions=["jinja2.ext.do"])
-    env.globals["config"] = _Config(contract)
+    env.globals["config"] = _Config(contract, extra_config)
     env.globals["get_assert_columns_equivalent"] = get_assert_columns_equivalent
     env.globals["get_table_columns_and_constraints"] = get_table_columns_and_constraints
     env.globals["get_select_subquery"] = get_select_subquery
@@ -107,3 +108,22 @@ class TestRenderContractColumnsAndReprojectSql:
 
         assert result == {"ddl": "", "sql": sql}
         assert calls == []
+
+
+class TestUnownedWatermarkConfigIsIgnored:
+    """`table` shares this macro but doesn't own the `watermark` config key, so a user's own
+    `watermark` config (opted out of validation via `ignore_unsupported_config`) must never be
+    consumed: the macro only renders a watermark a caller passes explicitly."""
+
+    CUSTOM_WATERMARK = "custom-bookmark"
+
+    def test_enforced_contract(self):
+        result, _ = _render(
+            "select a from t", {"enforced": True}, {"watermark": self.CUSTOM_WATERMARK}
+        )
+        assert result["ddl"].strip() == "(fake column defs)"
+
+    def test_unenforced_contract(self):
+        sql = "select a from t"
+        result, _ = _render(sql, {"enforced": False}, {"watermark": self.CUSTOM_WATERMARK})
+        assert result == {"ddl": "", "sql": sql}

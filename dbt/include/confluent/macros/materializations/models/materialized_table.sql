@@ -15,6 +15,7 @@
 
   {%- do adapter.validate_distributed_by_config(config.get('distributed_by')) -%}
   {%- do adapter.validate_materialized_table_config(config) -%}
+  {%- do adapter.validate_watermark_config(config.get('watermark'), config) -%}
 
   {%- set existing_relation = load_cached_relation(this) -%}
   {%- set target_relation = this.incorporate(type=this.Table) %}
@@ -64,7 +65,7 @@ Run with --full-refresh to drop it and recreate it as a materialized table (for 
                     statement_name=get_statement_name('-' ~ invocation_id),
                     statement_properties=config.get('statement_properties')) -%}
     CREATE OR ALTER MATERIALIZED TABLE {{ target_relation }}
-    {%- set contract = render_contract_columns_and_reproject_sql(sql) -%}
+    {%- set contract = render_contract_columns_and_reproject_sql(sql, config.get('watermark')) -%}
     {{ contract.ddl }}
     {%- set sql = contract.sql %}
     {{ get_distributed_by_clause() }}

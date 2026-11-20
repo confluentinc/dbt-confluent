@@ -29,7 +29,7 @@ from dbt.adapters.contracts.relation import Policy, RelationConfig
 from dbt.adapters.events.logging import AdapterLogger
 from dbt.adapters.sql import SQLAdapter
 
-from . import function_artifacts, functions, tableflow
+from . import function_artifacts, functions, tableflow, watermarks
 from .catalog import query_catalog_rows
 from .dry_run_types import FIXED_LENGTH_FITS, MAX_LENGTH, display_type, fitted_type
 from .function_artifacts_repo import FunctionArtifactsRepo
@@ -61,7 +61,7 @@ _UNIVERSAL_CONFIG_KEYS = frozenset(
 _KAFKA_BACKED_CONFIG_KEYS = frozenset({"distributed_by", "tableflow"})
 
 MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
-    "table": _UNIVERSAL_CONFIG_KEYS | _KAFKA_BACKED_CONFIG_KEYS | {"on_schema_drift"},
+    "table": _UNIVERSAL_CONFIG_KEYS | _KAFKA_BACKED_CONFIG_KEYS | {"on_schema_drift", "watermark"},
     "view": _UNIVERSAL_CONFIG_KEYS,
     # A function is pure metadata (like a view) with no Kafka topic or long-running statement.
     "function": _UNIVERSAL_CONFIG_KEYS
@@ -77,10 +77,10 @@ MATERIALIZATION_CONFIG_KEYS: dict[str, frozenset[str]] = {
     | {"connector", "with", "on_schema_drift"},
     "streaming_table": _UNIVERSAL_CONFIG_KEYS
     | _KAFKA_BACKED_CONFIG_KEYS
-    | {"with", "on_schema_drift", "statement_properties"},
+    | {"with", "on_schema_drift", "statement_properties", "watermark"},
     "materialized_table": _UNIVERSAL_CONFIG_KEYS
     | _KAFKA_BACKED_CONFIG_KEYS
-    | {"with", "start_mode", "statement_properties"},
+    | {"with", "start_mode", "statement_properties", "watermark"},
 }
 
 _ALL_CONFIG_KEYS: frozenset[str] = frozenset().union(*MATERIALIZATION_CONFIG_KEYS.values())
@@ -1008,6 +1008,17 @@ class ConfluentAdapter(SQLAdapter):
             raise CompilationError(
                 f"'distributed_by' has unknown key '{key}'. Allowed keys: 'columns', 'buckets'"
             )
+
+    @available
+    def validate_watermark_config(self, watermark: object, model_config: Any) -> None:
+        """Raise CompilationError if the `watermark` config is malformed or can't be rendered.
+        See `watermarks.validate_watermark_config`."""
+        watermarks.validate_watermark_config(watermark, model_config)
+
+    @available
+    def append_watermark(self, columns_ddl: str, watermark: dict[str, str]) -> str:
+        """Add the watermark to a column block. See `watermarks.append_watermark`."""
+        return watermarks.append_watermark(columns_ddl, watermark)
 
     @available
     def validate_materialized_table_config(self, model_config: Any) -> None:
