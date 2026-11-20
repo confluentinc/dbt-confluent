@@ -1,1 +1,0 @@
-The `function` materialization (Flink UDFs) is no longer experimental and no longer needs to be enabled: it works without the `enable_experimental_function_materialization` flag, which has been removed. If you set that flag under `flags:` in `dbt_project.yml` to try the materialization, you can delete it. See MATERIALIZATIONS.md#function.
