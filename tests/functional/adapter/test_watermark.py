@@ -14,8 +14,8 @@ couldn't tell the difference). So the test is a tumbling-window aggregation, as 
 
 import pytest
 
-from dbt.tests.util import run_dbt
-from tests.functional.adapter._helpers import wait_for_snapshot_rows
+from dbt.tests.util import run_dbt, set_model_file
+from tests.functional.adapter._helpers import assert_drift_error, relation, wait_for_snapshot_rows
 from tests.functional.adapter.fixtures import ConfluentFixtures
 from tests.functional.adapter.isolation import physical_name
 
@@ -229,3 +229,57 @@ class TestWithoutWatermarkWindowsAreRejected(_WatermarkFixtures):
         results = run_dbt(["run", "--select", self.WINDOWED], expect_pass=False)
         assert results[0].status.name == "Error"
         assert "time attribute" in results[0].message
+
+
+class TestWatermarkDriftOnTable(ConfluentFixtures):
+    """An existing `table`'s watermark is compared with the config on every run, so a changed
+    one fails with drift instead of being silently skipped (the watermark is part of the
+    CREATE TABLE, so only --full-refresh can change it).
+
+    The unchanged re-run skipping also proves the comparison tolerates how Flink reports the
+    watermark back (backticked identifiers, upper-cased keywords)."""
+
+    NAME = "wmdrift"
+    MODEL = "tbl_wmdrift"
+    # Written the way a user would, not the way Flink reports it back.
+    BASELINE_EXPRESSION = f"{EVENT_TIME_COLUMN} - interval '5' second"
+    CHANGED_EXPRESSION = f"{EVENT_TIME_COLUMN} - interval '30' second"
+
+    @staticmethod
+    def _model(expression):
+        watermark = (
+            f"watermark={{'column': '{EVENT_TIME_COLUMN}', 'expression': \"{expression}\"}}"
+            if expression
+            else ""
+        )
+        return f"""
+{{{{ config(materialized='table', {watermark}) }}}}
+select 1 as order_id, cast('2024-01-01 00:00:00' as timestamp(3)) as {EVENT_TIME_COLUMN}
+"""
+
+    @pytest.fixture(scope="class")
+    def project_config_update(self, unique_schema):
+        return {"models": {"+schema": unique_schema}}
+
+    @pytest.fixture(scope="class")
+    def models(self):
+        return {f"{self.MODEL}.sql": self._model(self.BASELINE_EXPRESSION)}
+
+    def test_watermark_drift(self, project):
+        run_dbt(["run", "--full-refresh"])
+
+        results = run_dbt(["run"])
+        assert results[0].message == "SKIP", results[0].message
+
+        set_model_file(
+            project, relation(project, self.MODEL), self._model(self.CHANGED_EXPRESSION)
+        )
+        results = run_dbt(["run"], expect_pass=False)
+        assert_drift_error(results, self.MODEL)
+        assert "watermark expression" in results[0].message
+
+        # Dropping the config isn't checked: the watermark may come from a contract's
+        # constraints, which can't be told apart from here.
+        set_model_file(project, relation(project, self.MODEL), self._model(None))
+        results = run_dbt(["run"])
+        assert results[0].message == "SKIP", results[0].message

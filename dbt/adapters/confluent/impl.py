@@ -171,6 +171,9 @@ class DriftMetadata(NamedTuple):
     is_materialized: bool  # IS_MATERIALIZED='YES': a Flink materialized table
     options: dict[str, str]  # {option_key: option_value}, from TABLE_OPTIONS
     distribution: dict | None  # {buckets, columns}, or None when IS_DISTRIBUTED isn't 'YES'
+    # {column, expression} of the table's own watermark, or None when it has none: a table
+    # without one reports Confluent's hidden `$rowtime` default instead.
+    watermark: dict[str, str] | None = None
 
 
 class ConfluentAdapter(SQLAdapter):
@@ -1289,6 +1292,7 @@ class ConfluentAdapter(SQLAdapter):
         expected_connector: str | None = None,
         dry_run_columns: DryRunColumns | None = None,
         drift_columns: "agate.Table | None" = None,
+        expected_watermark: dict[str, str] | None = None,
     ) -> None:
         """Compare existing vs expected schema and raise CompilationError on drift.
 
@@ -1327,6 +1331,11 @@ class ConfluentAdapter(SQLAdapter):
         but it lives outside the `with` config — so it's merged into the
         expected options here to participate in options drift like any
         other option. None for materializations without a connector.
+
+        `expected_watermark` is the model's `watermark` config, for the materializations that
+        render it into their CREATE TABLE (`table`, `streaming_table`); None otherwise, and
+        then no watermark is checked. Like options and distribution, it's checked only under
+        `enforce="all"`.
         """
         assert existing_relation.identifier is not None
         if (temp_relation is None) == (dry_run_columns is None):
@@ -1380,6 +1389,9 @@ class ConfluentAdapter(SQLAdapter):
             violations.extend(self._check_options_drift(expected_options, drift_metadata.options))
             violations.extend(
                 self._check_distribution_drift(expected_distribution, drift_metadata.distribution)
+            )
+            violations.extend(
+                watermarks.check_watermark_drift(expected_watermark, drift_metadata.watermark)
             )
         if violations:
             bullets = "\n".join(f"  - {v}" for v in violations)
@@ -1581,6 +1593,7 @@ class ConfluentAdapter(SQLAdapter):
         is_distributed = False
         is_materialized = False
         buckets: int | None = None
+        existing_watermark: dict[str, str] | None = None
         positions: list[tuple[int, str]] = []
 
         for row in drift_metadata:
@@ -1592,6 +1605,15 @@ class ConfluentAdapter(SQLAdapter):
                 if str(row["is_distributed"]).upper() == "YES":
                     is_distributed = True
                     buckets = row["dist_buckets"]
+                # A table with no watermark of its own reports a hidden `$rowtime` one.
+                if (
+                    row["watermark_column"] is not None
+                    and str(row["watermark_is_hidden"]).upper() != "YES"
+                ):
+                    existing_watermark = {
+                        "column": row["watermark_column"],
+                        "expression": row["watermark_expression"],
+                    }
             elif section == "TABLE_OPTIONS":
                 existing_options[row["option_key"]] = row["option_value"]
             elif section == "DISTRIBUTION":
@@ -1608,6 +1630,7 @@ class ConfluentAdapter(SQLAdapter):
             is_materialized=is_materialized,
             options=existing_options,
             distribution=existing_distribution,
+            watermark=existing_watermark,
         )
 
     @staticmethod

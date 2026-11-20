@@ -80,6 +80,9 @@ def drift_metadata_row(
     is_distributed=None,
     dist_buckets=None,
     is_materialized=None,
+    watermark_column=None,
+    watermark_expression=None,
+    watermark_is_hidden=None,
 ):
     """One row of `_get_drift_metadata`'s result, for make_drift_metadata."""
     return (
@@ -91,6 +94,9 @@ def drift_metadata_row(
         is_distributed,
         dist_buckets,
         is_materialized,
+        watermark_column,
+        watermark_expression,
+        watermark_is_hidden,
     )
 
 
@@ -103,6 +109,9 @@ _METADATA_COLUMNS = [
     "is_distributed",
     "dist_buckets",
     "is_materialized",
+    "watermark_column",
+    "watermark_expression",
+    "watermark_is_hidden",
 ]
 
 # Pin types so agate's inference doesn't coerce "YES" to a boolean (Confluent
@@ -116,6 +125,9 @@ _METADATA_TYPES = [
     agate.Text(),  # is_distributed
     agate.Number(),  # dist_buckets
     agate.Text(),  # is_materialized
+    agate.Text(),  # watermark_column
+    agate.Text(),  # watermark_expression
+    agate.Text(),  # watermark_is_hidden
 ]
 
 

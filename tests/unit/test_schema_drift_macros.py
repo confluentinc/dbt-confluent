@@ -133,7 +133,11 @@ def test_dry_run_path_creates_nothing(materialized, mode):
     assert args[0] == harness.existing
     assert args[1] is None
     assert args[2] is partitioned
-    assert kwargs == {"dry_run_columns": DRY_RUN, "drift_columns": None}
+    assert kwargs == {
+        "dry_run_columns": DRY_RUN,
+        "drift_columns": None,
+        "expected_watermark": None,
+    }
     harness.adapter.defer_drop.assert_not_called()
 
 
@@ -240,6 +244,7 @@ def test_fallback_path_reads_columns_after_the_temp_table():
     assert kwargs == {
         "dry_run_columns": None,
         "drift_columns": harness.table("get_drift_columns"),
+        "expected_watermark": None,
     }
 
 
@@ -271,6 +276,7 @@ def test_streaming_source_skips_dry_run():
     assert kwargs == {
         "dry_run_columns": None,
         "drift_columns": harness.table("get_drift_columns"),
+        "expected_watermark": None,
     }
 
 
@@ -317,3 +323,35 @@ def test_enforce_columns_skips_distribution_columns():
     harness.run(enforce="columns")
 
     assert COLUMNS_FROM not in harness.sql("get_drift_metadata")
+
+
+WATERMARK = {"column": "event_ts", "expression": "`event_ts` - INTERVAL '15' SECOND"}
+
+
+@pytest.mark.parametrize("materialized", ["table", "streaming_table"])
+def test_watermark_config_is_checked_where_the_materialization_renders_it(materialized):
+    harness = _Harness({"materialized": materialized, "watermark": WATERMARK}, DRY_RUN)
+
+    harness.run()
+
+    assert harness.drift_call.kwargs["expected_watermark"] == WATERMARK
+
+
+def test_watermark_config_on_streaming_source_is_not_checked():
+    """streaming_source doesn't own the `watermark` key (its watermark is in its column
+    definitions), so a user's own `watermark` config there must never be read as one."""
+    harness = _Harness({"materialized": "streaming_source", "watermark": "custom-bookmark"})
+
+    harness.run(has_select_query=False)
+
+    assert harness.drift_call.kwargs["expected_watermark"] is None
+
+
+def test_metadata_query_reads_the_watermark_from_the_tables_row():
+    harness = _Harness({"materialized": "table"}, dry_run_result=DRY_RUN)
+
+    harness.run()
+
+    metadata = harness.sql("get_drift_metadata")
+    for column in ("WATERMARK_COLUMN", "WATERMARK_EXPRESSION", "WATERMARK_IS_HIDDEN"):
+        assert metadata.count(column) == 1

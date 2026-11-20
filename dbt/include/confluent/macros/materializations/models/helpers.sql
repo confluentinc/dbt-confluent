@@ -269,7 +269,7 @@ WITH (
 {% macro check_for_schema_drift(existing_relation, has_select_query, enforce='all') %}
   {# Compare the existing table against what the model would produce and
      raise a compilation error on any drift (columns, types, WITH options,
-     or DISTRIBUTED BY).
+     DISTRIBUTED BY, or WATERMARK).
 
      Columns:
        - SELECT models (table, streaming_table): two `sql.dry-run`s, of the
@@ -361,6 +361,10 @@ WITH (
   {# `connector` (streaming_source) is rendered into the DDL's WITH clause
      but configured outside `with` — pass it along so a connector change is
      caught as options drift. None for the other materializations. #}
+  {# Only `table` and `streaming_table` own the `watermark` config key (and render
+     it into their CREATE TABLE); streaming_source's watermark is in its column
+     definitions, and any other `watermark` config is the user's own. #}
+  {% set expected_watermark = config.get('watermark') if config.get('materialized') in ['table', 'streaming_table'] else none %}
   {% do adapter.check_schema_drift(
     existing_relation,
     temp_relation,
@@ -370,7 +374,8 @@ WITH (
     enforce,
     config.get('connector'),
     dry_run_columns=dry_run_columns,
-    drift_columns=drift_columns
+    drift_columns=drift_columns,
+    expected_watermark=expected_watermark
   ) %}
 {% endmacro %}
 
@@ -464,11 +469,15 @@ WITH (
      Example rows for a table `my_table`(id BIGINT distributed, v STRING)
      with WITH(changelog.mode='upsert'), with include_distribution. Columns
      shown left-to-right are: section, col_name, dist_position, option_key,
-     option_value, is_distributed, dist_buckets, is_materialized.
+     option_value, is_distributed, dist_buckets, is_materialized,
+     watermark_column, watermark_expression, watermark_is_hidden.
 
-       ('TABLES',        NULL, NULL, NULL,             NULL,     'YES', 4,    'NO')
-       ('TABLE_OPTIONS', NULL, NULL, 'changelog.mode', 'upsert', NULL,  NULL, NULL)
-       ('DISTRIBUTION',  'id', 1,    NULL,             NULL,     NULL,  NULL, NULL)
+       ('TABLES',        NULL, NULL, NULL,             NULL,     'YES', 4,    'NO', 'ts', '`ts` - INTERVAL ''5'' SECOND', 'NO')
+       ('TABLE_OPTIONS', NULL, NULL, 'changelog.mode', 'upsert', NULL,  NULL, NULL, NULL, NULL, NULL)
+       ('DISTRIBUTION',  'id', 1,    NULL,             NULL,     NULL,  NULL, NULL, NULL, NULL, NULL)
+
+     A table with no watermark of its own reports Confluent's hidden default
+     in its TABLES row: ('$rowtime', '`SOURCE_WATERMARK`()', 'YES').
 
      An existing table always has a TABLES row, so its absence means
      INFORMATION_SCHEMA hasn't caught up (or the table was dropped outside
@@ -489,7 +498,10 @@ WITH (
       CAST(NULL AS STRING) AS option_value,
       IS_DISTRIBUTED AS is_distributed,
       DISTRIBUTION_BUCKETS AS dist_buckets,
-      IS_MATERIALIZED AS is_materialized
+      IS_MATERIALIZED AS is_materialized,
+      WATERMARK_COLUMN AS watermark_column,
+      WATERMARK_EXPRESSION AS watermark_expression,
+      WATERMARK_IS_HIDDEN AS watermark_is_hidden
     FROM INFORMATION_SCHEMA.`TABLES`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
       AND TABLE_SCHEMA = '{{ existing_relation.schema }}'
@@ -503,7 +515,10 @@ WITH (
       OPTION_VALUE AS option_value,
       CAST(NULL AS STRING) AS is_distributed,
       CAST(NULL AS INT) AS dist_buckets,
-      CAST(NULL AS STRING) AS is_materialized
+      CAST(NULL AS STRING) AS is_materialized,
+      CAST(NULL AS STRING) AS watermark_column,
+      CAST(NULL AS STRING) AS watermark_expression,
+      CAST(NULL AS STRING) AS watermark_is_hidden
     FROM INFORMATION_SCHEMA.`TABLE_OPTIONS`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
       AND TABLE_SCHEMA = '{{ existing_relation.schema }}'
@@ -518,7 +533,10 @@ WITH (
       CAST(NULL AS STRING) AS option_value,
       CAST(NULL AS STRING) AS is_distributed,
       CAST(NULL AS INT) AS dist_buckets,
-      CAST(NULL AS STRING) AS is_materialized
+      CAST(NULL AS STRING) AS is_materialized,
+      CAST(NULL AS STRING) AS watermark_column,
+      CAST(NULL AS STRING) AS watermark_expression,
+      CAST(NULL AS STRING) AS watermark_is_hidden
     FROM INFORMATION_SCHEMA.`COLUMNS`
     WHERE TABLE_CATALOG_ID = '{{ existing_relation.database }}'
       AND TABLE_SCHEMA = '{{ existing_relation.schema }}'

@@ -68,3 +68,47 @@ def append_watermark(columns_ddl: str, watermark: dict[str, str]) -> str:
             f"parenthesized block: {columns_ddl!r}"
         )
     return f"{body[:-1].rstrip()},\n  {entry}\n)"
+
+
+def _normalized_expression(expression: str) -> str:
+    """The expression reduced to what Flink preserves when it reports a watermark back.
+
+    INFORMATION_SCHEMA reprints the parsed expression: identifiers backtick-quoted, keywords
+    upper-cased, whitespace normalized, redundant parentheses dropped. So the comparison ignores
+    backticks, whitespace, case and parentheses. A change that only regroups an expression,
+    such as `a - (b + c)` to `a - b + c`, goes unnoticed; accepting that is what keeps a correct
+    model from reporting drift on every run, even right after `--full-refresh`.
+    """
+    for ignored in "`()":
+        expression = expression.replace(ignored, "")
+    return "".join(expression.split()).casefold()
+
+
+def check_watermark_drift(
+    expected: dict[str, str] | None, existing: dict[str, str] | None
+) -> list[str]:
+    """Return violations for a `watermark` config that doesn't match the existing table's.
+
+    `existing` is `{'column', 'expression'}` as INFORMATION_SCHEMA reports them, or None when
+    the table has no watermark of its own (Confluent gives every table a hidden `$rowtime`
+    one). Only a requested watermark is verified: with no `watermark` config (`expected` is
+    None) nothing is checked, since the table's watermark may have been declared in a contract's
+    constraints, which this check can't tell from config.
+    """
+    if expected is None:
+        return []
+    if existing is None:
+        return [f"watermark: existing=<none>, expected={expected}"]
+    violations: list[str] = []
+    if existing["column"] != expected["column"]:
+        violations.append(
+            f"watermark column: existing='{existing['column']}', expected='{expected['column']}'"
+        )
+    if _normalized_expression(existing["expression"]) != _normalized_expression(
+        expected["expression"]
+    ):
+        violations.append(
+            f"watermark expression: existing='{existing['expression']}', "
+            f"expected='{expected['expression']}'"
+        )
+    return violations

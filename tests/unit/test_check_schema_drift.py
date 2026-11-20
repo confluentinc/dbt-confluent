@@ -20,6 +20,7 @@ from confluent_sql.types import ColumnTypeDefinition
 from dbt_common.exceptions import CompilationError, DbtDatabaseError, DbtRuntimeError
 
 from dbt.adapters.confluent.impl import ConfluentAdapter, DriftMetadata, DryRunColumns
+from dbt.adapters.confluent.watermarks import check_watermark_drift
 from tests.unit._helpers import drift_metadata_row as _row
 from tests.unit._helpers import make_drift_columns as _make_columns
 from tests.unit._helpers import make_drift_metadata as _make_metadata
@@ -291,6 +292,58 @@ class TestCheckDistributionDrift:
 
 
 # ---------------------------------------------------------------------------
+# check_watermark_drift
+# ---------------------------------------------------------------------------
+
+EXPECTED_WATERMARK = {"column": "event_ts", "expression": "event_ts - INTERVAL '15' SECOND"}
+# What INFORMATION_SCHEMA reports for EXPECTED_WATERMARK: Flink reprints the parsed expression.
+EXISTING_WATERMARK = {"column": "event_ts", "expression": "`event_ts` - INTERVAL '15' SECOND"}
+
+
+class TestCheckWatermarkDrift:
+    def test_no_drift_despite_flink_reprinting_the_expression(self):
+        assert check_watermark_drift(EXPECTED_WATERMARK, EXISTING_WATERMARK) == []
+
+    def test_unrequested_watermark_is_not_checked(self):
+        """No `watermark` config: whatever the table has isn't compared (it may come from a
+        contract's constraints)."""
+        assert check_watermark_drift(None, EXISTING_WATERMARK) == []
+        assert check_watermark_drift(None, None) == []
+
+    def test_requested_but_missing(self):
+        assert check_watermark_drift(EXPECTED_WATERMARK, None) == [
+            f"watermark: existing=<none>, expected={EXPECTED_WATERMARK}"
+        ]
+
+    def test_expression_change_detected(self):
+        expected = {**EXPECTED_WATERMARK, "expression": "event_ts - INTERVAL '30' SECOND"}
+        assert check_watermark_drift(expected, EXISTING_WATERMARK) == [
+            "watermark expression: existing='`event_ts` - INTERVAL '15' SECOND', "
+            "expected='event_ts - INTERVAL '30' SECOND'"
+        ]
+
+    def test_column_change_detected(self):
+        expected = {"column": "other_ts", "expression": "other_ts - INTERVAL '15' SECOND"}
+        violations = check_watermark_drift(expected, EXISTING_WATERMARK)
+        assert violations[0] == "watermark column: existing='event_ts', expected='other_ts'"
+
+    @pytest.mark.parametrize(
+        "written",
+        [
+            "event_ts   -  interval '15' second",
+            "(event_ts - INTERVAL '15' SECOND)",
+            "`event_ts` - INTERVAL '15' SECOND",
+        ],
+    )
+    def test_spelling_flink_normalizes_is_not_drift(self, written):
+        """Case, whitespace, backticks and redundant parentheses are what Flink rewrites, so
+        they must not read as drift: a correct model would fail on every run, even right after
+        --full-refresh."""
+        expected = {"column": "event_ts", "expression": written}
+        assert check_watermark_drift(expected, EXISTING_WATERMARK) == []
+
+
+# ---------------------------------------------------------------------------
 # _partition_drift_metadata / _partition_drift_columns
 # ---------------------------------------------------------------------------
 
@@ -386,6 +439,40 @@ class TestPartitionDriftMetadata:
         )
 
 
+class TestPartitionWatermark:
+    def test_own_watermark(self):
+        metadata = _make_metadata(
+            [
+                _row(
+                    section="TABLES",
+                    is_distributed="NO",
+                    watermark_column="event_ts",
+                    watermark_expression="`event_ts` - INTERVAL '15' SECOND",
+                    watermark_is_hidden="NO",
+                )
+            ]
+        )
+        assert ConfluentAdapter._partition_drift_metadata(metadata).watermark == {
+            "column": "event_ts",
+            "expression": "`event_ts` - INTERVAL '15' SECOND",
+        }
+
+    def test_hidden_default_watermark_is_no_watermark(self):
+        """A table declared without a watermark reports Confluent's hidden `$rowtime` one."""
+        metadata = _make_metadata(
+            [
+                _row(
+                    section="TABLES",
+                    is_distributed="NO",
+                    watermark_column="$rowtime",
+                    watermark_expression="`SOURCE_WATERMARK`()",
+                    watermark_is_hidden="YES",
+                )
+            ]
+        )
+        assert ConfluentAdapter._partition_drift_metadata(metadata).watermark is None
+
+
 class TestPartitionDriftColumns:
     def test_splits_columns_by_table_name(self):
         columns = _make_columns(
@@ -474,6 +561,40 @@ class TestCheckSchemaDriftOrchestrator:
         assert "distribution columns:" in msg
         assert "distribution buckets:" in msg
         assert "Use --full-refresh" in msg
+
+    def test_watermark_drift_detected(self):
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        with pytest.raises(CompilationError) as excinfo:
+            adapter.check_schema_drift(
+                _relation(self.EXISTING_ID),
+                _relation(self.TEMP_ID),
+                self._metadata(
+                    watermark_column="event_ts",
+                    watermark_expression="`event_ts` - INTERVAL '15' SECOND",
+                    watermark_is_hidden="NO",
+                ),
+                expected_with={},
+                drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
+                expected_watermark={
+                    "column": "event_ts",
+                    "expression": "event_ts - INTERVAL '30' SECOND",
+                },
+            )
+        assert "watermark expression:" in str(excinfo.value)
+
+    def test_watermark_not_checked_when_only_columns_are_enforced(self):
+        """The streaming restart path under on_schema_drift='ignore' tolerates everything
+        but column drift, including a changed watermark."""
+        adapter = ConfluentAdapter.__new__(ConfluentAdapter)
+        adapter.check_schema_drift(
+            _relation(self.EXISTING_ID),
+            _relation(self.TEMP_ID),
+            self._metadata(),
+            expected_with={},
+            enforce="columns",
+            drift_columns=self._columns({"id": "BIGINT"}, {"id": "BIGINT"}),
+            expected_watermark=EXPECTED_WATERMARK,
+        )
 
     def test_options_only_drift(self):
         """When only options drift, only options-related violations appear."""

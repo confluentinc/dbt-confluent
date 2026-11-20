@@ -236,7 +236,7 @@ concept page for the underlying execution model.
 | `statement_name` | See [Deterministic Statement Names](#deterministic-statement-names). The DDL gets a `-ddl` suffix appended to this name. |
 | `compute_pool_id` | See [Compute Pool](#compute-pool). |
 | `statement_properties` | See [Statement Properties](#statement-properties). Applies only to the INSERT statement, not the CREATE TABLE DDL; for the DDL side, use `with` instead. |
-| `watermark` | `{'column': ..., 'expression': ...}`; see [Watermark](#watermark). Changing it requires `--full-refresh`. |
+| `watermark` | `{'column': ..., 'expression': ...}`; see [Watermark](#watermark). Changing it fails [schema drift detection](#watermark-drift); apply it with `--full-refresh`. |
 | `tableflow` | See [Tableflow](#tableflow). |
 
 #### Streaming Table: Schema Drift / Reconciliation Behavior
@@ -426,7 +426,7 @@ concept page for the underlying execution model.
 #### Table: Schema Drift / Reconciliation Behavior
 
 If the table already exists and `--full-refresh` is not specified, `table` skips creation after
-running [schema drift detection](#schema-drift-detection) (columns and `distributed_by`).
+running [schema drift detection](#schema-drift-detection) (columns, `distributed_by` and `watermark`).
 Use `--full-refresh` to drop and recreate the table.
 This permanently deletes the backing Kafka topic and all of its data.
 
@@ -923,7 +923,7 @@ CREATE OR ALTER MATERIALIZED TABLE ... (
 - `column` is quoted for you; `expression` is passed through to Flink as written.
 - The watermark lives in the column definitions. A `streaming_table` must have an [enforced contract](https://docs.getdbt.com/docs/mesh/govern/model-contracts), since its `CREATE TABLE` needs every column declared. A `table` or `materialized_table` doesn't: without a contract, its column block holds only the `WATERMARK FOR` entry and Flink infers the columns from the query. A missing contract or malformed config fails with a compile error before any DDL.
 - On `materialized_table`, a changed watermark is part of the definition `CREATE OR ALTER` reconciles on the next run, and an unchanged one keeps re-runs a no-op.
-- On `table` and `streaming_table`, the watermark is part of the `CREATE TABLE`, and [schema drift detection](#schema-drift-detection) doesn't compare it. To change it, run with `--full-refresh`.
+- On `table` and `streaming_table`, the watermark is part of the `CREATE TABLE`, so it can't be changed in place. [Schema drift detection](#watermark-drift) compares it with the existing table's and fails the run if they differ; to change it, run with `--full-refresh`.
 
 ## Distributed By
 
@@ -1054,7 +1054,7 @@ moving toward. `view` and `ephemeral` have no persistent schema to check.
 
 When a table already exists and `--full-refresh` is not specified, the adapter performs drift detection before skipping creation.
 The check compares **columns** and **`distributed_by`** for all applicable materializations, plus
-**WITH options** for `streaming_table` and `streaming_source`, in a single pass and raises one
+**WITH options** for `streaming_table` and `streaming_source`, and the **`watermark`** for `table` and `streaming_table`, in a single pass and raises one
 error listing every violation, so you don't have to fix them one at a time.
 To rebuild the model to reflect the local configuration, use `--full-refresh` to recreate the model from scratch.
 
@@ -1096,6 +1096,13 @@ select * from {{ ref('source') }}
 #### Column Drift
 - **table, streaming_table**: Compares the existing table's column names and data types with the SELECT query's, both resolved by dry-runs (or, with the temp-table fallback, from `INFORMATION_SCHEMA`). Raises an error if columns are added, removed, renamed, or if data types change. Column reordering is allowed: a `streaming_table`'s INSERT writes its columns by name (see [Streaming Table](#streaming-table)), and a `table` keeps its existing column order until it's rebuilt.
 - **streaming_source**: Compares existing column names and data types with the column definitions in the model SQL. Raises an error if columns are added, removed, renamed, or if data types change. Uses a temporary table to infer schema from SQL column definitions.
+
+#### Watermark Drift
+Compares the `watermark` config of a `table` or `streaming_table` against the existing table's watermark, which `INFORMATION_SCHEMA.TABLES` reports as a column and an expression. Raises an error if the column or the expression differs.
+
+Flink reports the expression reprinted, with backtick-quoted identifiers, upper-cased keywords and redundant parentheses dropped, so the comparison ignores case, whitespace, backticks and parentheses. A change that only regroups an expression, such as `a - (b + c)` to `a - b + c`, isn't detected.
+
+**Important limitation**: As with WITH options, only a requested watermark is verified. If the model has no `watermark` config, nothing is compared, since the table's watermark may come from a [contract's constraints](https://docs.getdbt.com/reference/resource-properties/constraints). Removing the config therefore isn't detected either: use `--full-refresh` to rebuild the table without a watermark.
 
 #### Distribution Drift
 Compares the user-specified `config(distributed_by={...})` against the existing distribution from `INFORMATION_SCHEMA.TABLES` and `INFORMATION_SCHEMA.COLUMNS`. Raises an error if the column list or column order differ, or if the bucket count differs when it was explicitly specified.
