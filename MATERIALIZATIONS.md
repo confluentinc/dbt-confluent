@@ -16,6 +16,7 @@
 - [Model Configuration](#model-configuration)
   - [Validation](#validation)
   - [Tableflow](#tableflow)
+  - [Watermark](#watermark)
   - [Distributed By](#distributed-by)
   - [Statement Properties](#statement-properties)
   - [Compute Pool](#compute-pool)
@@ -123,6 +124,7 @@ concept page for the underlying feature.
 |---|---|
 | `distributed_by` | See [Distributed By](#distributed-by). |
 | `with` | Table options, e.g. `{'key.format': 'avro-registry'}`. |
+| `watermark` | `{'column': ..., 'expression': ...}`; see [Watermark](#watermark). Changes are applied in place. |
 | `start_mode` | Where the query starts (or, on an in-place evolution, restarts) reading; see [`start_mode`](#materialized-table-start-mode) below. |
 | `statement_properties` | See [Statement Properties](#statement-properties). |
 | `tableflow` | See [Tableflow](#tableflow). Checked on every run: create or in-place evolution alike. |
@@ -234,6 +236,7 @@ concept page for the underlying execution model.
 | `statement_name` | See [Deterministic Statement Names](#deterministic-statement-names). The DDL gets a `-ddl` suffix appended to this name. |
 | `compute_pool_id` | See [Compute Pool](#compute-pool). |
 | `statement_properties` | See [Statement Properties](#statement-properties). Applies only to the INSERT statement, not the CREATE TABLE DDL; for the DDL side, use `with` instead. |
+| `watermark` | `{'column': ..., 'expression': ...}`; see [Watermark](#watermark). Changing it requires `--full-refresh`. |
 | `tableflow` | See [Tableflow](#tableflow). |
 
 #### Streaming Table: Schema Drift / Reconciliation Behavior
@@ -414,6 +417,7 @@ concept page for the underlying execution model.
 |---|---|
 | `distributed_by` | See [Distributed By](#distributed-by). |
 | `on_schema_drift` | See [Schema Drift Detection](#schema-drift-detection). |
+| `watermark` | `{'column': ..., 'expression': ...}`; see [Watermark](#watermark). |
 | `statement_name` | See [Deterministic Statement Names](#deterministic-statement-names). |
 | `compute_pool_id` | See [Compute Pool](#compute-pool). |
 | `tableflow` | See [Tableflow](#tableflow). |
@@ -785,7 +789,7 @@ Each per-materialization section links back to the specific subsections below th
 
 Setting a dbt-confluent config key on a materialization that doesn't use it fails the run immediately with a clear error, rather than silently doing nothing. For example, `config(materialized='table', statement_properties={...})` fails at compile time (`statement_properties` is only read by `streaming_table` and `materialized_table`), instead of the value being silently ignored.
 
-This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `language`, `artifact_id`, `artifact_path`, `path`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
+This only ever checks dbt-confluent's own config keys (`with`, `distributed_by`, `connector`, `on_schema_drift`, `statement_name`, `compute_pool_id`, `statement_properties`, `start_mode`, `tableflow`, `watermark`, `language`, `artifact_id`, `artifact_path`, `path`, `connections`, `ignore_unsupported_config`) against the materialization you're using. Any other config key, including your own custom keys read by your own hooks or macros, is never inspected and never affected by this check.
 
 If a key name genuinely collides with one of dbt-confluent's own (an unlikely but possible coincidence), opt it out per model with `ignore_unsupported_config`:
 
@@ -905,7 +909,34 @@ A mapping with various tableflow topic-level configuration settings:
   - If you previously ran your models with only the flink API key configured, you may need to generate a new key for Tableflow.
   - Note that a global API works for the Flink APIs as well, so you do not need to provide both.
 
-### Distributed By
+### Watermark
+
+A watermark declares which column carries a row's event time, and how far behind that time rows may arrive late. Downstream event-time operations (`OVER` aggregations, `MATCH_RECOGNIZE`, `TUMBLE`/`HOP`/`CUMULATE` windows, interval joins) need one on the table they read from. Without it, the only time attribute a dbt-created table has is the default `$rowtime` (the Kafka record timestamp).
+
+The `watermark` config on [`table`](#table), [`streaming_table`](#streaming-table) and [`materialized_table`](#materialized-table) models renders a `WATERMARK FOR` entry into the table's column definitions:
+
+```sql
+{{ config(
+    materialized='materialized_table',
+    contract={'enforced': true},
+    watermark={'column': 'event_ts', 'expression': "`event_ts` - INTERVAL '15' SECOND"},
+) }}
+```
+
+```sql
+CREATE OR ALTER MATERIALIZED TABLE ... (
+  user_id STRING NOT NULL,
+  event_ts TIMESTAMP_LTZ(3) NOT NULL,
+  WATERMARK FOR `event_ts` AS `event_ts` - INTERVAL '15' SECOND
+)
+```
+
+- `column` is quoted for you; `expression` is passed through to Flink as written.
+- The watermark lives in the column definitions. A `streaming_table` must have an [enforced contract](https://docs.getdbt.com/docs/mesh/govern/model-contracts), since its `CREATE TABLE` needs every column declared. A `table` or `materialized_table` doesn't: without a contract, its column block holds only the `WATERMARK FOR` entry and Flink infers the columns from the query. A missing contract or malformed config fails with a compile error before any DDL.
+- On `materialized_table`, a changed watermark is part of the definition `CREATE OR ALTER` reconciles on the next run, and an unchanged one keeps re-runs a no-op.
+- On `table` and `streaming_table`, the watermark is part of the `CREATE TABLE`, and [schema drift detection](#schema-drift-detection) doesn't compare it. To change it, run with `--full-refresh`.
+
+## Distributed By
 
 Confluent Flink lets you control how a table's rows are distributed across Kafka partitions with a `DISTRIBUTED BY HASH(...) INTO N BUCKETS` clause in the `CREATE TABLE` DDL.
 The adapter exposes this through a `distributed_by` config on [`table`](#table), [`streaming_table`](#streaming-table), [`streaming_source`](#streaming-source), and [`materialized_table`](#materialized-table) models:
