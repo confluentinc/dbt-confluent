@@ -169,19 +169,22 @@ class TestAdoptExistingPipeline(ConfluentFixtures):
         )
 
         # Replace dbt's INSERT with one created out of band under the SAME custom
-        # name, so what dbt adopts next is demonstrably not its own. Wait for the
-        # name to free (delete is async) before the raw-cursor re-submit, which
-        # has no 409-retry, then wait until it's RUNNING — a stably-healthy
-        # state (the adapter adopts any non-terminal phase) so dbt skips it.
+        # name, so what dbt adopts next is demonstrably not its own. The planted
+        # statement runs dbt's SQL text (read back from the statement first): the
+        # SQL logic check only lets a statement be adopted if it runs the SQL dbt
+        # would submit, apart from comments and whitespace. Wait for the name to
+        # free (delete is async) before the raw-cursor re-submit, which has no
+        # 409-retry, then wait until it's RUNNING — a stably-healthy state (the
+        # adapter adopts any non-terminal phase) so dbt skips it.
+        planted_sql = self._get_statement(adapter, insert_name).spec["statement"]
         with adapter.connection_named("simulate_external"):
             adapter.delete_statement(insert_name)
         wait_for_absent(adapter, insert_name)
-        source = relation_from_name(adapter, physical_name("my_streaming_source"))
         with adapter.connection_named("plant_external"):
             conn = adapter.connections.get_thread_connection()
             cursor = conn.handle.cursor(mode=ExecutionMode.STREAMING_QUERY)
             cursor.execute(
-                f"INSERT INTO {adopted} SELECT order_id, price FROM {source}",
+                planted_sql,
                 statement_name=insert_name,
                 statement_labels=[label],
             )
