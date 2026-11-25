@@ -1,0 +1,1 @@
+Drop the unused Vault V1 login (`. vault-setup`) from the Semaphore prologue.
